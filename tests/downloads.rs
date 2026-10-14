@@ -1,0 +1,974 @@
+use std::{
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
+
+use axum::{
+    Router,
+    body::Body,
+    extract::State,
+    http::{HeaderMap, StatusCode, header},
+    response::Response,
+    routing::get,
+};
+use bytes::Bytes;
+use tokio::net::TcpListener;
+use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
+use vise::{
+    engine::{Config, Manager},
+    model::Status,
+};
+
+#[derive(Clone, Copy)]
+enum Mode {
+    Ranges,
+    IgnoreRanges,
+    UnknownLength,
+    BadRange,
+    Truncated,
+    Transient,
+    Empty,
+    NotFound,
+    Stalled,
+    NoValidator,
+    TruncatedNoValidator,
+    SlowRanges,
+}
+
+struct Fixture {
+    url: String,
+    state: Arc<ServerState>,
+    stop: CancellationToken,
+    server: tokio::task::JoinHandle<()>,
+}
+struct ServerState {
+    data: Vec<u8>,
+    mode: Mode,
+    fail_once: AtomicBool,
+    version: AtomicUsize,
+    ranges: Mutex<Vec<(usize, usize)>>,
+    active: AtomicUsize,
+    peak: AtomicUsize,
+}
+struct Active(Arc<ServerState>);
+impl Drop for Active {
+    fn drop(&mut self) {
+        self.0.active.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+impl Fixture {
+    async fn start(mode: Mode) -> Self {
+        let state = Arc::new(ServerState {
+            data: (0..8 * 1024 * 1024 + 137)
+                .map(|i| (i % 251) as u8)
+                .collect(),
+            mode,
+            fail_once: AtomicBool::new(true),
+            version: AtomicUsize::new(0),
+            ranges: Mutex::new(vec![]),
+            active: AtomicUsize::new(0),
+            peak: AtomicUsize::new(0),
+        });
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/file.bin", listener.local_addr().unwrap());
+        let router = Router::new()
+            .route("/file.bin", get(serve))
+            .with_state(state.clone());
+        let stop = CancellationToken::new();
+        let token = stop.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router)
+                .with_graceful_shutdown(token.cancelled_owned())
+                .await
+                .unwrap();
+        });
+        Self {
+            url,
+            state,
+            stop,
+            server,
+        }
+    }
+    async fn close(self) {
+        self.stop.cancel();
+        self.server.await.unwrap();
+    }
+}
+
+async fn serve(State(state): State<Arc<ServerState>>, headers: HeaderMap) -> Response {
+    if matches!(state.mode, Mode::NotFound) {
+        return Response::builder().status(404).body(Body::empty()).unwrap();
+    }
+    if matches!(state.mode, Mode::Empty) {
+        return Response::builder()
+            .status(416)
+            .header(header::CONTENT_RANGE, "bytes */0")
+            .body(Body::empty())
+            .unwrap();
+    }
+    let range = headers
+        .get(header::RANGE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("bytes="))
+        .and_then(|v| v.split_once('-'))
+        .map(|(start, end)| {
+            (
+                start.parse::<usize>().unwrap(),
+                end.parse::<usize>().unwrap(),
+            )
+        });
+    let probe = range == Some((0, 0));
+    let honors_range = !matches!(state.mode, Mode::IgnoreRanges | Mode::UnknownLength);
+    let (start, end) = if honors_range {
+        range.unwrap_or((0, state.data.len() - 1))
+    } else {
+        (0, state.data.len() - 1)
+    };
+    if start >= state.data.len() || end >= state.data.len() {
+        return Response::builder().status(416).body(Body::empty()).unwrap();
+    }
+    if matches!(state.mode, Mode::Transient)
+        && !probe
+        && state.fail_once.swap(false, Ordering::SeqCst)
+    {
+        return Response::builder()
+            .status(503)
+            .header(header::RETRY_AFTER, "1")
+            .body(Body::empty())
+            .unwrap();
+    }
+    let mut builder = Response::builder().status(if honors_range && range.is_some() {
+        StatusCode::PARTIAL_CONTENT
+    } else {
+        StatusCode::OK
+    });
+    let version = state.version.load(Ordering::SeqCst);
+    if !matches!(state.mode, Mode::NoValidator | Mode::TruncatedNoValidator) {
+        builder = builder.header(header::ETAG, format!("\"version-{version}\""));
+    }
+    if honors_range && range.is_some() {
+        let wrong = usize::from(matches!(state.mode, Mode::BadRange) && !probe);
+        builder = builder.header(
+            header::CONTENT_RANGE,
+            format!("bytes {}-{end}/{}", start + wrong, state.data.len()),
+        );
+    }
+    if !matches!(state.mode, Mode::UnknownLength) {
+        builder = builder.header(header::CONTENT_LENGTH, end - start + 1);
+    }
+    if probe && honors_range {
+        return builder.body(Body::from(vec![state.data[0]])).unwrap();
+    }
+    state.ranges.lock().unwrap().push((start, end));
+    let active = state.active.fetch_add(1, Ordering::SeqCst) + 1;
+    state.peak.fetch_max(active, Ordering::SeqCst);
+    let guard = Active(state.clone());
+    let truncated = matches!(state.mode, Mode::Truncated | Mode::TruncatedNoValidator)
+        && state.fail_once.swap(false, Ordering::SeqCst);
+    let stream = futures_util::stream::unfold(
+        (start, 0, guard),
+        move |(offset, pieces, guard)| async move {
+            if offset > end {
+                return None;
+            }
+            if matches!(guard.0.mode, Mode::Stalled) {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+            tokio::time::sleep(Duration::from_millis(
+                if matches!(guard.0.mode, Mode::SlowRanges) {
+                    20
+                } else {
+                    6
+                },
+            ))
+            .await;
+            if truncated && pieces == 6 {
+                return Some((
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionReset,
+                        "intentional drop",
+                    )),
+                    (end + 1, pieces, guard),
+                ));
+            }
+            let next = (offset + 64 * 1024).min(end + 1);
+            let bytes: Vec<_> = guard.0.data[offset..next]
+                .iter()
+                .map(|b| b.wrapping_add(version as u8))
+                .collect();
+            Some((Ok(Bytes::from(bytes)), (next, pieces + 1, guard)))
+        },
+    );
+    builder.body(Body::from_stream(stream)).unwrap()
+}
+
+async fn manager(dir: &tempfile::TempDir, connections: usize) -> Manager {
+    Manager::open(Config {
+        output_dir: dir.path().into(),
+        concurrent_downloads: 1,
+        connections_per_download: connections,
+        retries: 2,
+        ..Config::default()
+    })
+    .await
+    .unwrap()
+}
+async fn terminal(manager: &Manager, id: Uuid) -> vise::model::Download {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let item = manager.get(id).await.unwrap();
+            if matches!(item.status, Status::Completed | Status::Failed) {
+                return item;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("download did not terminate")
+}
+async fn progress(manager: &Manager, id: Uuid) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if manager.get(id).await.unwrap().downloaded_bytes >= 256 * 1024 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("download did not make progress");
+}
+
+#[tokio::test]
+async fn parallel_ranges_are_bounded_and_byte_exact() {
+    let fixture = Fixture::start(Mode::Ranges).await;
+    let dir = tempfile::tempdir().unwrap();
+    let manager = manager(&dir, 4).await;
+    let first = manager.add(&fixture.url, None).await.unwrap();
+    let second = manager.add(&fixture.url, None).await.unwrap();
+    assert_ne!(first.filename, second.filename);
+    for id in [first.id, second.id] {
+        let item = terminal(&manager, id).await;
+        assert_eq!(item.status, Status::Completed, "{:?}", item.error);
+        assert_eq!(
+            tokio::fs::read(dir.path().join(item.filename))
+                .await
+                .unwrap(),
+            fixture.state.data
+        );
+    }
+    assert!(fixture.state.peak.load(Ordering::SeqCst) > 1);
+    assert!(fixture.state.peak.load(Ordering::SeqCst) <= 4);
+    manager.shutdown().await.unwrap();
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn pause_resume_survives_process_restart() {
+    let fixture = Fixture::start(Mode::Ranges).await;
+    let dir = tempfile::tempdir().unwrap();
+    let first_manager = manager(&dir, 2).await;
+    let item = first_manager.add(&fixture.url, None).await.unwrap();
+    progress(&first_manager, item.id).await;
+    first_manager.pause(item.id).await.unwrap();
+    let paused = first_manager.get(item.id).await.unwrap();
+    assert_eq!(paused.status, Status::Paused);
+    assert!(paused.downloaded_bytes > 0);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        first_manager.get(item.id).await.unwrap().downloaded_bytes,
+        paused.downloaded_bytes
+    );
+    first_manager.shutdown().await.unwrap();
+    drop(first_manager);
+    let manager = manager(&dir, 2).await;
+    assert_eq!(
+        manager.get(item.id).await.unwrap().downloaded_bytes,
+        paused.downloaded_bytes
+    );
+    let before = fixture.state.ranges.lock().unwrap().len();
+    manager.resume(item.id).await.unwrap();
+    let done = terminal(&manager, item.id).await;
+    assert_eq!(done.status, Status::Completed, "{:?}", done.error);
+    assert_eq!(
+        tokio::fs::read(dir.path().join(done.filename))
+            .await
+            .unwrap(),
+        fixture.state.data
+    );
+    assert!(
+        fixture.state.ranges.lock().unwrap()[before..]
+            .iter()
+            .any(|(start, _)| *start > 0)
+    );
+    manager.shutdown().await.unwrap();
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn changed_validator_restarts_instead_of_splicing_versions() {
+    let fixture = Fixture::start(Mode::Ranges).await;
+    let dir = tempfile::tempdir().unwrap();
+    let manager = manager(&dir, 2).await;
+    let item = manager.add(&fixture.url, None).await.unwrap();
+    progress(&manager, item.id).await;
+    manager.pause(item.id).await.unwrap();
+    fixture.state.version.store(1, Ordering::SeqCst);
+    manager.resume(item.id).await.unwrap();
+    let done = terminal(&manager, item.id).await;
+    assert_eq!(done.status, Status::Completed, "{:?}", done.error);
+    let expected: Vec<_> = fixture
+        .state
+        .data
+        .iter()
+        .map(|b| b.wrapping_add(1))
+        .collect();
+    assert_eq!(
+        tokio::fs::read(dir.path().join(done.filename))
+            .await
+            .unwrap(),
+        expected
+    );
+    manager.shutdown().await.unwrap();
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn retries_dropped_ranges_from_written_offset() {
+    let fixture = Fixture::start(Mode::Truncated).await;
+    let dir = tempfile::tempdir().unwrap();
+    let manager = manager(&dir, 1).await;
+    let item = manager.add(&fixture.url, None).await.unwrap();
+    let done = terminal(&manager, item.id).await;
+    assert_eq!(done.status, Status::Completed, "{:?}", done.error);
+    assert_eq!(
+        tokio::fs::read(dir.path().join(done.filename))
+            .await
+            .unwrap(),
+        fixture.state.data
+    );
+    assert!(
+        fixture
+            .state
+            .ranges
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(start, _)| *start > 0)
+    );
+    manager.shutdown().await.unwrap();
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn handles_ignored_ranges_chunked_streams_transient_errors_and_empty_files() {
+    for mode in [
+        Mode::IgnoreRanges,
+        Mode::UnknownLength,
+        Mode::Transient,
+        Mode::Empty,
+        Mode::NoValidator,
+        Mode::TruncatedNoValidator,
+    ] {
+        let fixture = Fixture::start(mode).await;
+        let dir = tempfile::tempdir().unwrap();
+        let manager = manager(&dir, 4).await;
+        let item = manager.add(&fixture.url, None).await.unwrap();
+        let done = terminal(&manager, item.id).await;
+        assert_eq!(done.status, Status::Completed, "{:?}", done.error);
+        let output = tokio::fs::read(dir.path().join(done.filename))
+            .await
+            .unwrap();
+        if matches!(mode, Mode::Empty) {
+            assert!(output.is_empty());
+        } else {
+            assert_eq!(output, fixture.state.data);
+        }
+        manager.shutdown().await.unwrap();
+        fixture.close().await;
+    }
+}
+
+#[tokio::test]
+async fn permanent_errors_and_invalid_ranges_do_not_publish_output() {
+    for mode in [Mode::NotFound, Mode::BadRange] {
+        let fixture = Fixture::start(mode).await;
+        let dir = tempfile::tempdir().unwrap();
+        let manager = manager(&dir, 2).await;
+        let item = manager.add(&fixture.url, None).await.unwrap();
+        let done = terminal(&manager, item.id).await;
+        assert_eq!(done.status, Status::Failed);
+        assert!(done.error.is_some());
+        assert!(!dir.path().join(done.filename).exists());
+        manager.shutdown().await.unwrap();
+        fixture.close().await;
+    }
+}
+
+#[tokio::test]
+async fn queued_and_stalled_downloads_pause_promptly() {
+    let fixture = Fixture::start(Mode::Stalled).await;
+    let dir = tempfile::tempdir().unwrap();
+    let manager = manager(&dir, 2).await;
+    let first = manager.add(&fixture.url, None).await.unwrap();
+    let second = manager.add(&fixture.url, None).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    tokio::time::timeout(Duration::from_secs(1), manager.pause(second.id))
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(1), manager.pause(first.id))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(manager.get(first.id).await.unwrap().status, Status::Paused);
+    assert_eq!(manager.get(second.id).await.unwrap().status, Status::Paused);
+    manager.shutdown().await.unwrap();
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn refuses_existing_outputs_and_concurrent_managers() {
+    let fixture = Fixture::start(Mode::Ranges).await;
+    let dir = tempfile::tempdir().unwrap();
+    let manager = manager(&dir, 2).await;
+    assert!(
+        Manager::open(Config {
+            output_dir: dir.path().into(),
+            ..Default::default()
+        })
+        .await
+        .is_err()
+    );
+    tokio::fs::write(dir.path().join("keep.bin"), b"original")
+        .await
+        .unwrap();
+    assert!(manager.add(&fixture.url, Some("keep.bin")).await.is_err());
+    let item = manager.add(&fixture.url, Some("raced.bin")).await.unwrap();
+    tokio::fs::write(dir.path().join("raced.bin"), b"external writer")
+        .await
+        .unwrap();
+    let done = terminal(&manager, item.id).await;
+    assert_eq!(done.status, Status::Failed);
+    assert_eq!(
+        tokio::fs::read(dir.path().join("raced.bin")).await.unwrap(),
+        b"external writer"
+    );
+    manager.shutdown().await.unwrap();
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn cli_batch_download_is_successful_and_failure_exits_nonzero() {
+    for (mode, expected) in [(Mode::Ranges, 0), (Mode::NotFound, 1)] {
+        let fixture = Fixture::start(mode).await;
+        let dir = tempfile::tempdir().unwrap();
+        let url = fixture.url.clone();
+        let output_dir = dir.path().to_owned();
+        let output = tokio::task::spawn_blocking(move || {
+            std::process::Command::new(env!("CARGO_BIN_EXE_vise"))
+                .args(["--batch", "--output"])
+                .arg(output_dir)
+                .arg(url)
+                .output()
+                .unwrap()
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(expected),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("MONITOR"));
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("STATUS"));
+        if expected == 0 {
+            assert_eq!(
+                tokio::fs::read(dir.path().join("file.bin")).await.unwrap(),
+                fixture.state.data
+            );
+        }
+        fixture.close().await;
+    }
+}
+
+#[tokio::test]
+async fn web_api_and_websocket_share_the_transfer_engine() {
+    use futures_util::StreamExt;
+    let fixture = Fixture::start(Mode::Ranges).await;
+    let dir = tempfile::tempdir().unwrap();
+    let manager = manager(&dir, 2).await;
+    let socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let bind = socket.local_addr().unwrap();
+    drop(socket);
+    let stop = CancellationToken::new();
+    let web_manager = manager.clone();
+    let token = stop.clone();
+    let server = tokio::spawn(async move {
+        vise::web::run(web_manager, bind, token).await.unwrap();
+    });
+    let client = reqwest::Client::new();
+    let base = format!("http://{bind}");
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if client
+                .get(format!("{base}/api/downloads"))
+                .send()
+                .await
+                .is_ok()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let response = client
+        .post(format!("{base}/api/downloads"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(serde_json::json!({"url":fixture.url}).to_string())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let item: vise::model::Download =
+        serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{bind}/ws"))
+        .await
+        .unwrap();
+    let message = tokio::time::timeout(Duration::from_secs(2), ws.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let snapshot: Vec<vise::model::Download> =
+        serde_json::from_str(message.to_text().unwrap()).unwrap();
+    assert_eq!(snapshot[0].id, item.id);
+    progress(&manager, item.id).await;
+    let paused = client
+        .post(format!("{base}/api/downloads/{}/pause", item.id))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body("{}")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(paused.status(), StatusCode::OK);
+    assert_eq!(manager.get(item.id).await.unwrap().status, Status::Paused);
+    let resumed = client
+        .post(format!("{base}/api/downloads/{}/resume", item.id))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body("{}")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resumed.status(), StatusCode::OK);
+    let done = terminal(&manager, item.id).await;
+    assert_eq!(done.status, Status::Completed, "{:?}", done.error);
+    assert_eq!(
+        tokio::fs::read(dir.path().join(&done.filename))
+            .await
+            .unwrap(),
+        fixture.state.data
+    );
+    let deleted = client
+        .delete(format!("{base}/api/downloads/{}", item.id))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body("{}")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+    assert!(manager.list().await.is_empty());
+    assert!(dir.path().join(&done.filename).exists());
+    assert_eq!(
+        client
+            .get(format!("{base}/api/downloads/{}", item.id))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    ws.close(None).await.unwrap();
+    stop.cancel();
+    tokio::time::timeout(Duration::from_secs(2), server)
+        .await
+        .unwrap()
+        .unwrap();
+    manager.shutdown().await.unwrap();
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn stalled_reads_exhaust_a_bounded_retry_budget() {
+    let fixture = Fixture::start(Mode::Stalled).await;
+    let dir = tempfile::tempdir().unwrap();
+    let manager = Manager::open(Config {
+        output_dir: dir.path().into(),
+        concurrent_downloads: 1,
+        connections_per_download: 1,
+        retries: 1,
+        read_timeout: Duration::from_millis(100),
+    })
+    .await
+    .unwrap();
+    let item = manager.add(&fixture.url, None).await.unwrap();
+    let done = terminal(&manager, item.id).await;
+    assert_eq!(done.status, Status::Failed);
+    assert_eq!(fixture.state.ranges.lock().unwrap().len(), 2);
+    manager.shutdown().await.unwrap();
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn missing_completed_file_is_redownloaded_without_reusing_stale_offsets() {
+    let fixture = Fixture::start(Mode::Ranges).await;
+    let dir = tempfile::tempdir().unwrap();
+    let original = manager(&dir, 2).await;
+    let item = original.add(&fixture.url, None).await.unwrap();
+    let done = terminal(&original, item.id).await;
+    assert_eq!(done.status, Status::Completed);
+    original.shutdown().await.unwrap();
+    drop(original);
+    tokio::fs::remove_file(dir.path().join(&done.filename))
+        .await
+        .unwrap();
+    let manager = manager(&dir, 2).await;
+    assert_eq!(manager.get(item.id).await.unwrap().status, Status::Failed);
+    manager.resume(item.id).await.unwrap();
+    let done = terminal(&manager, item.id).await;
+    assert_eq!(done.status, Status::Completed, "{:?}", done.error);
+    assert_eq!(
+        tokio::fs::read(dir.path().join(done.filename))
+            .await
+            .unwrap(),
+        fixture.state.data
+    );
+    manager.shutdown().await.unwrap();
+    fixture.close().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn interactive_sigterm_exits_without_waiting_for_stdin() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut process = std::process::Command::new(env!("CARGO_BIN_EXE_vise"))
+        .arg("--interactive")
+        .arg("--output")
+        .arg(dir.path())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !dir.path().join(".vise/state.json").exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let status = std::process::Command::new("kill")
+        .args(["-TERM", &process.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let exited = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if let Some(status) = process.try_wait().unwrap() {
+                return status;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    if exited.is_err() {
+        process.kill().unwrap();
+        process.wait().unwrap();
+    }
+    assert_eq!(exited.unwrap().code(), Some(130));
+}
+
+#[tokio::test]
+async fn abrupt_process_death_restores_durable_offsets_and_finishes_exactly() {
+    let fixture = Fixture::start(Mode::SlowRanges).await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut process = std::process::Command::new(env!("CARGO_BIN_EXE_vise"))
+        .args(["--batch", "--connections", "1", "--output"])
+        .arg(dir.path())
+        .arg(&fixture.url)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let saved = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Ok(bytes) = tokio::fs::read(dir.path().join(".vise/state.json")).await {
+                let journal: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                if let Some(item) = journal["downloads"]
+                    .as_array()
+                    .and_then(|items| items.first())
+                {
+                    let written: u64 = item["chunks"]
+                        .as_array()
+                        .map(|chunks| {
+                            chunks
+                                .iter()
+                                .map(|chunk| chunk["written"].as_u64().unwrap())
+                                .sum()
+                        })
+                        .unwrap_or(0);
+                    if written > 0 && written < fixture.state.data.len() as u64 {
+                        return (
+                            item["id"].as_str().unwrap().parse::<Uuid>().unwrap(),
+                            written,
+                        );
+                    }
+                }
+            }
+            if process.try_wait().unwrap().is_some() {
+                panic!("child exited before a progress checkpoint");
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await;
+    process.kill().unwrap();
+    process.wait().unwrap();
+    let (id, written) = saved.unwrap();
+    let manager = manager(&dir, 1).await;
+    let recovered = manager.get(id).await.unwrap();
+    assert_eq!(recovered.status, Status::Paused);
+    assert!(recovered.downloaded_bytes >= written);
+    manager.resume(id).await.unwrap();
+    let done = terminal(&manager, id).await;
+    assert_eq!(done.status, Status::Completed, "{:?}", done.error);
+    assert_eq!(
+        tokio::fs::read(dir.path().join(done.filename))
+            .await
+            .unwrap(),
+        fixture.state.data
+    );
+    manager.shutdown().await.unwrap();
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn lifecycle_events_are_ordered_and_deletion_is_durable() {
+    use vise::events::EventKind;
+    let fixture = Fixture::start(Mode::SlowRanges).await;
+    let dir = tempfile::tempdir().unwrap();
+    let manager = manager(&dir, 2).await;
+    let mut events = manager.subscribe_events();
+    let item = manager.add(&fixture.url, None).await.unwrap();
+    assert_eq!(events.recv().await.unwrap().kind, EventKind::Added);
+    progress(&manager, item.id).await;
+    manager.pause(item.id).await.unwrap();
+    manager.resume(item.id).await.unwrap();
+    let done = terminal(&manager, item.id).await;
+    assert_eq!(done.status, Status::Completed);
+    manager.delete(item.id).await.unwrap();
+    let mut kinds = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        kinds.push(event.kind);
+    }
+    for kind in [
+        EventKind::PauseRequested,
+        EventKind::Paused,
+        EventKind::Resumed,
+        EventKind::Completed,
+        EventKind::DeleteRequested,
+        EventKind::Deleted,
+    ] {
+        assert!(kinds.contains(&kind), "missing {kind:?}: {kinds:?}");
+    }
+    let completed = kinds
+        .iter()
+        .position(|kind| *kind == EventKind::Completed)
+        .unwrap();
+    let deleted = kinds
+        .iter()
+        .position(|kind| *kind == EventKind::Deleted)
+        .unwrap();
+    assert!(completed < deleted);
+    assert!(dir.path().join(&done.filename).exists());
+    let active = manager.add(&fixture.url, None).await.unwrap();
+    progress(&manager, active.id).await;
+    manager.pause(active.id).await.unwrap();
+    let (resumed, removed) = tokio::join!(manager.resume(active.id), manager.delete(active.id));
+    assert!(resumed.is_ok() || matches!(resumed, Err(vise::error::Error::NotFound(_))));
+    removed.unwrap();
+    assert!(manager.list().await.is_empty());
+    assert!(
+        !dir.path()
+            .join(".vise")
+            .join(format!("{}.part", active.id))
+            .exists()
+    );
+    assert!(!dir.path().join(&active.filename).exists());
+    manager.shutdown().await.unwrap();
+    drop(manager);
+    let manager = self::manager(&dir, 2).await;
+    assert!(manager.list().await.is_empty());
+    assert!(dir.path().join(done.filename).exists());
+    manager.shutdown().await.unwrap();
+    fixture.close().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn webui_binary_logs_actions_progress_and_shutdown_to_stdout() {
+    let fixture = Fixture::start(Mode::SlowRanges).await;
+    let dir = tempfile::tempdir().unwrap();
+    let socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let bind = socket.local_addr().unwrap();
+    drop(socket);
+    let mut process = std::process::Command::new(env!("CARGO_BIN_EXE_vise"))
+        .args(["--webui", "--bind"])
+        .arg(bind.to_string())
+        .args(["--connections", "1", "--output"])
+        .arg(dir.path())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    // Drain the OS pipe on a dedicated thread so the child never blocks on logs.
+    let stdout = process.stdout.take().unwrap();
+    let (sender, mut logs) = tokio::sync::mpsc::unbounded_channel();
+    let reader = std::thread::spawn(move || {
+        use std::io::BufRead;
+        for line in std::io::BufReader::new(stdout).lines() {
+            if sender.send(line.unwrap()).is_err() {
+                break;
+            }
+        }
+    });
+    let mut captured = Vec::new();
+    async fn wait_for(
+        logs: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
+        captured: &mut Vec<String>,
+        label: &str,
+    ) {
+        tokio::time::timeout(Duration::from_secs(6), async {
+            loop {
+                let line = logs.recv().await.expect("monitor output closed");
+                let found = line.contains(&format!("] {label}"));
+                captured.push(line);
+                if found {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("missing {label}: {captured:?}"));
+    }
+    // Keep a kill guard so a failing assertion cannot leave a test server running.
+    struct ChildGuard(std::process::Child);
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut child = ChildGuard(process);
+    wait_for(&mut logs, &mut captured, "READY").await;
+    let base = format!("http://{bind}");
+    let client = reqwest::Client::new();
+    let added = client
+        .post(format!("{base}/api/downloads"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(serde_json::json!({"url":fixture.url}).to_string())
+        .send()
+        .await
+        .unwrap();
+    let item: vise::model::Download =
+        serde_json::from_slice(&added.bytes().await.unwrap()).unwrap();
+    wait_for(&mut logs, &mut captured, "ADDED").await;
+    wait_for(&mut logs, &mut captured, "STATUS").await;
+    let status_line = captured.last().unwrap();
+    assert!(
+        status_line.contains('%')
+            && status_line.contains("/s")
+            && status_line.contains("downloading")
+    );
+    assert!(
+        status_line.starts_with('[') && status_line.contains('T') && status_line.contains("Z]")
+    );
+    for (action, label) in [("pause", "PAUSED"), ("resume", "RESUMED")] {
+        let response = client
+            .post(format!("{base}/api/downloads/{}/{action}", item.id))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body("{}")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        wait_for(&mut logs, &mut captured, label).await;
+    }
+    wait_for(&mut logs, &mut captured, "DONE").await;
+    let deleted = client
+        .delete(format!("{base}/api/downloads/{}", item.id))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body("{}")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+    wait_for(&mut logs, &mut captured, "DELETED").await;
+    assert!(
+        std::process::Command::new("kill")
+            .args(["-TERM", &child.0.id().to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    wait_for(&mut logs, &mut captured, "STOPPED").await;
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if let Some(status) = child.0.try_wait().unwrap() {
+                assert_eq!(status.code(), Some(130));
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    reader.join().unwrap();
+    assert!(dir.path().join(&item.filename).exists());
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn shutdown_waits_for_all_workers_even_when_checkpointing_fails() {
+    let fixture = Fixture::start(Mode::SlowRanges).await;
+    let dir = tempfile::tempdir().unwrap();
+    let manager = manager(&dir, 1).await;
+    let active = manager.add(&fixture.url, None).await.unwrap();
+    let queued = manager.add(&fixture.url, None).await.unwrap();
+    progress(&manager, active.id).await;
+    // A directory at the temporary journal path forces a real filesystem error.
+    let blocked = dir.path().join(".vise/state.json.tmp");
+    tokio::fs::create_dir(&blocked).await.unwrap();
+    assert!(manager.shutdown().await.is_err());
+    let snapshot = manager.get(active.id).await.unwrap();
+    assert_eq!(snapshot.status, Status::Paused);
+    assert_eq!(manager.get(queued.id).await.unwrap().status, Status::Paused);
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    assert_eq!(
+        manager.get(active.id).await.unwrap().downloaded_bytes,
+        snapshot.downloaded_bytes
+    );
+    tokio::fs::remove_dir(blocked).await.unwrap();
+    manager.shutdown().await.unwrap();
+    fixture.close().await;
+}

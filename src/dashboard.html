@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Vise · Downloads</title>
+  <style>
+    :root{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#e9edf6;background:#0b1019;font-synthesis:none}
+    *{box-sizing:border-box}body{margin:0}main{max-width:1100px;margin:0 auto;padding:48px 24px}header{display:flex;justify-content:space-between;align-items:center;gap:24px;margin-bottom:38px}
+    .brand{display:flex;align-items:center;gap:14px}.mark{display:grid;place-items:center;background:#a6f27b;color:#13230d;width:48px;height:48px;border-radius:14px;font-size:26px;font-weight:900}
+    h1{font-size:30px;letter-spacing:-1px;margin:0}p{color:#93a1b7;margin:6px 0;font-size:14px}.connection{font-size:12px;background:#192436;border:1px solid #29394d;border-radius:30px;padding:8px 12px;white-space:nowrap}
+    .connection.live{color:#a6f27b}.summary{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:28px}.stat{padding:22px;background:#121c2a;border:1px solid #223044;border-radius:14px}.stat small{display:block;color:#93a1b7;margin-bottom:8px}.stat strong{font-size:27px;font-weight:600}
+    form{display:grid;grid-template-columns:1fr 220px auto;gap:10px;background:#121c2a;padding:18px;border:1px solid #223044;border-radius:14px;margin-bottom:12px}label{font-size:12px;color:#a7b4c7;display:block}input{display:block;width:100%;background:#0b1320;color:#edf3ff;border:1px solid #314056;border-radius:8px;padding:12px;margin-top:6px;font:inherit}
+    input:focus-visible,button:focus-visible{outline:2px solid #a6f27b;outline-offset:3px}button{font:inherit;cursor:pointer;border:1px solid #34445b;border-radius:8px;padding:10px 16px;background:#1c2a3d;color:#e9edf6;white-space:nowrap}form button{background:#a6f27b;color:#14200d;border:0;font-weight:650;align-self:end;min-height:45px}button:hover{filter:brightness(1.12)}button:disabled{cursor:wait;opacity:.5}
+    #notice{min-height:26px;font-size:14px;color:#ffab96;overflow-wrap:anywhere}.section-title{display:flex;justify-content:space-between;align-items:center;margin:22px 0 16px}h2{font-size:16px;font-weight:600;margin:0}#count{color:#93a1b7;font-size:12px}
+    .download{background:#121c2a;border:1px solid #223044;border-radius:14px;padding:22px;margin-bottom:12px}.topline{display:flex;justify-content:space-between;align-items:start;gap:18px}.filename{font-size:16px;font-weight:600;overflow-wrap:anywhere}.url{color:#8798b0;font-size:12px;overflow-wrap:anywhere;margin-top:7px}.badge{color:#a8c2e7;background:#1b2b43;font-size:11px;padding:5px 9px;border-radius:6px;white-space:nowrap;text-transform:capitalize}.badge.completed{color:#a6f27b;background:#213224}.badge.failed{color:#ffab96;background:#392522}
+    progress{appearance:none;display:block;width:100%;height:6px;border:0;border-radius:8px;overflow:hidden;background:#253247;margin:22px 0 12px}progress::-webkit-progress-bar{background:#253247}progress::-webkit-progress-value{background:#a6f27b}progress::-moz-progress-bar{background:#a6f27b}.bottomline{display:flex;justify-content:space-between;align-items:center;gap:14px}.metrics{display:flex;gap:18px;color:#a7b4c7;font-size:12px;flex-wrap:wrap}.actions{display:flex;gap:8px}.actions button{font-size:12px;padding:7px 12px}.error{color:#ffab96;font-size:13px;margin-top:12px;overflow-wrap:anywhere}
+    .empty{text-align:center;padding:64px 20px;border:1px dashed #314056;border-radius:14px;color:#93a1b7}footer{color:#6e7e95;font-size:12px;margin-top:30px}a{color:#a6f27b}@media(max-width:750px){main{padding:28px 16px}form{grid-template-columns:1fr}header{gap:12px}.summary{gap:8px}.stat{padding:15px}.stat strong{font-size:21px}.bottomline{align-items:start;flex-direction:column}.metrics{gap:12px}.connection{font-size:10px;padding:7px}}
+  </style>
+</head>
+<body>
+<main>
+  <header><div class="brand"><div class="mark" aria-hidden="true">V</div><div><h1>Vise</h1><p>A firm grip on every download.</p></div></div><span id="connection" class="connection" role="status">Connecting…</span></header>
+  <section class="summary" aria-label="Download summary"><div class="stat"><small>Active downloads</small><strong id="active">0</strong></div><div class="stat"><small>Transfer speed</small><strong id="speed">0 B/s</strong></div><div class="stat"><small>Completed</small><strong id="complete">0</strong></div></section>
+  <form id="add-form"><label>Download URL<input id="url" name="url" type="url" placeholder="https://example.com/file.zip" required maxlength="8192"></label><label>Filename · optional<input id="filename" name="filename" placeholder="Use URL filename" maxlength="200"></label><button id="add-button" type="submit">Add download</button></form>
+  <div id="notice" role="alert"></div>
+  <div class="section-title"><h2>Downloads</h2><span id="count">0 items</span></div>
+  <section id="downloads" aria-label="Downloads"><div class="empty">Your queue is ready. Add a URL to get started.</div></section>
+  <footer>Vise · Local dashboard · Transfer state is saved automatically. Live events and telemetry appear in the server terminal. Ctrl+C pauses unfinished downloads.</footer>
+</main>
+<script>
+  'use strict';
+  const $=id=>document.getElementById(id),cards=new Map();
+  function bytes(n){if(!Number.isFinite(n))return '—';const units=['B','KiB','MiB','GiB','TiB'];let i=0;while(n>=1024&&i<units.length-1){n/=1024;i++}return `${n.toFixed(i?1:0)} ${units[i]}`}
+  function eta(n){if(n==null)return '—';n=Math.ceil(n);return n<60?`${n}s`:n<3600?`${Math.floor(n/60)}m ${n%60}s`:`${Math.floor(n/3600)}h ${Math.floor(n%3600/60)}m`}
+  function node(tag,className,text){const n=document.createElement(tag);if(className)n.className=className;if(text!=null)n.textContent=text;return n}
+  async function api(path,body,method){const response=await fetch(path,{method:method||(body===undefined?'GET':'POST'),headers:body===undefined?{}:{'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});const text=await response.text();let data=null;if(text){try{data=JSON.parse(text)}catch(e){throw Error(text)}}if(!response.ok)throw Error(data?.error||data?.message||`Request failed (${response.status})`);return data}
+  function control(d,action,label,method='POST'){const button=node('button',null,label);button.type='button';if(method==='DELETE')button.title='Remove this task and discard partial data. Completed files are kept.';button.addEventListener('click',async()=>{button.disabled=true;$('notice').textContent='';try{await api(`/api/downloads/${d.id}${method==='DELETE'?'':'/'+action}`,{},method);render(await api('/api/downloads'))}catch(e){$('notice').textContent=e.message}finally{button.disabled=false}});return button}
+  function card(d){const root=node('article','download'),top=node('div','topline'),title=node('div'),name=node('div','filename'),url=node('div','url'),badge=node('span','badge'),bar=node('progress'),bottom=node('div','bottomline'),metrics=node('div','metrics'),size=node('span'),speed=node('span'),time=node('span'),actions=node('div','actions'),error=node('div','error');
+    title.append(name,url);top.append(title,badge);metrics.append(size,speed,time);bottom.append(metrics,actions);root.append(top,bar,bottom,error);bar.max=100;bar.setAttribute('aria-label','Download progress');return {root,name,url,badge,bar,size,speed,time,actions,error,state:null}}
+  function render(downloads){$('active').textContent=downloads.filter(d=>['queued','probing','downloading'].includes(d.status)).length;$('speed').textContent=bytes(downloads.reduce((n,d)=>n+d.bytes_per_second,0))+'/s';$('complete').textContent=downloads.filter(d=>d.status==='completed').length;$('count').textContent=`${downloads.length} item${downloads.length===1?'':'s'}`;
+    const live=new Set(downloads.map(d=>d.id));for(const [id,c]of cards)if(!live.has(id)){c.root.remove();cards.delete(id)}
+    if(downloads.length&&$('downloads').querySelector('.empty'))$('downloads').replaceChildren();
+    for(const d of downloads){let c=cards.get(d.id);if(!c){c=card(d);cards.set(d.id,c);$('downloads').append(c.root)}c.name.textContent=d.filename;c.url.textContent=d.url;c.badge.textContent=d.status;c.badge.className='badge '+d.status;c.size.textContent=bytes(d.downloaded_bytes)+' / '+(d.total_bytes==null?'unknown':bytes(d.total_bytes));c.speed.textContent=bytes(d.bytes_per_second)+'/s';c.time.textContent='ETA '+eta(d.eta_seconds);c.error.textContent=d.error||'';c.error.hidden=!d.error;
+      if(d.total_bytes!=null)c.bar.value=d.total_bytes===0?(d.status==='completed'?100:0):Math.min(100,d.downloaded_bytes/d.total_bytes*100);else c.bar.removeAttribute('value');
+      if(c.state!==d.status){c.actions.replaceChildren();if(d.status!=='completed'){const action=['queued','probing','downloading'].includes(d.status)?'pause':'resume';c.actions.append(control(d,action,action==='pause'?'Pause':d.status==='failed'?'Retry':'Resume'))}c.actions.append(control(d,'delete','Delete','DELETE'));c.state=d.status}
+    }if(!downloads.length&&!$('downloads').querySelector('.empty'))$('downloads').append(node('div','empty','Your queue is ready. Add a URL to get started.'))}
+  $('add-form').addEventListener('submit',async event=>{event.preventDefault();const button=$('add-button');button.disabled=true;$('notice').textContent='';try{await api('/api/downloads',{url:$('url').value.trim(),filename:$('filename').value.trim()||null});$('add-form').reset();render(await api('/api/downloads'));$('url').focus()}catch(e){$('notice').textContent=e.message}finally{button.disabled=false}});
+  let retry=500,socket,polling=false;
+  async function poll(){if(socket&&socket.readyState===WebSocket.OPEN||polling)return;polling=true;try{render(await api('/api/downloads'))}catch(e){$('notice').textContent=e.message}finally{polling=false}}
+  function connect(){socket=new WebSocket(`${location.protocol==='https:'?'wss':'ws'}://${location.host}/ws`);socket.onopen=()=>{retry=500;$('connection').textContent='Connected';$('connection').classList.add('live');$('notice').textContent=''};socket.onmessage=event=>{try{render(JSON.parse(event.data))}catch(e){$('notice').textContent='Invalid update from server'}};socket.onclose=()=>{$('connection').textContent='Reconnecting…';$('connection').classList.remove('live');poll();setTimeout(connect,retry);retry=Math.min(retry*2,10000)};socket.onerror=()=>socket.close()}
+  poll();connect();setInterval(poll,3000);
+</script>
+</body>
+</html>
