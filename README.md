@@ -1,4 +1,6 @@
-![Vise](docs/logo.png)
+<p align="center">
+  <img src="docs/logo.png" alt="Vise logo: a download arrow held by vise jaws" width="180">
+</p>
 
 # Vise
 
