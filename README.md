@@ -1,3 +1,5 @@
+![Vise](docs/logo.png)
+
 # Vise
 
 **A firm grip on every download.**
@@ -164,7 +166,6 @@ WebUI mode uses the same download engine and worker pool as the CLI, and replace
 
 ![Vise WebUI](docs/webui-demo.png)
 
-*Screenshot placeholders: add your captures at `docs/cli-demo.png` and `docs/webui-demo.png` before publishing.*
 
 ## Options at a glance
 
