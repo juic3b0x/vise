@@ -16,7 +16,7 @@ Vise is a high-performance HTTP(S) download manager built in Rust. Multi-threade
 - **Resilient downloads:** Retry dropped connections and transient HTTP failures with bounded backoff.
 - **Live bandwidth control:** Share one token-bucket speed limit across all downloads and change it from the interactive CLI or WebUI without reconnecting.
 - **CLI first:** Download from arguments or manage an interactive queue. The web server starts only with `--webui`.
-- **Embedded WebUI:** Add URLs, monitor transfers, pause or resume tasks, and delete queue entries through a local dashboard with live WebSocket updates.
+- **Embedded WebUI:** An industrial dark console with live speed graphs, actual chunk-progress grids, queue filters, and controls that update without reloading.
 - **Live terminal monitor:** In WebUI mode, follow timestamped events and one-second transfer summaries on stdout while the browser controls downloads.
 - **Careful file handling:** Validate range responses, save durable checkpoints, and refuse to overwrite existing output files.
 
@@ -171,9 +171,11 @@ vise --webui --bind 127.0.0.1:8080
 
 Open **[http://127.0.0.1:8080](http://127.0.0.1:8080)** in your browser. Use the exact numeric loopback address printed by Vise.
 
-The dashboard lets you add URLs, inspect progress and transfer speed, and pause, resume, retry, or delete individual downloads. Delete removes the queue entry and partial data; completed output files are kept. It is served directly from the executable: no Node.js, frontend build, external assets, or separate server is required.
+The dashboard provides a rolling 60-second throughput graph, per-transfer sparklines, and live chunk grids showing active, completed, pending, paused, and failed segments. Filter the queue by state or search filenames and URLs. Add transfers and pause, resume, retry, or cancel them without reloading. Cancel discards partial data; Remove clears a completed queue entry while keeping its output file. The dashboard is served directly from the executable: no Node.js, frontend build, external fonts, CDN, or separate server is required.
 
-Use **Global bandwidth limit** and **Apply limit** to change the cap during a transfer. Enter values such as `500K`, `5M`, or `off`. The dashboard displays the current setting and refreshes it across browser tabs. Applied changes also appear in the WebUI terminal monitor.
+Use the **Bandwidth** slider, presets, or **Global bandwidth limit** input to change the cap during a transfer. Enter values such as `500K`, `5M`, or `off`, then select **Apply** or press Enter. The logarithmic slider spans 16 KiB/s–1 GiB/s, with unlimited at its left edge, and applies on release. The text input accepts the full rate range, including values outside the slider's range. The current setting streams to every open dashboard and is saved in the journal. Applied changes also appear in the WebUI terminal monitor.
+
+The WebSocket reconnects automatically; HTTP polling keeps the dashboard usable if the socket drops. Stale readings are marked, and the graphs leave gaps when telemetry is unavailable. Graph history and the recent activity feed belong to the current browser session; download state remains persistent.
 
 You can also seed the queue or restore saved tasks at startup:
 
@@ -192,7 +194,7 @@ WebUI mode uses the same download engine and worker pool as the CLI, and replace
 
 ### WebUI
 
-![Vise WebUI](docs/webui-demo.png)
+![Vise WebUI: live speed graphs, chunk progress, and bandwidth controls](docs/webui-industrial.jpg)
 
 
 ## Options at a glance

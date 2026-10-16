@@ -12,7 +12,7 @@ use axum::{
     routing::{get, post},
 };
 use futures_util::SinkExt;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -56,6 +56,9 @@ pub async fn run(
 fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(index))
+        .route("/assets/dashboard.css", get(stylesheet))
+        .route("/assets/dashboard.js", get(javascript))
+        .route("/api/telemetry", get(telemetry))
         .route("/api/config", get(configuration).post(set_configuration))
         .route("/api/downloads", get(list).post(add))
         .route("/api/downloads/{id}", get(detail).delete(delete))
@@ -63,6 +66,7 @@ fn router(state: AppState) -> Router {
         .route("/api/downloads/{id}/resume", post(resume))
         .route("/api/downloads/{id}/retry", post(resume))
         .route("/ws", get(websocket))
+        .route("/ws/telemetry", get(telemetry_websocket))
         .layer(DefaultBodyLimit::max(16 * 1024))
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -124,7 +128,7 @@ async fn local_requests(
         "x-content-type-options",
         "nosniff".parse().expect("static header"),
     );
-    response.headers_mut().insert("content-security-policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'".parse().expect("static header"));
+    response.headers_mut().insert("content-security-policy", "default-src 'none'; script-src 'self'; style-src 'self'; style-src-attr 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'".parse().expect("static header"));
     response
 }
 fn rejection(message: &str) -> Response {
@@ -137,6 +141,37 @@ fn rejection(message: &str) -> Response {
 
 async fn index() -> Html<&'static str> {
     Html(include_str!("dashboard.html"))
+}
+async fn stylesheet() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+        include_str!("dashboard.css"),
+    )
+}
+async fn javascript() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        include_str!("dashboard.js"),
+    )
+}
+
+#[derive(Serialize)]
+struct TelemetrySnapshot {
+    timestamp: i64,
+    downloads: Vec<Download>,
+    configuration: RateConfiguration,
+}
+impl TelemetrySnapshot {
+    async fn capture(manager: &Manager) -> Self {
+        Self {
+            timestamp: crate::model::timestamp_millis(),
+            downloads: manager.list().await,
+            configuration: manager.rate_configuration(),
+        }
+    }
+}
+async fn telemetry(State(state): State<AppState>) -> Json<TelemetrySnapshot> {
+    Json(TelemetrySnapshot::capture(&state.manager).await)
 }
 async fn list(State(state): State<AppState>) -> Json<Vec<Download>> {
     Json(state.manager.list().await)
@@ -236,15 +271,27 @@ async fn websocket(State(state): State<AppState>, upgrade: WebSocketUpgrade) -> 
     upgrade
         .max_message_size(16 * 1024)
         .max_frame_size(16 * 1024)
-        .on_upgrade(move |socket| stream(socket, state))
+        .on_upgrade(move |socket| stream(socket, state, false))
         .into_response()
 }
-async fn stream(mut socket: WebSocket, state: AppState) {
+async fn telemetry_websocket(State(state): State<AppState>, upgrade: WebSocketUpgrade) -> Response {
+    upgrade
+        .max_message_size(16 * 1024)
+        .max_frame_size(16 * 1024)
+        .on_upgrade(move |socket| stream(socket, state, true))
+        .into_response()
+}
+async fn stream(mut socket: WebSocket, state: AppState, with_configuration: bool) {
     let mut events = state.manager.subscribe();
     let mut interval = tokio::time::interval(Duration::from_millis(500));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
-        let Ok(json) = serde_json::to_string(&state.manager.list().await) else {
+        let payload = if with_configuration {
+            serde_json::to_string(&TelemetrySnapshot::capture(&state.manager).await)
+        } else {
+            serde_json::to_string(&state.manager.list().await)
+        };
+        let Ok(json) = payload else {
             break;
         };
         let sent = tokio::select! {
@@ -299,6 +346,64 @@ mod tests {
     use super::*;
     use axum::{body::Body, http::Request};
     use tower::ServiceExt;
+    #[tokio::test]
+    async fn embedded_assets_have_explicit_types_and_a_script_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = Manager::open(crate::engine::Config {
+            output_dir: dir.path().into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let app = router(AppState {
+            manager: manager.clone(),
+            authority: "127.0.0.1:8080".into(),
+            stop: CancellationToken::new(),
+        });
+        for (path, content_type) in [
+            ("/", "text/html; charset=utf-8"),
+            ("/assets/dashboard.css", "text/css; charset=utf-8"),
+            ("/assets/dashboard.js", "text/javascript; charset=utf-8"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(path)
+                        .header("host", "127.0.0.1:8080")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.headers()[header::CONTENT_TYPE], content_type);
+            assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+            let policy = response.headers()["content-security-policy"]
+                .to_str()
+                .unwrap();
+            assert!(policy.contains("script-src 'self';"));
+            assert!(!policy.contains("script-src 'self' 'unsafe-inline'"));
+            assert!(
+                !axum::body::to_bytes(response.into_body(), 64 * 1024)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/assets/missing.js")
+                    .header("host", "127.0.0.1:8080")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        manager.shutdown().await.unwrap();
+    }
     #[tokio::test]
     async fn rejects_rebinding_and_cross_origin_mutations() {
         let dir = tempfile::tempdir().unwrap();

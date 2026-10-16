@@ -327,6 +327,7 @@ mod tests {
             eta_seconds: None,
             error: None,
             created_at: 0,
+            chunks: Vec::new(),
         };
         let event = Event {
             timestamp: SystemTime::UNIX_EPOCH,

@@ -8,6 +8,7 @@ Vise uses one shared download manager for its CLI and WebUI.
 | Method | Endpoint | Result |
 | --- | --- | --- |
 | GET | `/api/downloads` | Array of all saved and active downloads |
+| GET | `/api/telemetry` | Timestamped download snapshots and global configuration for HTTP fallback |
 | GET | `/api/config` | Global bandwidth configuration |
 | POST | `/api/config` | Apply and persist `{"limit_rate":"5M"}`; use `off` to clear |
 | POST | `/api/downloads` | Add `{"url":"https://…","filename":"optional.zip"}`; HTTP 201 |
@@ -17,6 +18,9 @@ Vise uses one shared download manager for its CLI and WebUI.
 | POST | `/api/downloads/{uuid}/resume` | Queue a paused/failed download |
 | POST | `/api/downloads/{uuid}/retry` | Alias for resume |
 | WS | `/ws` | Full JSON download snapshots on change and at least every 500 ms |
+| WS | `/ws/telemetry` | `{timestamp, downloads, configuration}` on change and at least every 500 ms |
+| GET | `/assets/dashboard.css` | Embedded stylesheet, `text/css` |
+| GET | `/assets/dashboard.js` | Embedded controller, `text/javascript` |
 
 Mutation requests require `Content-Type: application/json`; send `{}` for pause/resume/retry/delete. URLs must be HTTP(S), without embedded credentials. Explicit filenames must be plain filenames, never paths. Requests are limited to 16 KiB.
 
@@ -29,9 +33,9 @@ curl -X POST -H 'Content-Type: application/json' -d '{}' \
   http://127.0.0.1:8080/api/downloads/REPLACE_WITH_RETURNED_UUID/pause
 ```
 
-Download snapshots contain `id`, `url`, `filename`, `status`, `total_bytes` (nullable), `downloaded_bytes`, `bytes_per_second`, `eta_seconds` (nullable), `error` (nullable), and `created_at` (UTC Unix epoch milliseconds). States are `queued`, `probing`, `downloading`, `paused`, `completed`, and `failed`. Engine errors use an `error` JSON field and HTTP 400, 404, 409, or 500.
+Download snapshots contain `id`, `url`, `filename`, `status`, `total_bytes` (nullable), `downloaded_bytes`, `bytes_per_second`, `eta_seconds` (nullable), `error` (nullable), `created_at` (UTC Unix epoch milliseconds), and `chunks`. Each chunk exposes `index` (zero-based), `start_byte`, `end_byte` (exclusive, nullable for unknown-length streams), `downloaded_bytes`, and `status`. These come directly from the worker record under its read lock; the frontend never estimates individual segment progress from the aggregate percentage. Download states are `queued`, `probing`, `downloading`, `paused`, `completed`, and `failed`; chunk states omit `probing`. Older serialized download snapshots without `chunks` deserialize to an empty array. Engine errors use an `error` JSON field and HTTP 400, 404, 409, or 500.
 
-Both configuration endpoints return `{"limit_rate":"5 MiB/s","limit_bytes_per_second":5242880}` for a `5M` cap. Unlimited is represented by `{"limit_rate":"unlimited","limit_bytes_per_second":null}`. The POST body requires a string and rejects unknown fields. Invalid rates return HTTP 400 without changing the previous setting; failed journal commits return HTTP 500 and preserve the live setting. The dashboard polls configuration every two seconds; the WebSocket retains its existing download-array format.
+Both configuration endpoints return `{"limit_rate":"5 MiB/s","limit_bytes_per_second":5242880}` for a `5M` cap. Unlimited is represented by `{"limit_rate":"unlimited","limit_bytes_per_second":null}`. The POST body requires a string and rejects unknown fields. Invalid rates return HTTP 400 without changing the previous setting; failed journal commits return HTTP 500 and preserve the live setting. The dashboard uses `/ws/telemetry` to receive downloads and configuration together. `/ws` retains its download-array format for existing clients; its snapshots gain the additive `chunks` field.
 
 ```sh
 curl -H 'Content-Type: application/json' -d '{"limit_rate":"1.5M"}' \
@@ -68,7 +72,9 @@ src/telemetry.rs          WebUI-only stdout event log and periodic summaries
 src/error.rs              Typed errors and retry classification
 src/cli.rs                Interactive commands and progress rendering
 src/web.rs                REST, WebSocket, and local request guards
-src/dashboard.html        Embedded dashboard
+src/dashboard.html        Embedded dashboard markup and accessible card template
+src/dashboard.css         Responsive industrial dark theme, no external fonts
+src/dashboard.js          Live telemetry, SVG graphs, chunk grids, runtime controls
 tests/downloads.rs        Local HTTP fixtures and integration tests
 ```
 
@@ -116,3 +122,13 @@ CLI `--limit-rate`, interactive `limit-rate RATE`, and POST `/api/config` all us
 Settings changes serialize under their own asynchronous gate, commit the exact bytes-per-second value to SQLite's `metadata.limit_rate` key (zero for unlimited), and then update the live bucket. An owned task finishes this operation even if an HTTP caller disconnects. Changing a limit discards old credits and uses a watch notification to wake token waiters immediately; it never cancels or restarts chunk connections. WebUI telemetry receives a `RateLimitChanged` event. Startup inherits this setting unless `Config::limit_rate` or the CLI flag explicitly overrides it. The existing metadata table supports the setting without a schema migration.
 
 Low-rate transfers flush accumulated file bytes at least every 250 ms when token slices arrive, in addition to the normal 256 KiB threshold, so progress and journal checkpoints remain useful at slow speeds. At rates below four bytes per second, the interval is bounded by the next whole-byte grant. Reported speeds measure file progress and can differ briefly from the token budget because of buffering, retries, and sampling.
+
+## Embedded dashboard
+
+Axum embeds the HTML, CSS, and JavaScript independently with `include_str!`, so installation still produces one executable. The combined frontend source is approximately 53 KiB, with no new crate or browser dependencies. Asset routes use explicit MIME types and `nosniff`. The content security policy allows scripts only from the same origin, with no inline scripts or dynamic code evaluation; inline style attributes support progress indicators. The loopback Host/Origin guards apply to assets and both WebSocket routes as well as REST endpoints.
+
+The frontend patches reusable card nodes and chunk tiles instead of replacing the queue on each message. A single animation-frame callback coalesces incoming updates. Each SVG graph holds at most 65 samples across a rolling 60-second window, sampled once per second; per-transfer histories are removed when their queue entries disappear. Plot rendering pauses while the document is hidden. The activity feed holds at most 40 entries derived from observed snapshots and successful controls; it is a browser-session feed, not a durable audit log, and can miss transitions between snapshots.
+
+The WebSocket sends current state immediately, then on manager notifications and every 500 ms. Slow clients have a five-second send timeout. Disconnections trigger reconnects with bounded exponential backoff and jitter. HTTP telemetry polling runs every two seconds while the socket is unavailable; a generation counter prevents a slow HTTP response from replacing a newer WebSocket snapshot. Readings older than 3.5 seconds are marked stale, speeds become unavailable, and disconnected graph segments are left blank. Browser navigation restores connections when returning from the back/forward cache.
+
+Pause/resume/cancel buttons show a pending state and suppress duplicate commands per task. Server acknowledgments and fresh snapshots establish the resulting state; a failed action displays an error without inventing success. The rate slider is logarithmic from 16 KiB/s through 1 GiB/s, plus unlimited. Text input supports the full parser range. Slider releases and presets apply immediately; requests serialize and retain the latest queued setting so rapid adjustments cannot finish out of order. Controls remain usable with keyboard navigation, progress/chunk labels are available to assistive technology, and reduced-motion preferences disable transitions.

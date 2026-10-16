@@ -48,7 +48,7 @@ impl FromStr for Status {
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum ChunkStatus {
+pub enum ChunkStatus {
     #[default]
     Queued,
     Downloading,
@@ -142,6 +142,18 @@ impl Record {
             }),
             error: self.error.clone(),
             created_at: self.created_at,
+            chunks: self
+                .chunks
+                .iter()
+                .enumerate()
+                .map(|(index, chunk)| ChunkProgress {
+                    index,
+                    start_byte: chunk.start,
+                    end_byte: chunk.end,
+                    downloaded_bytes: chunk.written,
+                    status: chunk.status,
+                })
+                .collect(),
         }
     }
 }
@@ -159,6 +171,18 @@ pub struct Download {
     pub error: Option<String>,
     /// Unix epoch milliseconds (UTC).
     pub created_at: i64,
+    /// Live segment state. End offsets are exclusive; null denotes a stream.
+    #[serde(default)]
+    pub chunks: Vec<ChunkProgress>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChunkProgress {
+    pub index: usize,
+    pub start_byte: u64,
+    pub end_byte: Option<u64>,
+    pub downloaded_bytes: u64,
+    pub status: ChunkStatus,
 }
 
 #[derive(Serialize, Deserialize)]
