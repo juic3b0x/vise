@@ -1,0 +1,134 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: macos-15
+            target: aarch64-apple-darwin
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+    env:
+      TARGET: ${{ matrix.target }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+          components: rustfmt, clippy
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Lint without warnings
+        run: cargo clippy --all-targets --locked --target "$TARGET" -- -D warnings
+
+      - name: Run all tests
+        run: |
+          cargo test --all-targets --locked --target "$TARGET"
+          cargo test --doc --locked --target "$TARGET"
+
+      - name: Build optimized binary
+        run: cargo build --release --locked --bin vise --target "$TARGET"
+
+      - name: Package Unix archive
+        if: runner.os != 'Windows'
+        run: |
+          version="${GITHUB_REF_NAME//\//-}"
+          package="vise-${version}-${TARGET}"
+          staging="$RUNNER_TEMP/$package"
+          mkdir -p "$staging" dist
+          cp "target/$TARGET/release/vise" "$staging/vise"
+          chmod 755 "$staging/vise"
+          cp README.md LICENSE LICENSE-APACHE "$staging/"
+          cp -R docs "$staging/docs"
+          tar -czf "dist/$package.tar.gz" -C "$RUNNER_TEMP" "$package"
+
+      - name: Package Windows archive
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = $env:GITHUB_REF_NAME.Replace('/', '-')
+          $package = "vise-$version-$env:TARGET"
+          $staging = Join-Path $env:RUNNER_TEMP $package
+          New-Item -ItemType Directory -Path $staging, 'dist' -Force | Out-Null
+          Copy-Item "target/$env:TARGET/release/vise.exe" (Join-Path $staging 'vise.exe')
+          Copy-Item README.md, LICENSE, LICENSE-APACHE $staging
+          Copy-Item docs (Join-Path $staging 'docs') -Recurse
+          Compress-Archive -Path $staging -DestinationPath "dist/$package.zip" -CompressionLevel Optimal
+
+      - name: Upload packaged binary
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download all release archives
+        uses: actions/download-artifact@v8
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+
+      - name: Generate archive checksums
+        working-directory: dist
+        run: sha256sum *.tar.gz *.zip > SHA256SUMS
+
+      # A single publisher runs only after every matrix build succeeds.
+      - name: Create release and upload assets
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Vise ${{ github.ref_name }}
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          fail_on_unmatched_files: true
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/SHA256SUMS

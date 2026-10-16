@@ -2,32 +2,29 @@
 
 All notable changes to Vise are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-The repository currently declares package version `0.1.0` and has no release tags. The development history below is collected under `Unreleased`; it does not imply a published release or release date. Future releases should have versioned sections with `YYYY-MM-DD` dates, newest first.
+## [0.1.0] - 2026-10-16
 
-## [Unreleased]
+Initial release.
 
 ### Added
 
-- Concurrent HTTP(S) downloads using Tokio and Reqwest, with configurable connections per file and simultaneous downloads. The CLI provides Indicatif progress, speed, ETA, batch downloads, an interactive queue, pause/resume, and bounded retries.
-- An embedded SQLite state journal with download records, individual chunk offsets, and persisted lifecycle transitions. WAL mode, full synchronization, and transactional checkpoints support recovery from durable offsets after interruption. Unfinished tasks return as paused on startup and can be resumed through either interface or `--resume-all`.
-- A shared token-bucket bandwidth limiter across all downloads and chunks. `--limit-rate` accepts human-readable units; interactive commands and WebUI controls change the cap during active transfers without reconnecting. The journal preserves the configured limit across restarts.
-- An industrial dark WebUI served by Axum exclusively through `--webui`, with embedded HTML, CSS, and JavaScript. Live WebSocket telemetry, polling fallback, throughput graphs, chunk-progress grids, queue filtering, and immediate transfer controls share the CLI's download manager.
-- A WebUI terminal monitor with timestamped, colorized action and lifecycle events, plus one-second progress, speed, and ETA summaries. Default CLI behavior remains available independently.
-- Automated SHA-256 and MD5 verification through CLI flags, API fields, WebUI inputs, and supported HTTP digest metadata. Completed staging files enter verification before final publication. Expected and actual digests are journaled; mismatches become `corrupt`, retain staging data, and require an explicit full re-download to retry.
-- Per-transfer HTTP, HTTPS, SOCKS5, and SOCKS5h proxy routing through `--proxy` and API `proxy_url`, including authenticated routes. SOCKS5 uses local destination DNS; SOCKS5h delegates destination DNS to the proxy. Saved transfers retain their effective route across restarts.
-
-### Changed
-
-- Replaced flat-file progress tracking with SQLite-backed state. Existing `.vise/state.json` journals are imported once and preserved as `state.json.migrated`.
-- Extended journal migrations to preserve checksum expectations, verification results, and proxy configuration alongside existing chunk progress and settings.
-- Separated the transfer engine, CLI controller, WebUI bridge, journal, checksum verifier, and bandwidth limiter into dedicated modules.
+- **Concurrent downloads:** Tokio and Reqwest power parallel HTTP(S) transfers with configurable connection and queue limits, pause/resume, and bounded retries. The CLI includes Indicatif progress, speed, ETA, batch downloads, and an interactive queue.
+- **SQLite-backed journaling:** WAL mode, full synchronization, and atomic transactions persist download metadata, chunk offsets, and lifecycle transitions. Unfinished tasks recover as paused and resume from durable checkpoints through either interface or `--resume-all`.
+- **Journal compatibility:** Automatic schema migrations preserve chunk progress, settings, checksums, and proxy configuration. Legacy `.vise/state.json` journals are imported once and preserved as `state.json.migrated`.
+- **Token-bucket rate limiting:** All transfers share one bandwidth budget. `--limit-rate` accepts human-readable units; CLI commands and WebUI controls adjust the cap live without reconnecting. Settings persist across restarts.
+- **Industrial WebUI:** An embedded Axum dashboard, launched only with `--webui`, provides live WebSocket telemetry, polling fallback, throughput graphs, chunk-progress grids, queue filters, and transfer controls without page reloads.
+- **Terminal telemetry:** WebUI mode emits timestamped, colorized action and lifecycle events alongside one-second progress, speed, and ETA summaries. Default CLI mode remains independent.
+- **SHA-256 and MD5 verification:** Expected hashes come from CLI flags, API fields, WebUI inputs, or supported HTTP metadata. Complete staging files are verified before final publication. Mismatches are journaled as `corrupt`, with expected/actual digests and retained staging data for inspection or explicit full re-download.
+- **Multi-protocol proxies:** Per-transfer HTTP, HTTPS, SOCKS5, and SOCKS5h routing through `--proxy` and API `proxy_url`, including authentication and saved routes for resume. SOCKS5 resolves destination names locally; SOCKS5h delegates destination DNS to the proxy.
+- **Modular architecture:** Dedicated engine, CLI, WebUI, journal, checksum, and rate-limiter modules keep both interfaces connected to the same worker pool.
+- **Release automation:** Tag-triggered GitHub Actions builds optimized Linux x86_64, macOS Intel/Apple Silicon, and Windows x86_64 binaries. Archives bundle the README, both licenses, and docs; releases include SHA-256 checksums and publish after all build and quality checks pass.
 
 ### Security
 
-- Explicit proxy routes cover probes, chunks, redirects, retries, and resumed transfers without falling back to a direct connection. These routes override environment proxy and `NO_PROXY` settings; failure of the configured proxy fails or retries the transfer through that route.
-- Proxy credentials are removed from public transfer snapshots and proxy display/debug output, and invalid proxy diagnostics avoid echoing credential-bearing input. Complete authenticated routes remain in the local journal for recovery.
-- TLS certificate verification remains enabled for HTTPS destinations and HTTPS proxies.
-- The optional WebUI binds only to loopback and validates request hosts and browser origins. JSON-only mutations and a Content Security Policy constrain browser access.
-- Final output publication refuses to overwrite an existing destination and occurs only after any configured checksum verification succeeds. MD5 remains a compatibility option; SHA-256 from a trusted source is preferred for security-sensitive verification.
+- **No proxy fallback:** Explicit routes cover probes, chunks, redirects, retries, and resume, overriding environment proxy and `NO_PROXY` settings. Proxy failure never triggers a direct connection.
+- **Credential redaction:** Public transfer snapshots and proxy display/debug output omit proxy credentials; invalid proxy diagnostics avoid echoing sensitive input. Full authenticated routes remain in the unencrypted local journal for recovery.
+- **TLS validation:** Certificate verification stays enabled for HTTPS destinations and HTTPS proxies.
+- **Local WebUI safeguards:** Loopback-only binding, host and browser-origin validation, JSON-only mutations, and a Content Security Policy constrain browser access.
+- **Safe publication:** Existing output files are never overwritten, and configured checksum verification must succeed before final publication. SHA-256 from a trusted source is preferred for security-sensitive verification; MD5 supports legacy compatibility and accidental-corruption detection.
 
-[Unreleased]: https://github.com/juic3b0x/vise/commits/main/
+[0.1.0]: https://github.com/juic3b0x/vise/releases/tag/v0.1.0
