@@ -21,6 +21,8 @@ pub enum Error {
     Protocol(String),
     #[error("state file error: {0}")]
     State(#[from] serde_json::Error),
+    #[error("SQLite journal error: {0}")]
+    Database(#[from] rusqlite::Error),
     #[error("download interrupted")]
     Cancelled,
     #[error("worker failed: {0}")]

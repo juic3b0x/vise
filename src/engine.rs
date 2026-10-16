@@ -24,9 +24,10 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::{
+    database::{Database, FILE_NAME},
     error::{Error, Result},
     events::{Event, EventKind},
-    model::{Chunk, Download, Journal, Record, Status},
+    model::{Chunk, ChunkStatus, Download, LegacyJournal, Record, Status, timestamp_millis},
 };
 
 const BUFFER_SIZE: usize = 256 * 1024;
@@ -77,6 +78,7 @@ impl Job {
 struct Inner {
     config: Config,
     client: Client,
+    database: Database,
     jobs: RwLock<BTreeMap<Uuid, Arc<Job>>>,
     pool: Semaphore,
     checkpoint: Mutex<()>,
@@ -130,71 +132,81 @@ impl Manager {
             .redirect(reqwest::redirect::Policy::limited(10))
             .pool_max_idle_per_host(64)
             .build()?;
-        let mut jobs = BTreeMap::new();
-        match fs::read(state_dir.join("state.json")).await {
-            Ok(data) => {
-                let journal: Journal = serde_json::from_slice(&data)?;
-                if journal.version != 1 {
-                    return Err(Error::Invalid("unsupported state-file version".into()));
+        let database = Database::open(state_dir.join(FILE_NAME)).await?;
+        if database.needs_legacy_import().await? {
+            let legacy_path = state_dir.join("state.json");
+            let legacy = match fs::read(&legacy_path).await {
+                Ok(bytes) => {
+                    let journal: LegacyJournal = serde_json::from_slice(&bytes)?;
+                    if journal.version != 1 {
+                        return Err(Error::Invalid("unsupported legacy journal version".into()));
+                    }
+                    for record in &journal.downloads {
+                        validate_record(record)?;
+                    }
+                    Some(journal.downloads)
                 }
-                let mut names = std::collections::HashSet::new();
-                for mut record in journal.downloads {
-                    validate_record(&record)?;
-                    if !names.insert(record.filename.clone()) || jobs.contains_key(&record.id) {
-                        return Err(Error::Invalid(
-                            "duplicate filename or ID in state file".into(),
-                        ));
-                    }
-                    let part = state_dir.join(format!("{}.part", record.id));
-                    let target = config.output_dir.join(&record.filename);
-                    // Recover a crash between publishing a hard link and saving completion.
-                    if record.status != Status::Completed
-                        && target.exists()
-                        && part.exists()
-                        && same_file::is_same_file(&target, &part)?
-                    {
-                        record.status = Status::Completed;
-                    }
-                    if record.status == Status::Completed {
-                        if !target.is_file()
-                            || record.total_bytes.is_some_and(|n| {
-                                target.metadata().map(|m| m.len() != n).unwrap_or(true)
-                            })
-                        {
-                            record.status = Status::Failed;
-                            record.chunks.clear();
-                            record.error = Some(
-                                "completed output is missing or its length has changed".into(),
-                            );
-                        } else if part.exists() {
-                            fs::remove_file(&part).await?;
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => return Err(error.into()),
+            };
+            let imported = legacy.is_some();
+            database.import_legacy(legacy.unwrap_or_default()).await?;
+            // The SQL marker commits with the import, so a crash during backup
+            // cannot cause stale JSON to be imported again after task deletion.
+            let backup = state_dir.join("state.json.migrated");
+            if imported && !backup.exists() {
+                fs::rename(&legacy_path, backup).await?;
+            }
+        }
+        let mut jobs = BTreeMap::new();
+        let mut completed_parts = Vec::new();
+        for mut record in database.load().await? {
+            validate_record(&record)?;
+            let part = state_dir.join(format!("{}.part", record.id));
+            let target = config.output_dir.join(&record.filename);
+            if record.status != Status::Completed
+                && target.exists()
+                && part.exists()
+                && same_file::is_same_file(&target, &part)?
+            {
+                record.status = Status::Completed;
+            }
+            if record.status == Status::Completed {
+                if !target.is_file()
+                    || record
+                        .total_bytes
+                        .is_some_and(|n| target.metadata().map(|m| m.len() != n).unwrap_or(true))
+                {
+                    record.status = Status::Failed;
+                    record.chunks.clear();
+                    record.error =
+                        Some("completed output is missing or its length has changed".into());
+                } else if part.exists() {
+                    completed_parts.push(part);
+                }
+            } else {
+                if record.status.active() {
+                    record.status = Status::Paused;
+                }
+                match fs::metadata(&part).await {
+                    Ok(info) => {
+                        if record.chunks.iter().any(|c| {
+                            c.written > 0 && c.start.saturating_add(c.written) > info.len()
+                        }) {
+                            return Err(Error::Invalid(format!(
+                                "partial file for {} is shorter than its saved progress",
+                                record.id
+                            )));
                         }
-                    } else {
-                        if record.status.active() {
-                            record.status = Status::Paused;
-                        }
-                        match fs::metadata(&part).await {
-                            Ok(info) => {
-                                if record.chunks.iter().any(|c| {
-                                    c.written > 0 && c.start.saturating_add(c.written) > info.len()
-                                }) {
-                                    return Err(Error::Invalid(format!(
-                                        "partial file for {} is shorter than its saved progress",
-                                        record.id
-                                    )));
-                                }
-                            }
-                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                                record.chunks.clear()
-                            }
-                            Err(e) => return Err(e.into()),
-                        }
                     }
-                    jobs.insert(record.id, Arc::new(Job::new(record)));
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        record.chunks.clear()
+                    }
+                    Err(error) => return Err(error.into()),
                 }
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
-            Err(e) => return Err(e.into()),
+            normalize_chunks(&mut record);
+            jobs.insert(record.id, Arc::new(Job::new(record)));
         }
         let (events, _) = watch::channel(0);
         let (activity, _) = broadcast::channel(2048);
@@ -202,6 +214,7 @@ impl Manager {
             pool: Semaphore::new(config.concurrent_downloads),
             config,
             client,
+            database,
             jobs: RwLock::new(jobs),
             checkpoint: Mutex::new(()),
             admission: Mutex::new(()),
@@ -211,6 +224,10 @@ impl Manager {
             _directory_lock: lock,
         }));
         manager.checkpoint().await?;
+        // Publish recovery to SQL before removing the hard-link recovery evidence.
+        for part in completed_parts {
+            fs::remove_file(part).await?;
+        }
         Ok(manager)
     }
 
@@ -227,16 +244,18 @@ impl Manager {
     async fn publish_job(&self, kind: EventKind, job: &Job) {
         self.publish(kind, Some(job.record.read().await.snapshot()));
     }
-    async fn transition(&self, job: &Job, to: Status) {
+    async fn transition(&self, job: &Job, to: Status) -> Result<()> {
         let mut record = job.record.write().await;
         let from = record.status;
         record.status = to;
         let snapshot = record.snapshot();
         drop(record);
+        self.checkpoint().await?;
         if from != to {
             self.publish(EventKind::StateChanged { from, to }, Some(snapshot));
         }
         self.notify();
+        Ok(())
     }
     pub fn server_started(&self, address: String) {
         self.publish(EventKind::ServerStarted { address }, None);
@@ -328,6 +347,7 @@ impl Manager {
                 chunks: vec![],
                 error: None,
                 speed: 0.0,
+                created_at: timestamp_millis(),
             })),
         );
         drop(jobs);
@@ -368,8 +388,15 @@ impl Manager {
             record.status = Status::Queued;
             record.error = None;
             record.speed = 0.0;
+            normalize_chunks(&mut record);
         }
         // Publish before spawning so even an empty file logs ADDED before DONE.
+        if let Err(error) = self.checkpoint().await {
+            let mut record = job.record.write().await;
+            record.status = status;
+            record.error = Some(error.to_string());
+            return Err(error);
+        }
         self.publish_job(action, &job).await;
         let cancel = CancellationToken::new();
         let manager = self.clone();
@@ -397,9 +424,9 @@ impl Manager {
                     }
                 };
                 record.speed = 0.0;
+                normalize_chunks(&mut record);
                 (kind, record.snapshot())
             };
-            manager.publish(event.0, Some(event.1));
             manager.notify();
             if let Err(error) = manager.checkpoint().await {
                 tracing::error!(%id, %error, "cannot persist download state");
@@ -426,6 +453,7 @@ impl Manager {
                         .await;
                 }
             }
+            manager.publish(event.0, Some(event.1));
             manager.notify();
         });
         *job.run.lock().await = Some(Run { cancel, handle });
@@ -456,6 +484,7 @@ impl Manager {
             record.status = Status::Paused;
         }
         record.speed = 0.0;
+        normalize_chunks(&mut record);
         drop(record);
         self.checkpoint().await?;
         if !worker_reported_pause && job.record.read().await.status == Status::Paused {
@@ -615,18 +644,8 @@ impl Manager {
                 Err(e) => return Err(e.into()),
             }
         }
-        let bytes = serde_json::to_vec(&Journal {
-            version: 1,
-            downloads,
-        })?;
-        let dir = self.0.config.output_dir.join(".vise");
-        let temp = dir.join("state.json.tmp");
-        let mut file = fs::File::create(&temp).await?;
-        file.write_all(&bytes).await?;
-        file.sync_all().await?;
-        drop(file);
-        fs::rename(temp, dir.join("state.json")).await?;
-        sync_directory(dir).await?;
+        self.0.database.persist(downloads).await?;
+        sync_directory(self.0.config.output_dir.join(".vise")).await?;
         Ok(())
     }
 
@@ -636,9 +655,14 @@ impl Manager {
             _ = cancel.cancelled() => return Err(Error::Cancelled),
             permit = self.0.pool.acquire() => permit.map_err(|e| Error::Worker(e.to_string()))?,
         };
-        self.transition(&job, Status::Probing).await;
+        self.transition(&job, Status::Probing).await?;
         let url = job.record.read().await.url.clone();
         let metadata = self.probe(&url, &cancel).await?;
+        if metadata.total.is_some_and(|size| size > i64::MAX as u64) {
+            return Err(Error::Invalid(
+                "resource size exceeds SQLite's signed 64-bit integer range".into(),
+            ));
+        }
         let id = job.record.read().await.id;
         let path = self.part_path(id);
         let mut file = fs::OpenOptions::new()
@@ -678,7 +702,7 @@ impl Manager {
                 file.set_len(total).await?;
             }
         }
-        self.transition(&job, Status::Downloading).await;
+        self.transition(&job, Status::Downloading).await?;
         let mut workers = JoinSet::new();
         let worker_cancel = cancel.child_token();
         let count = job.record.read().await.chunks.len();
@@ -820,9 +844,13 @@ impl Manager {
             if cancel.is_cancelled() {
                 return Err(Error::Cancelled);
             }
+            job.record.write().await.chunks[index].status = ChunkStatus::Downloading;
             let result = self.transfer_once(&job, index, cancel).await;
             match result {
-                Ok(()) => return Ok(()),
+                Ok(()) => {
+                    job.record.write().await.chunks[index].status = ChunkStatus::Completed;
+                    return Ok(());
+                }
                 Err(error) if error.retryable() && attempt < self.0.config.retries => {
                     tracing::warn!(chunk = index, retry = attempt + 1, %error, "retrying transfer");
                     self.publish_job(
@@ -837,7 +865,15 @@ impl Manager {
                     self.backoff(attempt, &error, cancel).await?;
                     attempt += 1;
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    job.record.write().await.chunks[index].status =
+                        if matches!(error, Error::Cancelled) {
+                            ChunkStatus::Paused
+                        } else {
+                            ChunkStatus::Failed
+                        };
+                    return Err(error);
+                }
             }
         }
     }
@@ -920,6 +956,14 @@ impl Manager {
             }
         }
         if !ranged {
+            if response
+                .content_length()
+                .is_some_and(|size| size > i64::MAX as u64)
+            {
+                return Err(Error::Invalid(
+                    "resource size exceeds SQLite's signed 64-bit integer range".into(),
+                ));
+            }
             let _checkpoint = self.0.checkpoint.lock().await;
             let mut record = job.record.write().await;
             record.total_bytes = response.content_length();
@@ -1071,6 +1115,7 @@ fn make_chunks(total: Option<u64>, ranged: bool, connections: usize) -> Vec<Chun
             start: 0,
             end: total,
             written: 0,
+            status: ChunkStatus::Queued,
         }];
     }
     let total = total.unwrap_or(0);
@@ -1085,6 +1130,7 @@ fn make_chunks(total: Option<u64>, ranged: bool, connections: usize) -> Vec<Chun
                 start,
                 end: Some(start.saturating_add(size).min(total)),
                 written: 0,
+                status: ChunkStatus::Queued,
             })
         })
         .collect()
@@ -1171,9 +1217,34 @@ fn numbered_filename(base: &str, number: usize) -> String {
     }
 }
 
+fn normalize_chunks(record: &mut Record) {
+    for chunk in &mut record.chunks {
+        chunk.status = if record.status == Status::Completed
+            || chunk
+                .end
+                .is_some_and(|end| chunk.start + chunk.written == end)
+        {
+            ChunkStatus::Completed
+        } else {
+            match record.status {
+                Status::Paused => ChunkStatus::Paused,
+                Status::Failed => ChunkStatus::Failed,
+                Status::Queued | Status::Probing => ChunkStatus::Queued,
+                Status::Downloading => chunk.status,
+                Status::Completed => ChunkStatus::Completed,
+            }
+        };
+    }
+}
+
 fn validate_record(record: &Record) -> Result<()> {
     validate_url(&record.url)?;
     validate_filename(&record.filename)?;
+    if record.created_at < 0 {
+        return Err(Error::Invalid(
+            "negative creation timestamp in journal".into(),
+        ));
+    }
     let mut offset = 0;
     for chunk in &record.chunks {
         if chunk.start != offset

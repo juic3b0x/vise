@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::{str::FromStr, time::SystemTime};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -13,19 +14,94 @@ pub enum Status {
 }
 
 impl Status {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Probing => "probing",
+            Self::Downloading => "downloading",
+            Self::Paused => "paused",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+        }
+    }
     pub fn active(self) -> bool {
         matches!(self, Self::Queued | Self::Probing | Self::Downloading)
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+impl FromStr for Status {
+    type Err = crate::error::Error;
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "queued" => Ok(Self::Queued),
+            "probing" => Ok(Self::Probing),
+            "downloading" => Ok(Self::Downloading),
+            "paused" => Ok(Self::Paused),
+            "completed" => Ok(Self::Completed),
+            "failed" => Ok(Self::Failed),
+            _ => Err(crate::error::Error::Invalid(format!(
+                "unknown journal download status: {value}"
+            ))),
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ChunkStatus {
+    #[default]
+    Queued,
+    Downloading,
+    Paused,
+    Completed,
+    Failed,
+}
+impl ChunkStatus {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Downloading => "downloading",
+            Self::Paused => "paused",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+        }
+    }
+}
+impl FromStr for ChunkStatus {
+    type Err = crate::error::Error;
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "queued" => Ok(Self::Queued),
+            "downloading" => Ok(Self::Downloading),
+            "paused" => Ok(Self::Paused),
+            "completed" => Ok(Self::Completed),
+            "failed" => Ok(Self::Failed),
+            _ => Err(crate::error::Error::Invalid(format!(
+                "unknown journal chunk status: {value}"
+            ))),
+        }
+    }
+}
+
+pub(crate) fn timestamp_millis() -> i64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(i64::MAX)
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Chunk {
     pub start: u64,
     pub end: Option<u64>, // exclusive; None for a stream with unknown length
     pub written: u64,
+    #[serde(default)]
+    pub status: ChunkStatus,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Record {
     pub id: Uuid,
     pub url: String,
@@ -36,6 +112,8 @@ pub(crate) struct Record {
     pub validator: Option<String>,
     pub chunks: Vec<Chunk>,
     pub error: Option<String>,
+    #[serde(default = "timestamp_millis")]
+    pub created_at: i64,
     #[serde(skip)]
     pub speed: f64,
 }
@@ -63,6 +141,7 @@ impl Record {
                     .then(|| total.saturating_sub(downloaded) as f64 / self.speed)
             }),
             error: self.error.clone(),
+            created_at: self.created_at,
         }
     }
 }
@@ -78,10 +157,12 @@ pub struct Download {
     pub bytes_per_second: f64,
     pub eta_seconds: Option<f64>,
     pub error: Option<String>,
+    /// Unix epoch milliseconds (UTC).
+    pub created_at: i64,
 }
 
 #[derive(Serialize, Deserialize)]
-pub(crate) struct Journal {
+pub(crate) struct LegacyJournal {
     pub version: u32,
     pub downloads: Vec<Record>,
 }

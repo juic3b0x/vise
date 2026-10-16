@@ -27,7 +27,7 @@ curl -X POST -H 'Content-Type: application/json' -d '{}' \
   http://127.0.0.1:8080/api/downloads/REPLACE_WITH_RETURNED_UUID/pause
 ```
 
-Download snapshots contain `id`, `url`, `filename`, `status`, `total_bytes` (nullable), `downloaded_bytes`, `bytes_per_second`, `eta_seconds` (nullable), and `error` (nullable). States are `queued`, `probing`, `downloading`, `paused`, `completed`, and `failed`. Engine errors use an `error` JSON field and HTTP 400, 404, 409, or 500.
+Download snapshots contain `id`, `url`, `filename`, `status`, `total_bytes` (nullable), `downloaded_bytes`, `bytes_per_second`, `eta_seconds` (nullable), `error` (nullable), and `created_at` (UTC Unix epoch milliseconds). States are `queued`, `probing`, `downloading`, `paused`, `completed`, and `failed`. Engine errors use an `error` JSON field and HTTP 400, 404, 409, or 500.
 
 ## Transfers and recovery
 
@@ -36,7 +36,7 @@ Download snapshots contain `id`, `url`, `filename`, `status`, `total_bytes` (nul
 - Vise probes actual range support with `GET Range: bytes=0-0`; it does not trust `Accept-Ranges` alone. It checks status codes, every `Content-Range`, exact lengths, and response validators. TLS verification stays enabled, redirects are bounded, and the client requests identity encoding so compressed representations cannot invalidate byte offsets.
 - Parallel/resumed ranges require a strong ETag or Last-Modified validator. `If-Range` protects requests and retries. If the resource changes, resuming reprobes it and resets the partial layout. When ranges or validators are unavailable, Vise safely uses a single streaming request and restarts that stream after a pause or dropped connection. Unknown lengths are supported.
 - Connection/read failures, HTTP 408/429/5xx, and truncated responses retry with bounded exponential backoff. Numeric `Retry-After` is honored up to 60 seconds. Other HTTP errors, invalid ranges, and disk errors fail with a readable error. A stalled read has a configurable timeout; large downloads have no total-duration limit.
-- `<output>/.vise/state.json` records the queue, resource validators, chunk boundaries, and byte offsets. Partial files live in the same `.vise` directory. Once a second, offsets are captured, their underlying files are synchronized, and the journal is atomically replaced. Pause and shutdown also checkpoint. On Unix, directory entries are synchronized. A crash can lose work since the last checkpoint; unrecorded bytes are downloaded again.
+- `<output>/.vise/state.sqlite3` stores downloads and their chunks in normalized SQLite tables. WAL mode, `synchronous=FULL`, foreign keys, and atomic transactions protect durable metadata. Progress snapshots are captured before synchronizing partial files, then committed once a second; start, state transition, pause, completion, reset, and deletion also checkpoint. A crash can lose work since the last checkpoint; bytes beyond the saved offsets are downloaded again. On Unix, journal directory entries are synchronized as well. See [SQLite WAL durability](https://www.sqlite.org/wal.html).
 - Downloads publish only after every segment finishes and the file is synchronized. A hard link creates the final filename atomically without overwriting existing files. An interrupted publish is recovered by checking whether the final and partial paths identify the same file. This requires an output filesystem that supports hard links and atomic renames; unsupported operations report an error. Windows syncs individual files but lacks the Unix directory-sync durability guarantee.
 - Automatically derived names receive numeric suffixes on collision. Explicit name collisions fail. A process-wide output-directory lock prevents two Vise instances from corrupting the same journal. Corrupt or unsupported journals are rejected rather than silently discarded.
 
@@ -49,7 +49,8 @@ Local journal and partial files are trusted application data; do not modify them
 Cargo.toml / Cargo.lock    Dependencies and reproducible resolution
 src/main.rs               Arguments, lifecycle, signals, mode selection
 src/lib.rs                Public library modules
-src/engine.rs             Worker pool, transfers, retries, persistence
+src/engine.rs             Worker pool, transfers, retries, durable checkpoints
+src/database.rs           SQLite schema, migration, transactions, async DB boundary
 src/model.rs              Internal records and public snapshots
 src/events.rs             Timestamped lifecycle and server events
 src/telemetry.rs          WebUI-only stdout event log and periodic summaries
@@ -72,3 +73,23 @@ One asynchronous writer owns monitor stdout. It flushes each timestamped event i
 No application locks are held during stdout writes. The event channel holds 2,048 events; a slow subscriber receives an explicit missed-event warning and a fresh active-status snapshot. This bounds memory without applying terminal backpressure to downloads. The logger remains alive while workers pause and checkpoint during shutdown, then drains final events before exiting. Logger or persistence-monitor failures stop the controller and trigger transfer shutdown.
 
 Deletion serializes with task controls and persistence: workers stop before the queue entry is durably removed. A removed-job flag prevents a concurrent resume from resurrecting a deleted task. Partial-file cleanup failures emit a warning; completed output files are always preserved.
+
+## SQLite journal
+
+The database module uses bundled SQLite through `rusqlite`. An `Arc<Mutex<Connection>>` equivalent shares a single connection; an asynchronous gate is acquired before scheduling `spawn_blocking`, so lock waits and SQL operations never occupy Tokio's async workers. The gate travels into the blocking operation, preserving commit order even if its async caller is cancelled. SQLite connection teardown also runs on the blocking pool.
+
+| Table | Stored fields |
+| --- | --- |
+| `downloads` | UUID `id`, `url`, `output_path`, nullable `total_size`, `status`, `created_at`, `updated_at`, `ranged`, `validator`, nullable `error` |
+| `chunks` | `download_id`, zero-based `chunk_index`, `start_byte`, nullable `end_byte`, `downloaded_bytes`, `status` |
+| `metadata` | One-time legacy-import completion marker |
+
+`output_path` is a plain filename relative to the configured output directory. End offsets are exclusive; a null end denotes an unknown-length stream. Download states are queued, probing, downloading, paused, completed, or failed; chunk states are queued, downloading, paused, completed, or failed. Timestamps are UTC Unix epoch milliseconds. Byte counts use nonnegative SQLite signed 64-bit integers, and larger representations are rejected explicitly.
+
+Transactions update each changed parent and its chunks together; replacing a segment layout removes obsolete rows, and deleting a parent cascades to its children. Constraints reject invalid counts/statuses and duplicate output paths. A cache of durable snapshots avoids rewriting unchanged rows or issuing idle WAL transactions. Runtime speed samples are never stored in SQL. Live CLI, REST, WebSocket, and terminal-telemetry views use the manager's owned in-memory snapshots; startup always reconstructs jobs from SQL. `Database::list()` provides an asynchronous, transaction-consistent durable view.
+
+On startup, an application ID and schema version identify the database. Unknown/foreign schemas and integrity failures are rejected. Pending jobs become paused without losing saved segment offsets. Representation validators are reprobed before ranges resume. Recovery of a fully published file commits its completed SQL state before removing its partial hard link.
+
+Legacy `state.json` version 1 imports into both tables in one transaction, along with a completion marker. The source is then renamed to `state.json.migrated` when that backup name is free. If import fails, the JSON is kept unchanged and no partial import commits. If a crash interrupts backup renaming, the marker prevents importing stale JSON again, including after all tasks have been deleted. Older records without creation timestamps receive their import time.
+
+WAL mode is intended for a local filesystem, not network shares. Do not copy only the main database file while Vise is running; SQLite may have committed data in its `-wal` file. Keep the complete `.vise` directory together, or stop Vise cleanly before copying it. The process-wide output-directory lock still prevents two managers from writing the same partial files. No external database service or SQLite runtime installation is needed.

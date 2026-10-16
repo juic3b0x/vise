@@ -12,7 +12,7 @@ Vise is a high-performance HTTP(S) download manager built in Rust. Multi-threade
 
 - **Parallel transfers:** Split eligible files into chunks and download them concurrently, with configurable connection and queue limits.
 - **Clear progress:** Track downloaded bytes, percentage, transfer speed, and ETA in the terminal.
-- **Pause, resume, recover:** Control individual tasks and restore saved progress after restarting.
+- **SQLite crash recovery:** Control individual tasks and restore saved chunk offsets from an embedded transactional journal after restarting.
 - **Resilient downloads:** Retry dropped connections and transient HTTP failures with bounded backoff.
 - **CLI first:** Download from arguments or manage an interactive queue. The web server starts only with `--webui`.
 - **Embedded WebUI:** Add URLs, monitor transfers, pause or resume tasks, and delete queue entries through a local dashboard with live WebSocket updates.
@@ -23,7 +23,7 @@ Vise is a high-performance HTTP(S) download manager built in Rust. Multi-threade
 
 ### Requirements
 
-Install a Rust toolchain with Cargo. Vise declares Rust **1.85 or newer** as its minimum version. Git is also required to clone the repository.
+Install a Rust toolchain with Cargo. Vise declares Rust **1.85 or newer** as its minimum version. Git is also required to clone the repository. A working C build toolchain is needed for bundled SQLite; no separate SQLite installation or database server is required.
 
 ### From a cloned repository
 
@@ -129,6 +129,10 @@ Task IDs accept a unique prefix of at least four characters. Use `list` to find 
 vise -o ./downloads --resume-all
 ```
 
+Download state is stored in `<output>/.vise/state.sqlite3`. Vise saves download metadata and individual chunk offsets in SQLite transactions, flushing progress at one-second intervals and saving lifecycle transitions immediately. Unfinished tasks are restored as paused on startup; use `--resume-all` or the interactive/WebUI resume controls to continue from durable offsets. A crash can lose work since the last checkpoint, which is downloaded again.
+
+Existing `.vise/state.json` journals are imported automatically once and preserved as `state.json.migrated`. Keep the entire `.vise` directory with your downloads, including any SQLite `-wal` and `-shm` files, and use the same output directory when resuming.
+
 Parallel range downloads require server range support and a strong ETag or Last-Modified validator. If either is unavailable, Vise uses a single streaming request and restarts that transfer when resumed. Unknown-length streams are supported.
 
 ## WebUI
@@ -196,6 +200,7 @@ Run `vise --help` for the full command reference. Set `RUST_LOG=vise=info` for d
 | [Axum](https://docs.rs/axum/) | Optional local HTTP server, REST API, and WebSockets |
 | [Indicatif](https://docs.rs/indicatif/) | Terminal progress bars and transfer monitoring |
 | [Clap](https://docs.rs/clap/) | Argument parsing and CLI help |
+| [rusqlite](https://docs.rs/rusqlite/) | Embedded SQLite state journal with bundled SQLite |
 
 See [architecture, recovery behavior, and API documentation](docs/architecture.md) for implementation details.
 
