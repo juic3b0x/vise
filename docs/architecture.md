@@ -11,7 +11,7 @@ Vise uses one shared download manager for its CLI and WebUI.
 | GET | `/api/telemetry` | Timestamped download snapshots and global configuration for HTTP fallback |
 | GET | `/api/config` | Global bandwidth configuration |
 | POST | `/api/config` | Apply and persist `{"limit_rate":"5M"}`; use `off` to clear |
-| POST | `/api/downloads` | Add URL, optional filename, `expected_sha256`, and/or `expected_md5`; HTTP 201 |
+| POST | `/api/downloads` | Add URL, optional filename, `proxy_url`, `expected_sha256`, and/or `expected_md5`; HTTP 201 |
 | GET | `/api/downloads/{uuid}` | One download |
 | DELETE | `/api/downloads/{uuid}` | Stop the task and remove its queue entry/partial data; HTTP 204; completed outputs are kept |
 | POST | `/api/downloads/{uuid}/pause` | Pause and wait for workers to stop |
@@ -66,6 +66,7 @@ src/lib.rs                Public library modules
 src/engine.rs             Worker pool, transfers, retries, durable checkpoints
 src/database.rs           SQLite schema, migration, transactions, async DB boundary
 src/checksum.rs           Expected digests, representation headers, cancellable file hashing
+src/proxy.rs              Validated proxy URLs, credential redaction, common client builder
 src/rate_limiter.rs       Rate parsing, shared token bucket, response-stream adapter
 src/model.rs              Internal records and public snapshots
 src/events.rs             Timestamped lifecycle and server events
@@ -98,7 +99,7 @@ The database module uses bundled SQLite through `rusqlite`. An `Arc<Mutex<Connec
 
 | Table | Stored fields |
 | --- | --- |
-| `downloads` | UUID `id`, `url`, `output_path`, nullable `total_size`, `status`, `created_at`, `updated_at`, `ranged`, `validator`, nullable `error`, expected/actual SHA-256 and MD5, nullable `verified_at` |
+| `downloads` | UUID `id`, `url`, `output_path`, nullable `proxy_url`, nullable `total_size`, `status`, `created_at`, `updated_at`, `ranged`, `validator`, nullable `error`, expected/actual SHA-256 and MD5, nullable `verified_at` |
 | `chunks` | `download_id`, zero-based `chunk_index`, `start_byte`, nullable `end_byte`, `downloaded_bytes`, `status` |
 | `metadata` | One-time legacy-import completion marker and global `limit_rate` setting |
 
@@ -142,10 +143,24 @@ Every public snapshot adds nullable `expected_sha256`, `expected_md5`, `actual_s
 
 After chunk workers join, Vise flushes and synchronizes the staging file, checkpoints its offsets under `verifying`, and hashes only the requested algorithms in one sequential pass. RustCrypto `sha2` and `md-5` share the Digest interface. The blocking pool performs reads and hashing with a 1 MiB buffer, checking cancellation between reads. Transfer controls join the worker before resetting or deleting staging data. The manager commits matching results before atomically linking the staging file to its final filename; checksum failure never creates that link. Verification and corruption events flow through the existing terminal telemetry channel, and CLI batch mode returns a nonzero status for corrupt downloads.
 
-SQLite schema version 2 extends the download-status constraint and adds checksum columns. Version 1 journals migrate transactionally by rebuilding the parent table while preserving chunk rows, timestamps, and metadata; foreign-key validation runs before commit and enforcement is restored after migration. Failed migrations roll back. Existing journals without checksum expectations retain their previous transfer behavior.
+SQLite schema version 2 introduced the extended download-status constraint and checksum columns; the current version is 3, which also stores `proxy_url`. Version 1 journals migrate transactionally by rebuilding the parent table while preserving chunk rows, timestamps, and metadata; foreign-key validation runs before commit and enforcement is restored after migration. Version 2 journals add the proxy column in one transaction. Failed migrations roll back. Existing journals without checksum expectations retain their previous transfer behavior.
 
 On mismatch, actual digests and the expected-versus-actual error are committed with `status='corrupt'`. The staging file stays available for inspection. Resume returns HTTP 409 for corrupt tasks, and `--resume-all` excludes them. Explicit retry invalidates all durable offsets before truncating the file and retains the expected digests. SHA-256/MD5 whole-file checksums cannot locate a damaged segment, so automatic partial-chunk guessing is avoided. Retrying with an incorrect pinned expectation will fail again; create a new task with a corrected expectation when necessary.
 
 If a crash occurs after creating the final hard link but before committing completion, startup rehashes the shared staging/final inode before accepting it as completed. A mismatch is durably recorded as corrupt before removing that uncommitted final link; the staging link is preserved. Already-completed files are not rehashed on every launch. A crash during verification restores a paused task, which rechecks the complete file on resume.
 
 HTTP requests advertise `Want-Repr-Digest: sha-256=10, md5=1`. Supported `Repr-Digest` dictionary entries are base64 byte sequences for `sha-256` and `md5`; full HTTP 200 responses can also supply `Content-Digest` or legacy `Content-MD5`. Both probes and actual transfer headers are inspected, since a server may omit integrity metadata from a range probe. Content digests on HTTP 206 fragments are never interpreted as whole-file hashes. Repr-Digest bound by Content-Location to a different URL is ignored. Malformed supported digests or conflicting header values fail explicitly. Trailer-only fields, obsolete Digest headers, and other algorithms are not consumed. Caller-supplied expectations take precedence per algorithm; learned expectations persist across resumes rather than silently following later server changes. See [RFC 9530](https://www.rfc-editor.org/rfc/rfc9530.html).
+
+## Per-transfer proxy routing
+
+`proxy::ProxyUrl` accepts absolute `http://`, `https://`, `socks5://`, and `socks5h://` URLs with an optional username/password. It rejects missing hosts, port zero, non-root paths, query strings, fragments, whitespace, oversized input, and unsupported schemes. Scheme default ports are accepted (HTTP 80, HTTPS 443, SOCKS 1080). Parsing errors never reproduce the credential-bearing input. Username/password URL decoding and the protocol handshake are delegated to Reqwest.
+
+`Config::proxy_url` is the process default for new tasks. `TransferOptions::proxy_url` supplies a per-transfer override via `Manager::add_with_options`; the original `add` and `add_with_checksums` interfaces remain supported and inherit the process default. The add API accepts an optional `proxy_url` string; missing/null values inherit the process default. Invalid routes return HTTP 400 before queue admission or persistence. A route becomes immutable for that task's lifetime; existing tasks always recover their saved route rather than inheriting a new command-line default.
+
+Each job owns one pooled Reqwest client built from its effective saved route. Probing and every segment request use that client, including redirects and retry attempts. Clients are reused across pause/resume and isolated across transfers, so authentication and route configuration cannot leak into other downloads. The worker semaphore, cancellation tokens, global bandwidth limiter, checksum verification, and SQLite checkpoints continue to use the shared engine. No synchronous lock is held during network operations.
+
+An explicit route uses `ClientBuilder::no_proxy()` followed by `Proxy::all()`, selecting the configured proxy for both HTTP and HTTPS targets and preventing environment exclusions from bypassing it. Unconfigured transfers keep the previous Reqwest default environment behavior. Unreachable proxies or rejected authentication fail through the existing bounded retry/error path; there is no direct-route fallback. HTTP targets use forward-proxy requests; HTTPS targets use CONNECT through HTTP/HTTPS proxies. HTTPS proxy URLs add TLS to the proxy hop. SOCKS5 uses local destination resolution and SOCKS5h sends the hostname to the proxy. Proxy and destination certificate validation stay enabled.
+
+SQLite version 3 adds nullable `downloads.proxy_url`, persisted atomically alongside transfer state and chunks. Null means no explicitly selected route. The complete normalized URL is local credential-bearing metadata and survives restart; it is never copied into the public snapshot unchanged. Snapshot `proxy_url` contains only scheme/host/port, and `proxy_authenticated` indicates whether authentication was configured. Display and Debug implementations also remove user information. JSON serialization of the internal route deliberately preserves it for journal/import recovery; do not expose internal records as API payloads. Credentials are not encrypted in SQLite, so the journal's local access controls matter.
+
+The test suite uses local authenticated HTTP and SOCKS proxies, remote-DNS fixtures with an otherwise unresolvable origin, and TLS fixtures for CONNECT and encrypted HTTPS proxy hops. The self-signed test certificate is trusted only in explicitly configured test clients; untrusted-certificate requests are checked to fail. `tokio-rustls` is a development dependency already present transitively, and enabling Reqwest's `socks` feature adds no new production dependency crate.

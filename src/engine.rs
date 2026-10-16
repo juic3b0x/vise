@@ -29,6 +29,7 @@ use crate::{
     error::{Error, Result},
     events::{Event, EventKind},
     model::{Chunk, ChunkStatus, Download, LegacyJournal, Record, Status, timestamp_millis},
+    proxy::{self, ProxyUrl},
     rate_limiter::{RateConfiguration, RateLimit, RateLimiter},
 };
 
@@ -44,6 +45,8 @@ pub struct Config {
     pub read_timeout: Duration,
     /// None restores the saved setting; Some(UNLIMITED) explicitly disables it.
     pub limit_rate: Option<RateLimit>,
+    /// Default for newly created tasks; recovered tasks retain their own route.
+    pub proxy_url: Option<ProxyUrl>,
 }
 
 impl Default for Config {
@@ -55,6 +58,7 @@ impl Default for Config {
             retries: 5,
             read_timeout: Duration::from_secs(30),
             limit_rate: None,
+            proxy_url: None,
         }
     }
 }
@@ -65,14 +69,16 @@ struct Run {
 }
 struct Job {
     record: RwLock<Record>,
+    client: Client,
     control: Mutex<()>,
     run: Mutex<Option<Run>>,
     removed: AtomicBool,
 }
 impl Job {
-    fn new(record: Record) -> Self {
+    fn new(record: Record, client: Client) -> Self {
         Self {
             record: RwLock::new(record),
+            client,
             control: Mutex::new(()),
             run: Mutex::new(None),
             removed: AtomicBool::new(false),
@@ -82,7 +88,6 @@ impl Job {
 
 struct Inner {
     config: Config,
-    client: Client,
     database: Database,
     rate_limiter: RateLimiter,
     settings: Mutex<()>,
@@ -105,6 +110,12 @@ struct Metadata {
     ranged: bool,
     validator: Option<String>,
     expected: ExpectedChecksums,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TransferOptions {
+    pub expected: ExpectedChecksums,
+    pub proxy_url: Option<ProxyUrl>,
 }
 
 impl Manager {
@@ -133,13 +144,6 @@ impl Manager {
                 "cannot lock output directory (another Vise process may be using it): {e}"
             ))
         })?;
-        let client = Client::builder()
-            .user_agent(concat!("Vise/", env!("CARGO_PKG_VERSION")))
-            .connect_timeout(Duration::from_secs(15))
-            .read_timeout(config.read_timeout)
-            .redirect(reqwest::redirect::Policy::limited(10))
-            .pool_max_idle_per_host(64)
-            .build()?;
         let database = Database::open(state_dir.join(FILE_NAME)).await?;
         let rate = match config.limit_rate {
             Some(rate) => {
@@ -241,14 +245,14 @@ impl Manager {
                 }
             }
             normalize_chunks(&mut record);
-            jobs.insert(record.id, Arc::new(Job::new(record)));
+            let client = proxy::client(config.read_timeout, record.proxy_url.as_ref())?;
+            jobs.insert(record.id, Arc::new(Job::new(record, client)));
         }
         let (events, _) = watch::channel(0);
         let (activity, _) = broadcast::channel(2048);
         let manager = Self(Arc::new(Inner {
             pool: Semaphore::new(config.concurrent_downloads),
             config,
-            client,
             database,
             rate_limiter: RateLimiter::new(rate),
             settings: Mutex::new(()),
@@ -384,8 +388,30 @@ impl Manager {
         filename: Option<&str>,
         expected: ExpectedChecksums,
     ) -> Result<Download> {
+        self.add_with_options(
+            url,
+            filename,
+            TransferOptions {
+                expected,
+                ..TransferOptions::default()
+            },
+        )
+        .await
+    }
+
+    pub async fn add_with_options(
+        &self,
+        url: &str,
+        filename: Option<&str>,
+        options: TransferOptions,
+    ) -> Result<Download> {
+        let expected = options.expected;
         let expected = ExpectedChecksums::new(expected.sha256.as_deref(), expected.md5.as_deref())?;
         let url = validate_url(url)?;
+        let proxy_url = options
+            .proxy_url
+            .or_else(|| self.0.config.proxy_url.clone());
+        let client = proxy::client(self.0.config.read_timeout, proxy_url.as_ref())?;
         let _admission = self.0.admission.lock().await;
         if self.0.stopping.load(Ordering::Acquire) {
             return Err(Error::Conflict("manager is shutting down".into()));
@@ -417,20 +443,24 @@ impl Manager {
         let id = Uuid::new_v4();
         jobs.insert(
             id,
-            Arc::new(Job::new(Record {
-                id,
-                url: url.into(),
-                filename: name,
-                status: Status::Paused,
-                total_bytes: None,
-                ranged: false,
-                validator: None,
-                chunks: vec![],
-                error: None,
-                checksums: expected.into(),
-                speed: 0.0,
-                created_at: timestamp_millis(),
-            })),
+            Arc::new(Job::new(
+                Record {
+                    id,
+                    url: url.into(),
+                    filename: name,
+                    proxy_url,
+                    status: Status::Paused,
+                    total_bytes: None,
+                    ranged: false,
+                    validator: None,
+                    chunks: vec![],
+                    error: None,
+                    checksums: expected.into(),
+                    speed: 0.0,
+                    created_at: timestamp_millis(),
+                },
+                client,
+            )),
         );
         drop(jobs);
         if let Err(error) = self.checkpoint().await {
@@ -771,7 +801,7 @@ impl Manager {
         };
         self.transition(&job, Status::Probing).await?;
         let url = job.record.read().await.url.clone();
-        let metadata = self.probe(&url, &cancel).await?;
+        let metadata = self.probe(&job.client, &url, &cancel).await?;
         if metadata.total.is_some_and(|size| size > i64::MAX as u64) {
             return Err(Error::Invalid(
                 "resource size exceeds SQLite's signed 64-bit integer range".into(),
@@ -892,11 +922,18 @@ impl Manager {
         Ok(())
     }
 
-    async fn probe(&self, url: &str, cancel: &CancellationToken) -> Result<Metadata> {
+    async fn probe(
+        &self,
+        client: &Client,
+        url: &str,
+        cancel: &CancellationToken,
+    ) -> Result<Metadata> {
         let mut attempt = 0;
         loop {
             let result = async {
-                let response = self.request(url, Some("bytes=0-0"), None, cancel).await?;
+                let response = self
+                    .request(client, url, Some("bytes=0-0"), None, cancel)
+                    .await?;
                 let status = response.status();
                 if status == StatusCode::RANGE_NOT_SATISFIABLE
                     && response
@@ -955,16 +992,13 @@ impl Manager {
 
     async fn request(
         &self,
+        client: &Client,
         url: &str,
         range: Option<&str>,
         validator: Option<&str>,
         cancel: &CancellationToken,
     ) -> Result<Response> {
-        let mut request = self
-            .0
-            .client
-            .get(url)
-            .header(header::ACCEPT_ENCODING, "identity");
+        let mut request = client.get(url).header(header::ACCEPT_ENCODING, "identity");
         request = request.header("want-repr-digest", "sha-256=10, md5=1");
         if let Some(range) = range {
             request = request.header(header::RANGE, range);
@@ -1062,6 +1096,7 @@ impl Manager {
         };
         let response = self
             .request(
+                &job.client,
                 &url,
                 range.as_deref(),
                 if ranged { validator.as_deref() } else { None },

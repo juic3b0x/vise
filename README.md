@@ -20,6 +20,7 @@ Vise is a high-performance HTTP(S) download manager built in Rust. Multi-threade
 - **Live terminal monitor:** In WebUI mode, follow timestamped events and one-second transfer summaries on stdout while the browser controls downloads.
 - **Careful file handling:** Validate range responses, save durable checkpoints, and refuse to overwrite existing output files.
 - **Checksum verification:** Verify SHA-256 and MD5 before publishing a file; preserve corrupt downloads for inspection or an explicit retry.
+- **Per-transfer proxies:** HTTP/HTTPS proxies and SOCKS5 tunnels, including authentication and saved routes for resumed downloads.
 
 ## Installation
 
@@ -109,6 +110,32 @@ The limit is **global**: every active file and chunk shares the same byte budget
 Limits are saved in the output directory's SQLite journal and restored on the next launch. An explicit `--limit-rate` overrides the saved setting; use `--limit-rate off` to clear it. New journals start unlimited.
 
 The cap applies to streamed response body bytes, including retries. HTTP headers and range probes are excluded. A bounded token bucket permits short bursts, and network/client buffering can briefly receive data ahead of the stream; the limit controls sustained application throughput.
+
+## Proxy routing
+
+Route downloads through an HTTP, HTTPS, or SOCKS5 proxy:
+
+```sh
+vise --proxy socks5://127.0.0.1:1080 https://example.com/archive.zip
+vise --proxy socks5h://127.0.0.1:1080 https://example.com/archive.zip
+vise --proxy http://proxy.example:8080 --batch https://example.com/a.zip https://example.com/b.zip
+vise --proxy https://proxy.example:8443 https://example.com/archive.zip
+vise --webui --proxy socks5h://127.0.0.1:1080
+```
+
+`socks5://` resolves destination hostnames locally; `socks5h://` delegates them to the proxy. HTTP proxies forward HTTP requests and use CONNECT tunnels for HTTPS destinations. An `https://` proxy URL also encrypts the connection to the proxy. TLS certificate verification remains enabled for both proxy and destination.
+
+`--proxy` sets the default for **new** downloads in that process, including interactive additions and dashboard/API submissions. API requests can override it with a per-transfer `proxy_url`:
+
+```sh
+curl -H 'Content-Type: application/json' \
+  -d '{"url":"https://example.com/archive.zip","proxy_url":"socks5h://127.0.0.1:1080"}' \
+  http://127.0.0.1:8080/api/downloads
+```
+
+Omitting `proxy_url` or passing null inherits the CLI default. Each transfer saves its effective route in SQLite and reuses it for probes, chunks, retries, and resume. A later `--proxy` value does not replace routes for saved tasks. Failed explicit proxies never fall back to direct connections. With no explicit route, Reqwest's existing environment-proxy behavior is preserved; an explicit route overrides environment proxy and `NO_PROXY` settings. See the [Reqwest proxy guide](https://docs.rs/reqwest/0.12.28/reqwest/#proxies).
+
+Authentication can be included as `scheme://username:password@host:port`; percent-encode reserved characters in credentials. API/telemetry responses expose a credential-free `proxy_url` and `proxy_authenticated` flag. The complete route, including credentials, is stored in the local journal so authenticated downloads can resume. Protect the output directory and journal as local credential-bearing data.
 
 ## Checksum verification
 
@@ -231,6 +258,7 @@ WebUI mode uses the same download engine and worker pool as the CLI, and replace
 | `--limit-rate` | Shared body-byte cap, e.g. `5M`, `500KB/s`, or `off` | Saved setting; otherwise unlimited |
 | `--expected-sha256` | Expected SHA-256 for one URL, 64 hex digits | Learn from metadata if available |
 | `--expected-md5` | Expected MD5 for one URL, 32 hex digits | Learn from metadata if available |
+| `--proxy` | Default HTTP/HTTPS/SOCKS5/SOCKS5h route for new downloads | No explicit route |
 | `-i, --interactive` | Keep the terminal queue open | Off with URL arguments |
 | `--batch` | Never read terminal input | Off |
 | `--resume-all` | Resume saved paused and failed tasks | Off |

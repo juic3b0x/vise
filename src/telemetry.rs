@@ -331,6 +331,8 @@ mod tests {
             id: Uuid::nil(),
             url: String::new(),
             filename: "test\n\x1b[31m.bin".into(),
+            proxy_url: None,
+            proxy_authenticated: false,
             status: Status::Completed,
             total_bytes: Some(1024),
             downloaded_bytes: 1024,

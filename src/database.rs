@@ -16,7 +16,7 @@ use crate::{
 };
 
 const APPLICATION_ID: i32 = 0x5649_5345; // VISE
-const SCHEMA_VERSION: i32 = 2;
+const SCHEMA_VERSION: i32 = 3;
 pub const FILE_NAME: &str = "state.sqlite3";
 
 const DOWNLOADS_SCHEMA: &str = r#"
@@ -35,7 +35,8 @@ CREATE TABLE downloads (
     expected_md5 TEXT CHECK (expected_md5 IS NULL OR length(expected_md5)=32),
     actual_sha256 TEXT CHECK (actual_sha256 IS NULL OR length(actual_sha256)=64),
     actual_md5 TEXT CHECK (actual_md5 IS NULL OR length(actual_md5)=32),
-    verified_at INTEGER CHECK (verified_at IS NULL OR verified_at>=0)
+    verified_at INTEGER CHECK (verified_at IS NULL OR verified_at>=0),
+    proxy_url TEXT
 ) STRICT;
 "#;
 const SCHEMA: &str = r#"
@@ -128,6 +129,11 @@ impl Database {
                 transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
                 transaction.commit()?;
                 connection.pragma_update(None, "foreign_keys", "ON")?;
+            } else if version == 2 {
+                let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                transaction.execute_batch("ALTER TABLE downloads ADD COLUMN proxy_url TEXT")?;
+                transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+                transaction.commit()?;
             }
             let check: String = connection.query_row("PRAGMA quick_check(1)", [], |row| row.get(0))?;
             if check != "ok" { return Err(Error::Invalid(format!("SQLite journal integrity check failed: {check}"))); }
@@ -318,13 +324,14 @@ fn write_rows<'a>(
     records: impl Iterator<Item = &'a Record>,
 ) -> Result<()> {
     let mut download = transaction.prepare_cached(r#"
-        INSERT INTO downloads(id,url,output_path,total_size,status,created_at,updated_at,ranged,validator,error,expected_sha256,expected_md5,actual_sha256,actual_md5,verified_at)
-        VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)
+        INSERT INTO downloads(id,url,output_path,total_size,status,created_at,updated_at,ranged,validator,error,expected_sha256,expected_md5,actual_sha256,actual_md5,verified_at,proxy_url)
+        VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)
         ON CONFLICT(id) DO UPDATE SET url=excluded.url, output_path=excluded.output_path,
             total_size=excluded.total_size, status=excluded.status, updated_at=excluded.updated_at,
             ranged=excluded.ranged, validator=excluded.validator, error=excluded.error,
             expected_sha256=excluded.expected_sha256, expected_md5=excluded.expected_md5,
-            actual_sha256=excluded.actual_sha256, actual_md5=excluded.actual_md5, verified_at=excluded.verified_at
+            actual_sha256=excluded.actual_sha256, actual_md5=excluded.actual_md5, verified_at=excluded.verified_at,
+            proxy_url=excluded.proxy_url
     "#)?;
     let mut chunk = transaction.prepare_cached(r#"
         INSERT INTO chunks(download_id,chunk_index,start_byte,end_byte,downloaded_bytes,status)
@@ -349,7 +356,11 @@ fn write_rows<'a>(
             record.checksums.expected_md5,
             record.checksums.actual_sha256,
             record.checksums.actual_md5,
-            record.checksums.verified_at
+            record.checksums.verified_at,
+            record
+                .proxy_url
+                .as_ref()
+                .map(crate::proxy::ProxyUrl::as_str)
         ])?;
         transaction.execute(
             "DELETE FROM chunks WHERE download_id=?1 AND chunk_index>=?2",
@@ -373,7 +384,7 @@ fn read_records(connection: &mut Connection) -> Result<Vec<Record>> {
     let transaction = connection.transaction()?;
     let mut records = BTreeMap::new();
     {
-        let mut statement = transaction.prepare("SELECT id,url,output_path,total_size,status,created_at,ranged,validator,error,expected_sha256,expected_md5,actual_sha256,actual_md5,verified_at FROM downloads ORDER BY id")?;
+        let mut statement = transaction.prepare("SELECT id,url,output_path,total_size,status,created_at,ranged,validator,error,expected_sha256,expected_md5,actual_sha256,actual_md5,verified_at,proxy_url FROM downloads ORDER BY id")?;
         let mut rows = statement.query([])?;
         while let Some(row) = rows.next()? {
             let id: String = row.get(0)?;
@@ -386,6 +397,10 @@ fn read_records(connection: &mut Connection) -> Result<Vec<Record>> {
                     id,
                     url: row.get(1)?,
                     filename: row.get(2)?,
+                    proxy_url: row
+                        .get::<_, Option<String>>(14)?
+                        .map(|value| value.parse())
+                        .transpose()?,
                     total_bytes: row.get::<_, Option<i64>>(3)?.map(unsigned).transpose()?,
                     status: status.parse()?,
                     created_at: row.get(5)?,
@@ -479,7 +494,7 @@ mod tests {
                     state
                         .connection
                         .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?,
-                    2
+                    i64::from(SCHEMA_VERSION)
                 );
                 assert!(
                     !state
@@ -510,6 +525,7 @@ mod tests {
             id: Uuid::new_v4(),
             url: "https://example.com/file.bin".into(),
             filename: "file.bin".into(),
+            proxy_url: None,
             status: Status::Paused,
             total_bytes: Some(1024),
             ranged: true,
@@ -641,6 +657,63 @@ mod tests {
         assert!(!next.is_finished());
         release.send(()).unwrap();
         next.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn migrates_v2_and_round_trips_authenticated_proxy_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        let connection = Connection::open(&path).unwrap();
+        connection.execute_batch("CREATE TABLE downloads(id TEXT PRIMARY KEY NOT NULL,url TEXT NOT NULL,output_path TEXT NOT NULL UNIQUE,total_size INTEGER,status TEXT NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,ranged INTEGER NOT NULL,validator TEXT,error TEXT,expected_sha256 TEXT,expected_md5 TEXT,actual_sha256 TEXT,actual_md5 TEXT,verified_at INTEGER) STRICT;").unwrap();
+        connection.execute_batch(SCHEMA).unwrap();
+        connection
+            .pragma_update(None, "application_id", APPLICATION_ID)
+            .unwrap();
+        connection.pragma_update(None, "user_version", 2).unwrap();
+        let mut original = record();
+        original.checksums.expected_sha256 = Some("0".repeat(64));
+        connection.execute("INSERT INTO downloads VALUES(?1,?2,?3,1024,'paused',1234,1234,1,'\"v1\"',NULL,?4,NULL,NULL,NULL,NULL)", params![original.id.to_string(), original.url, original.filename, original.checksums.expected_sha256]).unwrap();
+        connection
+            .execute(
+                "INSERT INTO chunks VALUES(?1,0,0,1024,256,'paused')",
+                [original.id.to_string()],
+            )
+            .unwrap();
+        drop(connection);
+        let database = Database::open(&path).await.unwrap();
+        assert_eq!(database.load().await.unwrap(), vec![original.clone()]);
+        original.proxy_url = Some(
+            "socks5h://alice:p%40ssword@proxy.example:1080"
+                .parse()
+                .unwrap(),
+        );
+        database.persist(vec![original.clone()]).await.unwrap();
+        assert_eq!(database.load().await.unwrap(), vec![original.clone()]);
+        let public = database.list().await.unwrap().remove(0);
+        assert!(public.proxy_authenticated);
+        assert_eq!(
+            public.proxy_url.as_deref(),
+            Some("socks5h://proxy.example:1080")
+        );
+        assert!(!serde_json::to_string(&public).unwrap().contains("ssword"));
+        database
+            .call(|state| {
+                assert_eq!(
+                    state
+                        .connection
+                        .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?,
+                    i64::from(SCHEMA_VERSION)
+                );
+                assert!(
+                    !state
+                        .connection
+                        .prepare("PRAGMA foreign_key_check")?
+                        .exists([])?
+                );
+                Ok(())
+            })
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

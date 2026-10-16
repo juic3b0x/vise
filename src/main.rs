@@ -6,11 +6,12 @@ use vise::{
     checksum::ExpectedChecksums,
     cli,
     engine::{Config, Manager},
+    proxy::ProxyUrl,
     rate_limiter::RateLimit,
     telemetry, web,
 };
 
-#[derive(Debug, Parser)]
+#[derive(Parser)]
 #[command(version, about = "Vise — concurrent, resumable downloads", long_about = None)]
 struct Args {
     /// HTTP(S) URLs to enqueue
@@ -57,6 +58,9 @@ struct Args {
     /// Expected MD5 digest for exactly one URL (32 hexadecimal digits)
     #[arg(long)]
     expected_md5: Option<String>,
+    /// Default proxy for new downloads: http(s)://host:port or socks5(h)://host:port
+    #[arg(long)]
+    proxy: Option<String>,
 }
 
 #[tokio::main]
@@ -78,6 +82,11 @@ async fn main() -> ExitCode {
 }
 
 async fn run(args: Args) -> anyhow::Result<u8> {
+    let proxy_url = args
+        .proxy
+        .as_deref()
+        .map(str::parse::<ProxyUrl>)
+        .transpose()?;
     let expected = ExpectedChecksums::new(
         args.expected_sha256.as_deref(),
         args.expected_md5.as_deref(),
@@ -111,6 +120,7 @@ async fn run(args: Args) -> anyhow::Result<u8> {
         retries: args.retries,
         read_timeout: Duration::from_secs(args.timeout),
         limit_rate: args.limit_rate,
+        proxy_url,
     })
     .await?;
     let stop = CancellationToken::new();

@@ -115,6 +115,8 @@ pub(crate) struct Record {
     pub id: Uuid,
     pub url: String,
     pub filename: String,
+    #[serde(default)]
+    pub proxy_url: Option<crate::proxy::ProxyUrl>,
     pub status: Status,
     pub total_bytes: Option<u64>,
     pub ranged: bool,
@@ -139,6 +141,14 @@ impl Record {
             id: self.id,
             url: self.url.clone(),
             filename: self.filename.clone(),
+            proxy_url: self
+                .proxy_url
+                .as_ref()
+                .map(crate::proxy::ProxyUrl::redacted),
+            proxy_authenticated: self
+                .proxy_url
+                .as_ref()
+                .is_some_and(crate::proxy::ProxyUrl::authenticated),
             status: self.status,
             total_bytes: self.total_bytes,
             downloaded_bytes: downloaded,
@@ -175,6 +185,11 @@ pub struct Download {
     pub id: Uuid,
     pub url: String,
     pub filename: String,
+    /// Configured route with user information removed. Credentials stay local.
+    #[serde(default)]
+    pub proxy_url: Option<String>,
+    #[serde(default)]
+    pub proxy_authenticated: bool,
     pub status: Status,
     pub total_bytes: Option<u64>,
     pub downloaded_bytes: u64,

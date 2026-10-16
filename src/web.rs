@@ -18,7 +18,11 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::{
-    checksum::ExpectedChecksums, engine::Manager, error::Error, events::EventKind, model::Download,
+    checksum::ExpectedChecksums,
+    engine::{Manager, TransferOptions},
+    error::Error,
+    events::EventKind,
+    model::Download,
     rate_limiter::RateConfiguration,
 };
 
@@ -210,24 +214,31 @@ struct AddRequest {
     filename: Option<String>,
     expected_sha256: Option<String>,
     expected_md5: Option<String>,
+    proxy_url: Option<String>,
 }
 async fn add(
     State(state): State<AppState>,
     Json(input): Json<AddRequest>,
 ) -> Result<(StatusCode, Json<Download>), ApiError> {
+    let options = TransferOptions {
+        expected: ExpectedChecksums::new(
+            input.expected_sha256.as_deref(),
+            input.expected_md5.as_deref(),
+        )
+        .inspect_err(|error| rejected_action(&state.manager, "add", error))?,
+        proxy_url: input
+            .proxy_url
+            .as_deref()
+            .map(str::parse)
+            .transpose()
+            .inspect_err(|error| rejected_action(&state.manager, "add", error))?,
+    };
     Ok((
         StatusCode::CREATED,
         Json(
             state
                 .manager
-                .add_with_checksums(
-                    &input.url,
-                    input.filename.as_deref(),
-                    ExpectedChecksums::new(
-                        input.expected_sha256.as_deref(),
-                        input.expected_md5.as_deref(),
-                    )?,
-                )
+                .add_with_options(&input.url, input.filename.as_deref(), options)
                 .await
                 .inspect_err(|error| rejected_action(&state.manager, "add", error))?,
         ),
