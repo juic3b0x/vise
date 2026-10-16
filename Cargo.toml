@@ -10,6 +10,9 @@ license = "MIT OR Apache-2.0"
 anyhow = "1"
 axum = { version = "0.8", features = ["ws"] }
 bytes = "1"
+base64 = "0.22"
+sha2 = "0.10"
+md-5 = "0.10"
 clap = { version = "4", features = ["derive"] }
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 fs2 = "0.4"

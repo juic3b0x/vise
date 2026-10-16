@@ -181,8 +181,12 @@ fn format_event(event: &Event, color: bool) -> String {
             format!("{identity} · removed from queue; completed output kept"),
         ),
         EventKind::Completed => ("DONE", 32, format!("{identity} · {progress}")),
-        EventKind::Failed => (
-            "FAILED",
+        EventKind::Failed | EventKind::Corrupt => (
+            if event.kind == EventKind::Corrupt {
+                "CORRUPT"
+            } else {
+                "FAILED"
+            },
             31,
             format!(
                 "{identity} · {}",
@@ -193,6 +197,11 @@ fn format_event(event: &Event, color: bool) -> String {
                     .map(clean)
                     .unwrap_or_else(|| "download failed".into())
             ),
+        ),
+        EventKind::Verified => (
+            "VERIFIED",
+            32,
+            format!("{identity} · checksums match before publication"),
         ),
         EventKind::StateChanged { from, to } => (
             "STATE",
@@ -281,9 +290,11 @@ fn state(status: Status) -> &'static str {
         Status::Queued => "queued",
         Status::Probing => "probing",
         Status::Downloading => "downloading",
+        Status::Verifying => "verifying",
         Status::Paused => "paused",
         Status::Completed => "completed",
         Status::Failed => "failed",
+        Status::Corrupt => "corrupt",
     }
 }
 
@@ -326,6 +337,7 @@ mod tests {
             bytes_per_second: 0.0,
             eta_seconds: None,
             error: None,
+            checksums: Default::default(),
             created_at: 0,
             chunks: Vec::new(),
         };

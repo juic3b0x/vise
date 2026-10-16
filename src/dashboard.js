@@ -4,8 +4,9 @@
 // by the current queue; only changed attributes/text are patched on updates.
 (() => {
   const $ = id => document.getElementById(id);
-  const active = state => ['queued', 'probing', 'downloading'].includes(state);
-  const states = new Set(['queued', 'probing', 'downloading', 'paused', 'completed', 'failed']);
+  const active = state => ['queued', 'probing', 'downloading', 'verifying'].includes(state);
+  const states = new Set(['queued', 'probing', 'downloading', 'verifying', 'paused', 'completed', 'failed', 'corrupt']);
+  const inCategory = (d, category) => category === 'all' || (category === 'active' ? active(d.status) : category === 'failed' ? ['failed', 'corrupt'].includes(d.status) : d.status === category);
   const chunkStates = new Set(['queued', 'downloading', 'paused', 'completed', 'failed']);
   const cards = new Map();
   const histories = new Map();
@@ -111,8 +112,8 @@
         const old = previous.get(d.id);
         if (!old) activity('Transfer queued', d.filename);
         else if (old.status !== d.status) {
-          const labels = { downloading: 'Transfer running', paused: 'Transfer paused', completed: 'File completed', failed: 'Transfer failed', queued: 'Transfer queued', probing: 'Checking source' };
-          activity(labels[d.status], d.filename, d.status === 'failed' ? 'error' : d.status === 'completed' ? 'success' : '');
+          const labels = { downloading: 'Transfer running', verifying: 'Verifying checksums', corrupt: 'Checksum mismatch', paused: 'Transfer paused', completed: 'File completed', failed: 'Transfer failed', queued: 'Transfer queued', probing: 'Checking source' };
+          activity(labels[d.status], d.filename, ['failed', 'corrupt'].includes(d.status) ? 'error' : d.status === 'completed' ? 'success' : '');
         }
       }
       const ids = new Set(data.downloads.map(d => d.id));
@@ -138,7 +139,7 @@
   }
   function matches(d) {
     const query = $('search').value.trim().toLocaleLowerCase();
-    return (filter === 'all' || (filter === 'active' ? active(d.status) : d.status === filter))
+    return inCategory(d, filter)
       && (!query || d.filename.toLocaleLowerCase().includes(query) || d.url.toLocaleLowerCase().includes(query));
   }
   function render() {
@@ -156,7 +157,7 @@
     text($('connection-text'), fresh ? lastTransport === 'websocket' ? 'ENGINE LIVE' : 'HTTP FALLBACK' : initialized ? 'RECONNECTING' : 'CONNECTING');
     for (const count of document.querySelectorAll('[data-count]')) {
       const category = count.dataset.count;
-      text(count, downloads.filter(d => category === 'all' || (category === 'active' ? active(d.status) : d.status === category)).length);
+      text(count, downloads.filter(d => inCategory(d, category)).length);
     }
     const ids = new Set(downloads.map(d => d.id));
     for (const [id, card] of cards) if (!ids.has(id)) {
@@ -191,8 +192,8 @@
       size: select('.download-size'), rate: select('.download-speed'), percent: select('.download-percent'),
       track: select('.progress-track'), fill: select('.progress-fill'), summary: select('.chunk-summary'),
       grid: select('.chunk-grid'), eta: select('.download-eta'), identity: select('.download-id'),
-      toggle: select('.toggle'), cancel: select('.cancel'), error: select('.download-error'), spark: select('.sparkline path'), tiles: [] };
-    card.toggle.addEventListener('click', () => action(id, active(card.download.status) ? 'pause' : 'resume'));
+      toggle: select('.toggle'), cancel: select('.cancel'), error: select('.download-error'), checksum: select('.checksum-status'), spark: select('.sparkline path'), tiles: [] };
+    card.toggle.addEventListener('click', () => action(id, active(card.download.status) ? 'pause' : ['corrupt','failed'].includes(card.download.status) ? 'retry' : 'resume'));
     card.cancel.addEventListener('click', () => action(id, 'delete'));
     return card;
   }
@@ -203,7 +204,7 @@
     attr(c.root, 'aria-busy', !!inFlight);
     text(c.filename, d.filename); attr(c.filename, 'title', d.filename);
     text(c.source, d.url); attr(c.source, 'title', d.url);
-    text(c.badge, inFlight ? { pause: 'Pausing…', resume: 'Resuming…', delete: 'Removing…' }[inFlight] : d.status);
+    text(c.badge, inFlight ? { pause: 'Pausing…', resume: 'Resuming…', retry: 'Restarting…', delete: 'Removing…' }[inFlight] : d.status);
     text(c.size, bytes(d.downloaded_bytes) + ' / ' + (d.total_bytes == null ? 'unknown' : bytes(d.total_bytes)));
     text(c.rate, fresh ? speed(d.bytes_per_second) : '— /s');
     const percent = percentage(d.downloaded_bytes, d.total_bytes, d.status === 'completed');
@@ -216,8 +217,12 @@
     text(c.eta, d.status === 'completed' ? 'TRANSFER COMPLETE' : fresh ? eta(d.eta_seconds) : 'TELEMETRY STALE');
     text(c.identity, d.id.slice(0, 8).toUpperCase() + (d.chunks.length === 1 ? ' / SINGLE STREAM' : ` / ${d.chunks.length} CHUNKS`));
     c.error.hidden = !d.error; text(c.error, d.error || '');
+    const algorithms = [d.expected_sha256 && 'SHA-256', d.expected_md5 && 'MD5'].filter(Boolean).join(' + ');
+    c.checksum.hidden = !algorithms;
+    text(c.checksum, d.status === 'corrupt' ? `${algorithms} MISMATCH / File retained. Re-download retries every chunk.` : d.status === 'verifying' ? `VERIFYING ${algorithms} / Publication pending` : d.verified_at != null ? `${algorithms} VERIFIED / ${new Date(d.verified_at).toLocaleString()}` : `${algorithms} / Verification required before publication`);
+    attr(c.checksum, 'title', [d.actual_sha256 && `SHA-256: ${d.actual_sha256}`, d.actual_md5 && `MD5: ${d.actual_md5}`].filter(Boolean).join(' / '));
     c.toggle.hidden = d.status === 'completed';
-    text(c.toggle, inFlight && inFlight !== 'delete' ? 'Working…' : active(d.status) ? 'Ⅱ Pause' : d.status === 'failed' ? '↻ Retry' : '▶ Resume');
+    text(c.toggle, inFlight && inFlight !== 'delete' ? 'Working…' : active(d.status) ? 'Ⅱ Pause' : d.status === 'corrupt' ? '↻ Re-download' : d.status === 'failed' ? '↻ Retry' : '▶ Resume');
     text(c.cancel, inFlight === 'delete' ? 'Removing…' : d.status === 'completed' ? 'Remove' : '× Cancel');
     attr(c.cancel, 'title', d.status === 'completed' ? 'Remove from queue. The completed file is kept.' : 'Cancel this transfer and discard its partial data.');
     c.toggle.disabled = c.cancel.disabled = !!inFlight;
@@ -269,7 +274,8 @@
     event.preventDefault();
     const button = $('add-button'); button.disabled = true; text(button, 'Adding…');
     try {
-      const item = await api('/api/downloads', { url: $('url').value.trim(), filename: $('filename').value.trim() || null });
+      const item = await api('/api/downloads', { url: $('url').value.trim(), filename: $('filename').value.trim() || null,
+        expected_sha256: $('expected-sha256').value.trim() || null, expected_md5: $('expected-md5').value.trim() || null });
       $('add-form').reset(); $('url').focus();
       if (!downloads.some(d => d.id === item.id)) { downloads.push(item); activity('Transfer added', item.filename); }
       filter = 'all'; updateFilters();

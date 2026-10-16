@@ -1,3 +1,4 @@
+pub mod checksum;
 pub mod cli;
 pub mod database;
 pub mod engine;

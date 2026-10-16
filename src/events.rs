@@ -13,6 +13,8 @@ pub enum EventKind {
     Deleted,
     Completed,
     Failed,
+    Corrupt,
+    Verified,
     StateChanged {
         from: Status,
         to: Status,

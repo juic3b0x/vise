@@ -8,9 +8,11 @@ pub enum Status {
     Queued,
     Probing,
     Downloading,
+    Verifying,
     Paused,
     Completed,
     Failed,
+    Corrupt,
 }
 
 impl Status {
@@ -19,13 +21,18 @@ impl Status {
             Self::Queued => "queued",
             Self::Probing => "probing",
             Self::Downloading => "downloading",
+            Self::Verifying => "verifying",
             Self::Paused => "paused",
             Self::Completed => "completed",
             Self::Failed => "failed",
+            Self::Corrupt => "corrupt",
         }
     }
     pub fn active(self) -> bool {
-        matches!(self, Self::Queued | Self::Probing | Self::Downloading)
+        matches!(
+            self,
+            Self::Queued | Self::Probing | Self::Downloading | Self::Verifying
+        )
     }
 }
 
@@ -36,9 +43,11 @@ impl FromStr for Status {
             "queued" => Ok(Self::Queued),
             "probing" => Ok(Self::Probing),
             "downloading" => Ok(Self::Downloading),
+            "verifying" => Ok(Self::Verifying),
             "paused" => Ok(Self::Paused),
             "completed" => Ok(Self::Completed),
             "failed" => Ok(Self::Failed),
+            "corrupt" => Ok(Self::Corrupt),
             _ => Err(crate::error::Error::Invalid(format!(
                 "unknown journal download status: {value}"
             ))),
@@ -112,6 +121,8 @@ pub(crate) struct Record {
     pub validator: Option<String>,
     pub chunks: Vec<Chunk>,
     pub error: Option<String>,
+    #[serde(default, flatten)]
+    pub checksums: crate::checksum::Checksums,
     #[serde(default = "timestamp_millis")]
     pub created_at: i64,
     #[serde(skip)]
@@ -142,6 +153,7 @@ impl Record {
             }),
             error: self.error.clone(),
             created_at: self.created_at,
+            checksums: self.checksums.clone(),
             chunks: self
                 .chunks
                 .iter()
@@ -169,6 +181,8 @@ pub struct Download {
     pub bytes_per_second: f64,
     pub eta_seconds: Option<f64>,
     pub error: Option<String>,
+    #[serde(default, flatten)]
+    pub checksums: crate::checksum::Checksums,
     /// Unix epoch milliseconds (UTC).
     pub created_at: i64,
     /// Live segment state. End offsets are exclusive; null denotes a stream.

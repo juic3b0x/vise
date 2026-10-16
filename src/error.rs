@@ -19,6 +19,8 @@ pub enum Error {
     },
     #[error("invalid server response: {0}")]
     Protocol(String),
+    #[error("checksum mismatch: {0}")]
+    ChecksumMismatch(String),
     #[error("state file error: {0}")]
     State(#[from] serde_json::Error),
     #[error("SQLite journal error: {0}")]

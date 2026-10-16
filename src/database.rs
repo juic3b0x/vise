@@ -16,22 +16,29 @@ use crate::{
 };
 
 const APPLICATION_ID: i32 = 0x5649_5345; // VISE
-const SCHEMA_VERSION: i32 = 1;
+const SCHEMA_VERSION: i32 = 2;
 pub const FILE_NAME: &str = "state.sqlite3";
 
-const SCHEMA: &str = r#"
+const DOWNLOADS_SCHEMA: &str = r#"
 CREATE TABLE downloads (
     id          TEXT PRIMARY KEY NOT NULL,
     url         TEXT NOT NULL,
     output_path TEXT NOT NULL UNIQUE,
     total_size  INTEGER CHECK (total_size IS NULL OR total_size >= 0),
-    status      TEXT NOT NULL CHECK (status IN ('queued','probing','downloading','paused','completed','failed')),
+    status      TEXT NOT NULL CHECK (status IN ('queued','probing','downloading','verifying','paused','completed','failed','corrupt')),
     created_at  INTEGER NOT NULL CHECK (created_at >= 0),
     updated_at  INTEGER NOT NULL CHECK (updated_at >= 0),
     ranged      INTEGER NOT NULL CHECK (ranged IN (0,1)),
     validator   TEXT,
-    error       TEXT
+    error       TEXT,
+    expected_sha256 TEXT CHECK (expected_sha256 IS NULL OR length(expected_sha256)=64),
+    expected_md5 TEXT CHECK (expected_md5 IS NULL OR length(expected_md5)=32),
+    actual_sha256 TEXT CHECK (actual_sha256 IS NULL OR length(actual_sha256)=64),
+    actual_md5 TEXT CHECK (actual_md5 IS NULL OR length(actual_md5)=32),
+    verified_at INTEGER CHECK (verified_at IS NULL OR verified_at>=0)
 ) STRICT;
+"#;
+const SCHEMA: &str = r#"
 CREATE INDEX downloads_status ON downloads(status);
 CREATE TABLE chunks (
     download_id      TEXT NOT NULL REFERENCES downloads(id) ON DELETE CASCADE,
@@ -91,7 +98,7 @@ impl Database {
             if version == 0 {
                 let tables: i64 = connection.query_row("SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'", [], |row| row.get(0))?;
                 if tables != 0 || application != 0 { return Err(Error::Invalid("refusing to initialize an existing non-Vise database".into())); }
-            } else if version != SCHEMA_VERSION || application != APPLICATION_ID {
+            } else if !(1..=SCHEMA_VERSION).contains(&version) || application != APPLICATION_ID {
                 return Err(Error::Invalid("invalid Vise SQLite journal identity".into()));
             }
             connection.pragma_update(None, "foreign_keys", "ON")?;
@@ -101,10 +108,26 @@ impl Database {
             connection.pragma_update(None, "wal_autocheckpoint", 1000)?;
             if version == 0 {
                 let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                transaction.execute_batch(DOWNLOADS_SCHEMA)?;
                 transaction.execute_batch(SCHEMA)?;
                 transaction.pragma_update(None, "application_id", APPLICATION_ID)?;
                 transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
                 transaction.commit()?;
+            } else if version == 1 {
+                // Rebuild the parent to extend its CHECK constraint. Foreign keys
+                // are disabled only outside the migration transaction; chunk rows
+                // and their references keep their original table name throughout.
+                connection.pragma_update(None, "foreign_keys", "OFF")?;
+                let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                transaction.execute_batch(&DOWNLOADS_SCHEMA.replace("CREATE TABLE downloads (", "CREATE TABLE downloads_new ("))?;
+                transaction.execute_batch("INSERT INTO downloads_new(id,url,output_path,total_size,status,created_at,updated_at,ranged,validator,error) SELECT id,url,output_path,total_size,status,created_at,updated_at,ranged,validator,error FROM downloads;
+                    DROP TABLE downloads; ALTER TABLE downloads_new RENAME TO downloads;
+                    CREATE INDEX downloads_status ON downloads(status);")?;
+                let violation = transaction.prepare("PRAGMA foreign_key_check")?.exists([])?;
+                if violation { return Err(Error::Invalid("foreign-key violation during journal migration".into())); }
+                transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+                transaction.commit()?;
+                connection.pragma_update(None, "foreign_keys", "ON")?;
             }
             let check: String = connection.query_row("PRAGMA quick_check(1)", [], |row| row.get(0))?;
             if check != "ok" { return Err(Error::Invalid(format!("SQLite journal integrity check failed: {check}"))); }
@@ -295,11 +318,13 @@ fn write_rows<'a>(
     records: impl Iterator<Item = &'a Record>,
 ) -> Result<()> {
     let mut download = transaction.prepare_cached(r#"
-        INSERT INTO downloads(id,url,output_path,total_size,status,created_at,updated_at,ranged,validator,error)
-        VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
+        INSERT INTO downloads(id,url,output_path,total_size,status,created_at,updated_at,ranged,validator,error,expected_sha256,expected_md5,actual_sha256,actual_md5,verified_at)
+        VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)
         ON CONFLICT(id) DO UPDATE SET url=excluded.url, output_path=excluded.output_path,
             total_size=excluded.total_size, status=excluded.status, updated_at=excluded.updated_at,
-            ranged=excluded.ranged, validator=excluded.validator, error=excluded.error
+            ranged=excluded.ranged, validator=excluded.validator, error=excluded.error,
+            expected_sha256=excluded.expected_sha256, expected_md5=excluded.expected_md5,
+            actual_sha256=excluded.actual_sha256, actual_md5=excluded.actual_md5, verified_at=excluded.verified_at
     "#)?;
     let mut chunk = transaction.prepare_cached(r#"
         INSERT INTO chunks(download_id,chunk_index,start_byte,end_byte,downloaded_bytes,status)
@@ -319,7 +344,12 @@ fn write_rows<'a>(
             timestamp_millis(),
             i64::from(record.ranged),
             record.validator,
-            record.error
+            record.error,
+            record.checksums.expected_sha256,
+            record.checksums.expected_md5,
+            record.checksums.actual_sha256,
+            record.checksums.actual_md5,
+            record.checksums.verified_at
         ])?;
         transaction.execute(
             "DELETE FROM chunks WHERE download_id=?1 AND chunk_index>=?2",
@@ -343,7 +373,7 @@ fn read_records(connection: &mut Connection) -> Result<Vec<Record>> {
     let transaction = connection.transaction()?;
     let mut records = BTreeMap::new();
     {
-        let mut statement = transaction.prepare("SELECT id,url,output_path,total_size,status,created_at,ranged,validator,error FROM downloads ORDER BY id")?;
+        let mut statement = transaction.prepare("SELECT id,url,output_path,total_size,status,created_at,ranged,validator,error,expected_sha256,expected_md5,actual_sha256,actual_md5,verified_at FROM downloads ORDER BY id")?;
         let mut rows = statement.query([])?;
         while let Some(row) = rows.next()? {
             let id: String = row.get(0)?;
@@ -362,6 +392,13 @@ fn read_records(connection: &mut Connection) -> Result<Vec<Record>> {
                     ranged: row.get(6)?,
                     validator: row.get(7)?,
                     error: row.get(8)?,
+                    checksums: crate::checksum::Checksums {
+                        expected_sha256: row.get(9)?,
+                        expected_md5: row.get(10)?,
+                        actual_sha256: row.get(11)?,
+                        actual_md5: row.get(12)?,
+                        verified_at: row.get(13)?,
+                    },
                     chunks: Vec::new(),
                     speed: 0.0,
                 },
@@ -402,6 +439,72 @@ mod tests {
     use super::*;
     use crate::model::{ChunkStatus, Status};
 
+    #[tokio::test]
+    async fn migrates_v1_atomically_without_losing_chunks_or_configuration() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        let connection = Connection::open(&path).unwrap();
+        connection.execute_batch("CREATE TABLE downloads(id TEXT PRIMARY KEY NOT NULL,url TEXT NOT NULL,output_path TEXT NOT NULL UNIQUE,total_size INTEGER,status TEXT NOT NULL CHECK(status IN ('queued','probing','downloading','paused','completed','failed')),created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,ranged INTEGER NOT NULL,validator TEXT,error TEXT) STRICT;").unwrap();
+        connection.execute_batch(SCHEMA).unwrap();
+        connection
+            .pragma_update(None, "application_id", APPLICATION_ID)
+            .unwrap();
+        connection.pragma_update(None, "user_version", 1).unwrap();
+        let original = record();
+        connection
+            .execute(
+                "INSERT INTO downloads VALUES(?1,?2,?3,1024,'paused',1234,1234,1,'\"v1\"',NULL)",
+                params![original.id.to_string(), original.url, original.filename],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO chunks VALUES(?1,0,0,1024,256,'paused')",
+                [original.id.to_string()],
+            )
+            .unwrap();
+        connection
+            .execute("INSERT INTO metadata VALUES('limit_rate','1048576')", [])
+            .unwrap();
+        drop(connection);
+        let database = Database::open(&path).await.unwrap();
+        assert_eq!(database.load().await.unwrap(), vec![original.clone()]);
+        assert_eq!(
+            database.load_rate_limit().await.unwrap().bytes_per_second(),
+            Some(1048576)
+        );
+        database
+            .call(|state| {
+                assert_eq!(
+                    state
+                        .connection
+                        .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?,
+                    2
+                );
+                assert!(
+                    !state
+                        .connection
+                        .prepare("PRAGMA foreign_key_check")?
+                        .exists([])?
+                );
+                assert_eq!(
+                    state
+                        .connection
+                        .pragma_query_value(None, "foreign_keys", |row| row.get::<_, i64>(0))?,
+                    1
+                );
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let mut corrupt = original;
+        corrupt.status = Status::Corrupt;
+        corrupt.checksums.expected_sha256 = Some("0".repeat(64));
+        corrupt.checksums.actual_sha256 = Some("1".repeat(64));
+        database.persist(vec![corrupt.clone()]).await.unwrap();
+        assert_eq!(database.load().await.unwrap(), vec![corrupt]);
+    }
+
     fn record() -> Record {
         Record {
             id: Uuid::new_v4(),
@@ -419,6 +522,7 @@ mod tests {
             }],
             created_at: 1234,
             error: None,
+            checksums: Default::default(),
             speed: 0.0,
         }
     }

@@ -3,6 +3,7 @@ use std::{net::SocketAddr, path::PathBuf, process::ExitCode, time::Duration};
 use clap::Parser;
 use tokio_util::sync::CancellationToken;
 use vise::{
+    checksum::ExpectedChecksums,
     cli,
     engine::{Config, Manager},
     rate_limiter::RateLimit,
@@ -50,6 +51,12 @@ struct Args {
     /// Global body-byte rate, e.g. 500K or 5M; off disables a saved limit
     #[arg(long)]
     limit_rate: Option<RateLimit>,
+    /// Expected SHA-256 digest for exactly one URL (64 hexadecimal digits)
+    #[arg(long)]
+    expected_sha256: Option<String>,
+    /// Expected MD5 digest for exactly one URL (32 hexadecimal digits)
+    #[arg(long)]
+    expected_md5: Option<String>,
 }
 
 #[tokio::main]
@@ -71,6 +78,14 @@ async fn main() -> ExitCode {
 }
 
 async fn run(args: Args) -> anyhow::Result<u8> {
+    let expected = ExpectedChecksums::new(
+        args.expected_sha256.as_deref(),
+        args.expected_md5.as_deref(),
+    )?;
+    anyhow::ensure!(
+        expected.is_empty() || args.urls.len() == 1,
+        "checksum flags require exactly one URL"
+    );
     anyhow::ensure!(
         args.name.is_none() || args.urls.len() == 1,
         "--name requires exactly one URL"
@@ -133,7 +148,9 @@ async fn run(args: Args) -> anyhow::Result<u8> {
             manager.resume_all().await?;
         }
         for url in &args.urls {
-            manager.add(url, args.name.as_deref()).await?;
+            manager
+                .add_with_checksums(url, args.name.as_deref(), expected.clone())
+                .await?;
         }
         let controller = async {
             if args.webui {

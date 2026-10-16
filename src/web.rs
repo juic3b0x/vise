@@ -18,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::{
-    engine::Manager, error::Error, events::EventKind, model::Download,
+    checksum::ExpectedChecksums, engine::Manager, error::Error, events::EventKind, model::Download,
     rate_limiter::RateConfiguration,
 };
 
@@ -64,7 +64,7 @@ fn router(state: AppState) -> Router {
         .route("/api/downloads/{id}", get(detail).delete(delete))
         .route("/api/downloads/{id}/pause", post(pause))
         .route("/api/downloads/{id}/resume", post(resume))
-        .route("/api/downloads/{id}/retry", post(resume))
+        .route("/api/downloads/{id}/retry", post(retry))
         .route("/ws", get(websocket))
         .route("/ws/telemetry", get(telemetry_websocket))
         .layer(DefaultBodyLimit::max(16 * 1024))
@@ -208,6 +208,8 @@ async fn detail(
 struct AddRequest {
     url: String,
     filename: Option<String>,
+    expected_sha256: Option<String>,
+    expected_md5: Option<String>,
 }
 async fn add(
     State(state): State<AppState>,
@@ -218,7 +220,14 @@ async fn add(
         Json(
             state
                 .manager
-                .add(&input.url, input.filename.as_deref())
+                .add_with_checksums(
+                    &input.url,
+                    input.filename.as_deref(),
+                    ExpectedChecksums::new(
+                        input.expected_sha256.as_deref(),
+                        input.expected_md5.as_deref(),
+                    )?,
+                )
                 .await
                 .inspect_err(|error| rejected_action(&state.manager, "add", error))?,
         ),
@@ -256,6 +265,18 @@ async fn delete(
         .await
         .inspect_err(|error| rejected_action(&state.manager, "delete", error))?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn retry(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Download>, ApiError> {
+    state
+        .manager
+        .retry(id)
+        .await
+        .inspect_err(|error| rejected_action(&state.manager, "retry", error))?;
+    Ok(Json(state.manager.get(id).await?))
 }
 
 fn rejected_action(manager: &Manager, action: &str, error: &Error) {

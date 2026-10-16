@@ -11,12 +11,12 @@ Vise uses one shared download manager for its CLI and WebUI.
 | GET | `/api/telemetry` | Timestamped download snapshots and global configuration for HTTP fallback |
 | GET | `/api/config` | Global bandwidth configuration |
 | POST | `/api/config` | Apply and persist `{"limit_rate":"5M"}`; use `off` to clear |
-| POST | `/api/downloads` | Add `{"url":"https://…","filename":"optional.zip"}`; HTTP 201 |
+| POST | `/api/downloads` | Add URL, optional filename, `expected_sha256`, and/or `expected_md5`; HTTP 201 |
 | GET | `/api/downloads/{uuid}` | One download |
 | DELETE | `/api/downloads/{uuid}` | Stop the task and remove its queue entry/partial data; HTTP 204; completed outputs are kept |
 | POST | `/api/downloads/{uuid}/pause` | Pause and wait for workers to stop |
 | POST | `/api/downloads/{uuid}/resume` | Queue a paused/failed download |
-| POST | `/api/downloads/{uuid}/retry` | Alias for resume |
+| POST | `/api/downloads/{uuid}/retry` | Resume a failed/paused task; reset every chunk when corrupt |
 | WS | `/ws` | Full JSON download snapshots on change and at least every 500 ms |
 | WS | `/ws/telemetry` | `{timestamp, downloads, configuration}` on change and at least every 500 ms |
 | GET | `/assets/dashboard.css` | Embedded stylesheet, `text/css` |
@@ -33,7 +33,7 @@ curl -X POST -H 'Content-Type: application/json' -d '{}' \
   http://127.0.0.1:8080/api/downloads/REPLACE_WITH_RETURNED_UUID/pause
 ```
 
-Download snapshots contain `id`, `url`, `filename`, `status`, `total_bytes` (nullable), `downloaded_bytes`, `bytes_per_second`, `eta_seconds` (nullable), `error` (nullable), `created_at` (UTC Unix epoch milliseconds), and `chunks`. Each chunk exposes `index` (zero-based), `start_byte`, `end_byte` (exclusive, nullable for unknown-length streams), `downloaded_bytes`, and `status`. These come directly from the worker record under its read lock; the frontend never estimates individual segment progress from the aggregate percentage. Download states are `queued`, `probing`, `downloading`, `paused`, `completed`, and `failed`; chunk states omit `probing`. Older serialized download snapshots without `chunks` deserialize to an empty array. Engine errors use an `error` JSON field and HTTP 400, 404, 409, or 500.
+Download snapshots contain `id`, `url`, `filename`, `status`, `total_bytes` (nullable), `downloaded_bytes`, `bytes_per_second`, `eta_seconds` (nullable), `error` (nullable), `created_at` (UTC Unix epoch milliseconds), and `chunks`. Each chunk exposes `index` (zero-based), `start_byte`, `end_byte` (exclusive, nullable for unknown-length streams), `downloaded_bytes`, and `status`. These come directly from the worker record under its read lock; the frontend never estimates individual segment progress from the aggregate percentage. Download states are `queued`, `probing`, `downloading`, `verifying`, `paused`, `completed`, `failed`, and `corrupt`; chunk states omit `probing`, `verifying`, and `corrupt`. Older serialized download snapshots without `chunks` deserialize to an empty array. Engine errors use an `error` JSON field and HTTP 400, 404, 409, or 500.
 
 Both configuration endpoints return `{"limit_rate":"5 MiB/s","limit_bytes_per_second":5242880}` for a `5M` cap. Unlimited is represented by `{"limit_rate":"unlimited","limit_bytes_per_second":null}`. The POST body requires a string and rejects unknown fields. Invalid rates return HTTP 400 without changing the previous setting; failed journal commits return HTTP 500 and preserve the live setting. The dashboard uses `/ws/telemetry` to receive downloads and configuration together. `/ws` retains its download-array format for existing clients; its snapshots gain the additive `chunks` field.
 
@@ -54,7 +54,7 @@ curl http://127.0.0.1:8080/api/config
 - Downloads publish only after every segment finishes and the file is synchronized. A hard link creates the final filename atomically without overwriting existing files. An interrupted publish is recovered by checking whether the final and partial paths identify the same file. This requires an output filesystem that supports hard links and atomic renames; unsupported operations report an error. Windows syncs individual files but lacks the Unix directory-sync durability guarantee.
 - Automatically derived names receive numeric suffixes on collision. Explicit name collisions fail. A process-wide output-directory lock prevents two Vise instances from corrupting the same journal. Corrupt or unsupported journals are rejected rather than silently discarded.
 
-Local journal and partial files are trusted application data; do not modify them during a transfer. HTTP validators establish representation identity, not cryptographic integrity. Vise checks byte counts but does not provide checksum verification or segmented downloads from multiple mirrors.
+Local journal and partial files are trusted application data; do not modify them during a transfer. HTTP validators establish representation identity. Optional expected checksums verify file integrity before publication; Vise does not provide segmented downloads from multiple mirrors.
 
 ## Project layout
 
@@ -65,6 +65,7 @@ src/main.rs               Arguments, lifecycle, signals, mode selection
 src/lib.rs                Public library modules
 src/engine.rs             Worker pool, transfers, retries, durable checkpoints
 src/database.rs           SQLite schema, migration, transactions, async DB boundary
+src/checksum.rs           Expected digests, representation headers, cancellable file hashing
 src/rate_limiter.rs       Rate parsing, shared token bucket, response-stream adapter
 src/model.rs              Internal records and public snapshots
 src/events.rs             Timestamped lifecycle and server events
@@ -97,7 +98,7 @@ The database module uses bundled SQLite through `rusqlite`. An `Arc<Mutex<Connec
 
 | Table | Stored fields |
 | --- | --- |
-| `downloads` | UUID `id`, `url`, `output_path`, nullable `total_size`, `status`, `created_at`, `updated_at`, `ranged`, `validator`, nullable `error` |
+| `downloads` | UUID `id`, `url`, `output_path`, nullable `total_size`, `status`, `created_at`, `updated_at`, `ranged`, `validator`, nullable `error`, expected/actual SHA-256 and MD5, nullable `verified_at` |
 | `chunks` | `download_id`, zero-based `chunk_index`, `start_byte`, nullable `end_byte`, `downloaded_bytes`, `status` |
 | `metadata` | One-time legacy-import completion marker and global `limit_rate` setting |
 
@@ -125,10 +126,26 @@ Low-rate transfers flush accumulated file bytes at least every 250 ms when token
 
 ## Embedded dashboard
 
-Axum embeds the HTML, CSS, and JavaScript independently with `include_str!`, so installation still produces one executable. The combined frontend source is approximately 53 KiB, with no new crate or browser dependencies. Asset routes use explicit MIME types and `nosniff`. The content security policy allows scripts only from the same origin, with no inline scripts or dynamic code evaluation; inline style attributes support progress indicators. The loopback Host/Origin guards apply to assets and both WebSocket routes as well as REST endpoints.
+Axum embeds the HTML, CSS, and JavaScript independently with `include_str!`, so installation still produces one executable. The combined frontend source is approximately 55 KiB, with no new crate or browser dependencies. Asset routes use explicit MIME types and `nosniff`. The content security policy allows scripts only from the same origin, with no inline scripts or dynamic code evaluation; inline style attributes support progress indicators. The loopback Host/Origin guards apply to assets and both WebSocket routes as well as REST endpoints.
 
 The frontend patches reusable card nodes and chunk tiles instead of replacing the queue on each message. A single animation-frame callback coalesces incoming updates. Each SVG graph holds at most 65 samples across a rolling 60-second window, sampled once per second; per-transfer histories are removed when their queue entries disappear. Plot rendering pauses while the document is hidden. The activity feed holds at most 40 entries derived from observed snapshots and successful controls; it is a browser-session feed, not a durable audit log, and can miss transitions between snapshots.
 
 The WebSocket sends current state immediately, then on manager notifications and every 500 ms. Slow clients have a five-second send timeout. Disconnections trigger reconnects with bounded exponential backoff and jitter. HTTP telemetry polling runs every two seconds while the socket is unavailable; a generation counter prevents a slow HTTP response from replacing a newer WebSocket snapshot. Readings older than 3.5 seconds are marked stale, speeds become unavailable, and disconnected graph segments are left blank. Browser navigation restores connections when returning from the back/forward cache.
 
 Pause/resume/cancel buttons show a pending state and suppress duplicate commands per task. Server acknowledgments and fresh snapshots establish the resulting state; a failed action displays an error without inventing success. The rate slider is logarithmic from 16 KiB/s through 1 GiB/s, plus unlimited. Text input supports the full parser range. Slider releases and presets apply immediately; requests serialize and retain the latest queued setting so rapid adjustments cannot finish out of order. Controls remain usable with keyboard navigation, progress/chunk labels are available to assistive technology, and reduced-motion preferences disable transitions.
+
+## Checksum verification and recovery
+
+POST `/api/downloads` accepts optional `expected_sha256` and `expected_md5` strings (or null). Input is trimmed, validated for exact hexadecimal length, and normalized to lowercase before the task is created. Invalid values return HTTP 400 without adding a task. `Manager::add_with_checksums` provides the equivalent library interface; the original `add` API remains available for metadata-only expectations.
+
+Every public snapshot adds nullable `expected_sha256`, `expected_md5`, `actual_sha256`, `actual_md5`, and `verified_at` fields at the top level. `verified_at` is a successful verification timestamp in UTC Unix milliseconds. Download states also include `verifying` (active) and `corrupt` (terminal); chunk states remain unchanged. A corrupt file can have all chunks marked complete because these describe received bytes, not independent segment verification. Both accepted digests must match. No expected digest means the existing byte-length/range validation and publication path remains in use, with no extra hashing pass.
+
+After chunk workers join, Vise flushes and synchronizes the staging file, checkpoints its offsets under `verifying`, and hashes only the requested algorithms in one sequential pass. RustCrypto `sha2` and `md-5` share the Digest interface. The blocking pool performs reads and hashing with a 1 MiB buffer, checking cancellation between reads. Transfer controls join the worker before resetting or deleting staging data. The manager commits matching results before atomically linking the staging file to its final filename; checksum failure never creates that link. Verification and corruption events flow through the existing terminal telemetry channel, and CLI batch mode returns a nonzero status for corrupt downloads.
+
+SQLite schema version 2 extends the download-status constraint and adds checksum columns. Version 1 journals migrate transactionally by rebuilding the parent table while preserving chunk rows, timestamps, and metadata; foreign-key validation runs before commit and enforcement is restored after migration. Failed migrations roll back. Existing journals without checksum expectations retain their previous transfer behavior.
+
+On mismatch, actual digests and the expected-versus-actual error are committed with `status='corrupt'`. The staging file stays available for inspection. Resume returns HTTP 409 for corrupt tasks, and `--resume-all` excludes them. Explicit retry invalidates all durable offsets before truncating the file and retains the expected digests. SHA-256/MD5 whole-file checksums cannot locate a damaged segment, so automatic partial-chunk guessing is avoided. Retrying with an incorrect pinned expectation will fail again; create a new task with a corrected expectation when necessary.
+
+If a crash occurs after creating the final hard link but before committing completion, startup rehashes the shared staging/final inode before accepting it as completed. A mismatch is durably recorded as corrupt before removing that uncommitted final link; the staging link is preserved. Already-completed files are not rehashed on every launch. A crash during verification restores a paused task, which rechecks the complete file on resume.
+
+HTTP requests advertise `Want-Repr-Digest: sha-256=10, md5=1`. Supported `Repr-Digest` dictionary entries are base64 byte sequences for `sha-256` and `md5`; full HTTP 200 responses can also supply `Content-Digest` or legacy `Content-MD5`. Both probes and actual transfer headers are inspected, since a server may omit integrity metadata from a range probe. Content digests on HTTP 206 fragments are never interpreted as whole-file hashes. Repr-Digest bound by Content-Location to a different URL is ignored. Malformed supported digests or conflicting header values fail explicitly. Trailer-only fields, obsolete Digest headers, and other algorithms are not consumed. Caller-supplied expectations take precedence per algorithm; learned expectations persist across resumes rather than silently following later server changes. See [RFC 9530](https://www.rfc-editor.org/rfc/rfc9530.html).

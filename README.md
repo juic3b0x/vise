@@ -19,6 +19,7 @@ Vise is a high-performance HTTP(S) download manager built in Rust. Multi-threade
 - **Embedded WebUI:** An industrial dark console with live speed graphs, actual chunk-progress grids, queue filters, and controls that update without reloading.
 - **Live terminal monitor:** In WebUI mode, follow timestamped events and one-second transfer summaries on stdout while the browser controls downloads.
 - **Careful file handling:** Validate range responses, save durable checkpoints, and refuse to overwrite existing output files.
+- **Checksum verification:** Verify SHA-256 and MD5 before publishing a file; preserve corrupt downloads for inspection or an explicit retry.
 
 ## Installation
 
@@ -109,6 +110,26 @@ Limits are saved in the output directory's SQLite journal and restored on the ne
 
 The cap applies to streamed response body bytes, including retries. HTTP headers and range probes are excluded. A bounded token bucket permits short bursts, and network/client buffering can briefly receive data ahead of the stream; the limit controls sustained application throughput.
 
+## Checksum verification
+
+Supply a publisher's expected digest for one URL. SHA-256 requires 64 hexadecimal digits; MD5 requires 32. Uppercase and lowercase are accepted. Set `SHA256` and `MD5` to the publisher's values before running these examples:
+
+```sh
+vise --expected-sha256 "$SHA256" https://example.com/archive.zip
+vise --expected-md5 "$MD5" https://example.com/archive.zip
+vise --expected-sha256 "$SHA256" --expected-md5 "$MD5" https://example.com/archive.zip
+```
+
+Both must match when both are supplied. The flags require exactly one URL and also work with `--webui` or `--interactive` when seeding a download. In the dashboard, expand **Checksum verification** under **New transfer** and enter either or both expected hashes.
+
+At 100% received, Vise enters `verifying`, synchronizes the staging file, and hashes it in one bounded-memory pass on the blocking worker pool. It publishes the final filename only after all expected checksums match. Expected/actual digests and the verification timestamp are saved in SQLite and shown in the dashboard.
+
+A mismatch becomes `corrupt`: the final filename is not published, the staging file is retained under `<output>/.vise/<task-id>.part`, and the error includes expected and actual values. Corrupt tasks remain corrupt across restarts and are excluded from `--resume-all`. Use interactive `retry ID`, the WebUI's **Re-download** button, or POST `/api/downloads/{id}/retry` to reset and download every chunk again. A whole-file checksum cannot identify which segment is damaged. If the expected digest itself was wrong, add a new task with the corrected value.
+
+Vise can also learn checksums from HTTP metadata: `Repr-Digest` for SHA-256/MD5 on representation responses, and `Content-Digest` or `Content-MD5` on complete HTTP 200 bodies. Message-content digests on range responses are ignored because they cover only that fragment. Explicit values take precedence per algorithm; learned values are saved and pinned for later resumes. Trailer-only digests and the obsolete `Digest` field are not supported. See [HTTP digest semantics](https://www.rfc-editor.org/rfc/rfc9530.html).
+
+Use SHA-256 from a trusted publisher for security-sensitive verification. MD5 is supported for legacy compatibility and accidental corruption detection; it is not collision-resistant. A digest supplied by the download server does not independently authenticate that server. See the [RustCrypto MD5 documentation](https://docs.rs/md-5/0.10.6/md5/).
+
 ## Interactive mode
 
 Run `vise` without arguments in a terminal to open the interactive queue:
@@ -139,7 +160,7 @@ help
 quit
 ```
 
-Task IDs accept a unique prefix of at least four characters. Use `list` to find them. `retry` resumes a failed task after checking the remote resource again.
+Task IDs accept a unique prefix of at least four characters. Use `list` to find them. `retry` resumes a failed task after checking the remote resource again, or downloads all chunks again for a corrupt task.
 
 `limit-rate RATE` changes the shared cap immediately while transfers remain connected. `limit-rate` displays the current cap; `limit-rate off` removes it.
 
@@ -208,6 +229,8 @@ WebUI mode uses the same download engine and worker pool as the CLI, and replace
 | `--retries` | Retries per segment, 0–20 | `5` |
 | `--timeout` | Idle read timeout in seconds | `30` |
 | `--limit-rate` | Shared body-byte cap, e.g. `5M`, `500KB/s`, or `off` | Saved setting; otherwise unlimited |
+| `--expected-sha256` | Expected SHA-256 for one URL, 64 hex digits | Learn from metadata if available |
+| `--expected-md5` | Expected MD5 for one URL, 32 hex digits | Learn from metadata if available |
 | `-i, --interactive` | Keep the terminal queue open | Off with URL arguments |
 | `--batch` | Never read terminal input | Off |
 | `--resume-all` | Resume saved paused and failed tasks | Off |

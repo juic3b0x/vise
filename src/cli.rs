@@ -78,7 +78,7 @@ pub async fn run(manager: Manager, interactive: bool, stop: CancellationToken) -
     }
     let downloads = manager.list().await;
     for item in &downloads {
-        if item.status == Status::Failed {
+        if matches!(item.status, Status::Failed | Status::Corrupt) {
             progress.println(format!(
                 "{}: {}",
                 item.filename,
@@ -130,7 +130,7 @@ fn render(
         bar.tick();
         if matches!(
             item.status,
-            Status::Completed | Status::Failed | Status::Paused
+            Status::Completed | Status::Failed | Status::Paused | Status::Corrupt
         ) {
             if !bar.is_finished() {
                 bar.finish();
@@ -187,6 +187,8 @@ async fn command(manager: &Manager, progress: &MultiProgress, input: &str) -> Re
             let id = resolve_id(manager, rest.trim()).await?;
             if verb == "pause" {
                 manager.pause(id).await?;
+            } else if verb == "retry" {
+                manager.retry(id).await?;
             } else {
                 manager.resume(id).await?;
             }

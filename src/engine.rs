@@ -24,6 +24,7 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::{
+    checksum::{self, ExpectedChecksums},
     database::{Database, FILE_NAME},
     error::{Error, Result},
     events::{Event, EventKind},
@@ -103,6 +104,7 @@ struct Metadata {
     total: Option<u64>,
     ranged: bool,
     validator: Option<String>,
+    expected: ExpectedChecksums,
 }
 
 impl Manager {
@@ -173,6 +175,7 @@ impl Manager {
         }
         let mut jobs = BTreeMap::new();
         let mut completed_parts = Vec::new();
+        let mut corrupt_targets = Vec::new();
         for mut record in database.load().await? {
             validate_record(&record)?;
             let part = state_dir.join(format!("{}.part", record.id));
@@ -182,7 +185,26 @@ impl Manager {
                 && part.exists()
                 && same_file::is_same_file(&target, &part)?
             {
-                record.status = Status::Completed;
+                if record.status != Status::Corrupt && !record.checksums.expected().is_empty() {
+                    record.checksums = checksum::hash_file(
+                        part.clone(),
+                        record.checksums.expected(),
+                        CancellationToken::new(),
+                    )
+                    .await?;
+                    if let Some(details) = record.checksums.mismatch() {
+                        record.status = Status::Corrupt;
+                        record.error = Some(Error::ChecksumMismatch(details).to_string());
+                        tracing::error!(id=%record.id, error=?record.error, "recovered file failed checksum verification");
+                    } else {
+                        record.checksums.verified_at = Some(timestamp_millis());
+                    }
+                }
+                if record.status == Status::Corrupt {
+                    corrupt_targets.push(target.clone());
+                } else {
+                    record.status = Status::Completed;
+                }
             }
             if record.status == Status::Completed {
                 if !target.is_file()
@@ -242,6 +264,12 @@ impl Manager {
         // Publish recovery to SQL before removing the hard-link recovery evidence.
         for part in completed_parts {
             fs::remove_file(part).await?;
+        }
+        if !corrupt_targets.is_empty() {
+            for target in corrupt_targets {
+                fs::remove_file(target).await?;
+            }
+            sync_directory(manager.0.config.output_dir.clone()).await?;
         }
         Ok(manager)
     }
@@ -346,6 +374,17 @@ impl Manager {
     }
 
     pub async fn add(&self, url: &str, filename: Option<&str>) -> Result<Download> {
+        self.add_with_checksums(url, filename, ExpectedChecksums::default())
+            .await
+    }
+
+    pub async fn add_with_checksums(
+        &self,
+        url: &str,
+        filename: Option<&str>,
+        expected: ExpectedChecksums,
+    ) -> Result<Download> {
+        let expected = ExpectedChecksums::new(expected.sha256.as_deref(), expected.md5.as_deref())?;
         let url = validate_url(url)?;
         let _admission = self.0.admission.lock().await;
         if self.0.stopping.load(Ordering::Acquire) {
@@ -388,6 +427,7 @@ impl Manager {
                 validator: None,
                 chunks: vec![],
                 error: None,
+                checksums: expected.into(),
                 speed: 0.0,
                 created_at: timestamp_millis(),
             })),
@@ -397,15 +437,21 @@ impl Manager {
             self.0.jobs.write().await.remove(&id);
             return Err(error);
         }
-        self.start(id, EventKind::Added).await?;
+        self.start(id, EventKind::Added, false).await?;
         self.get(id).await
     }
 
     pub async fn resume(&self, id: Uuid) -> Result<()> {
-        self.start(id, EventKind::Resumed).await
+        self.start(id, EventKind::Resumed, false).await
     }
 
-    async fn start(&self, id: Uuid, action: EventKind) -> Result<()> {
+    /// A whole-file mismatch cannot identify the bad segment. Explicit retry
+    /// invalidates every saved offset before the staging file is truncated.
+    pub async fn retry(&self, id: Uuid) -> Result<()> {
+        self.start(id, EventKind::Resumed, true).await
+    }
+
+    async fn start(&self, id: Uuid, action: EventKind, retry_corrupt: bool) -> Result<()> {
         let job = self.job(id).await?;
         let _control = job.control.lock().await;
         if job.removed.load(Ordering::Acquire) {
@@ -422,21 +468,30 @@ impl Manager {
         if status == Status::Completed {
             return Err(Error::Conflict("download is already completed".into()));
         }
+        if status == Status::Corrupt && !retry_corrupt {
+            return Err(Error::Conflict(
+                "download is corrupt; use retry to re-download all chunks".into(),
+            ));
+        }
         if let Some(run) = job.run.lock().await.take() {
             run.handle.await.map_err(|e| Error::Worker(e.to_string()))?;
         }
-        {
+        let previous = {
             let mut record = job.record.write().await;
+            let previous = record.clone();
+            if status == Status::Corrupt {
+                record.chunks.clear();
+            }
+            record.checksums.clear_result();
             record.status = Status::Queued;
             record.error = None;
             record.speed = 0.0;
             normalize_chunks(&mut record);
-        }
+            previous
+        };
         // Publish before spawning so even an empty file logs ADDED before DONE.
         if let Err(error) = self.checkpoint().await {
-            let mut record = job.record.write().await;
-            record.status = status;
-            record.error = Some(error.to_string());
+            *job.record.write().await = previous;
             return Err(error);
         }
         self.publish_job(action, &job).await;
@@ -458,6 +513,12 @@ impl Manager {
                     Err(Error::Cancelled) => {
                         record.status = Status::Paused;
                         EventKind::Paused
+                    }
+                    Err(error @ Error::ChecksumMismatch(_)) => {
+                        record.status = Status::Corrupt;
+                        record.error = Some(error.to_string());
+                        tracing::error!(%id, %error, "download checksum verification failed; staging file retained");
+                        EventKind::Corrupt
                     }
                     Err(error) => {
                         record.status = Status::Failed;
@@ -510,7 +571,13 @@ impl Manager {
         if job.removed.load(Ordering::Acquire) {
             return Err(Error::NotFound(id));
         }
-        if job.record.read().await.status == Status::Completed {
+        let status = job.record.read().await.status;
+        if status == Status::Corrupt {
+            return Err(Error::Conflict(
+                "download is corrupt; use retry to re-download all chunks".into(),
+            ));
+        }
+        if status == Status::Completed {
             return Err(Error::Conflict("download is already completed".into()));
         }
         self.publish_job(EventKind::PauseRequested, &job).await;
@@ -522,7 +589,7 @@ impl Manager {
         }
         // A transfer may complete while cancellation is being requested.
         let mut record = job.record.write().await;
-        if record.status != Status::Completed {
+        if !matches!(record.status, Status::Completed | Status::Corrupt) {
             record.status = Status::Paused;
         }
         record.speed = 0.0;
@@ -605,7 +672,11 @@ impl Manager {
         for item in self.list().await {
             if item.status.active() {
                 if let Err(error) = self.pause(item.id).await {
-                    if failure.is_none() {
+                    let settled = matches!(error, Error::Conflict(_))
+                        && self.get(item.id).await.is_ok_and(|item| {
+                            matches!(item.status, Status::Completed | Status::Corrupt)
+                        });
+                    if !settled && failure.is_none() {
                         failure = Some(error);
                     }
                 }
@@ -732,6 +803,12 @@ impl Manager {
                 );
             }
             record.total_bytes = metadata.total;
+            if record.checksums.expected_sha256.is_none() {
+                record.checksums.expected_sha256 = metadata.expected.sha256;
+            }
+            if record.checksums.expected_md5.is_none() {
+                record.checksums.expected_md5 = metadata.expected.md5;
+            }
             record.ranged = metadata.ranged;
             record.validator = metadata.validator;
             drop(record);
@@ -785,8 +862,25 @@ impl Manager {
         file.set_len(downloaded).await?;
         file.flush().await?;
         file.sync_all().await?;
+        let expected = job.record.read().await.checksums.expected();
+        if !expected.is_empty() {
+            self.transition(&job, Status::Verifying).await?;
+            let mut report = checksum::hash_file(path.clone(), expected, cancel.clone()).await?;
+            let mismatch = report.mismatch();
+            if mismatch.is_none() {
+                report.verified_at = Some(timestamp_millis());
+            }
+            job.record.write().await.checksums = report;
+            if let Some(details) = mismatch {
+                return Err(Error::ChecksumMismatch(details));
+            }
+            self.publish_job(EventKind::Verified, &job).await;
+        }
         // Save all offsets before publishing, making an interrupted commit recoverable.
         self.checkpoint().await?;
+        if cancel.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
         fs::hard_link(&path, &target).await.map_err(|e| {
             if e.kind() == std::io::ErrorKind::AlreadyExists {
                 Error::Conflict(format!("output already exists: {}", target.display()))
@@ -815,9 +909,11 @@ impl Manager {
                         total: Some(0),
                         ranged: false,
                         validator: None,
+                        expected: ExpectedChecksums::default(),
                     });
                 }
                 check_response(&response)?;
+                let expected = checksum::from_response(&response)?;
                 let validator = validator(&response);
                 if status == StatusCode::PARTIAL_CONTENT {
                     let (start, end, total) = content_range(&response)?;
@@ -830,12 +926,14 @@ impl Manager {
                         total: Some(total),
                         ranged: validator.is_some(),
                         validator,
+                        expected,
                     })
                 } else if status == StatusCode::OK {
                     Ok(Metadata {
                         total: response.content_length(),
                         ranged: false,
                         validator,
+                        expected,
                     })
                 } else {
                     Err(Error::Protocol(format!(
@@ -867,6 +965,7 @@ impl Manager {
             .client
             .get(url)
             .header(header::ACCEPT_ENCODING, "identity");
+        request = request.header("want-repr-digest", "sha-256=10, md5=1");
         if let Some(range) = range {
             request = request.header(header::RANGE, range);
         }
@@ -1020,6 +1119,23 @@ impl Manager {
                 .await?
                 .set_len(0)
                 .await?;
+        }
+        let discovered = checksum::from_response(&response)?;
+        let changed = {
+            let mut record = job.record.write().await;
+            let mut changed = false;
+            if record.checksums.expected_sha256.is_none() && discovered.sha256.is_some() {
+                record.checksums.expected_sha256 = discovered.sha256;
+                changed = true;
+            }
+            if record.checksums.expected_md5.is_none() && discovered.md5.is_some() {
+                record.checksums.expected_md5 = discovered.md5;
+                changed = true;
+            }
+            changed
+        };
+        if changed {
+            self.checkpoint().await?;
         }
         let expected = job.record.read().await.chunks[index]
             .end
@@ -1283,9 +1399,9 @@ fn normalize_chunks(record: &mut Record) {
         } else {
             match record.status {
                 Status::Paused => ChunkStatus::Paused,
-                Status::Failed => ChunkStatus::Failed,
+                Status::Failed | Status::Corrupt => ChunkStatus::Failed,
                 Status::Queued | Status::Probing => ChunkStatus::Queued,
-                Status::Downloading => chunk.status,
+                Status::Downloading | Status::Verifying => chunk.status,
                 Status::Completed => ChunkStatus::Completed,
             }
         };
@@ -1295,6 +1411,7 @@ fn normalize_chunks(record: &mut Record) {
 fn validate_record(record: &Record) -> Result<()> {
     validate_url(&record.url)?;
     validate_filename(&record.filename)?;
+    record.checksums.validate()?;
     if record.created_at < 0 {
         return Err(Error::Invalid(
             "negative creation timestamp in journal".into(),
