@@ -8,6 +8,8 @@ Vise uses one shared download manager for its CLI and WebUI.
 | Method | Endpoint | Result |
 | --- | --- | --- |
 | GET | `/api/downloads` | Array of all saved and active downloads |
+| GET | `/api/config` | Global bandwidth configuration |
+| POST | `/api/config` | Apply and persist `{"limit_rate":"5M"}`; use `off` to clear |
 | POST | `/api/downloads` | Add `{"url":"https://…","filename":"optional.zip"}`; HTTP 201 |
 | GET | `/api/downloads/{uuid}` | One download |
 | DELETE | `/api/downloads/{uuid}` | Stop the task and remove its queue entry/partial data; HTTP 204; completed outputs are kept |
@@ -28,6 +30,14 @@ curl -X POST -H 'Content-Type: application/json' -d '{}' \
 ```
 
 Download snapshots contain `id`, `url`, `filename`, `status`, `total_bytes` (nullable), `downloaded_bytes`, `bytes_per_second`, `eta_seconds` (nullable), `error` (nullable), and `created_at` (UTC Unix epoch milliseconds). States are `queued`, `probing`, `downloading`, `paused`, `completed`, and `failed`. Engine errors use an `error` JSON field and HTTP 400, 404, 409, or 500.
+
+Both configuration endpoints return `{"limit_rate":"5 MiB/s","limit_bytes_per_second":5242880}` for a `5M` cap. Unlimited is represented by `{"limit_rate":"unlimited","limit_bytes_per_second":null}`. The POST body requires a string and rejects unknown fields. Invalid rates return HTTP 400 without changing the previous setting; failed journal commits return HTTP 500 and preserve the live setting. The dashboard polls configuration every two seconds; the WebSocket retains its existing download-array format.
+
+```sh
+curl -H 'Content-Type: application/json' -d '{"limit_rate":"1.5M"}' \
+  http://127.0.0.1:8080/api/config
+curl http://127.0.0.1:8080/api/config
+```
 
 ## Transfers and recovery
 
@@ -51,6 +61,7 @@ src/main.rs               Arguments, lifecycle, signals, mode selection
 src/lib.rs                Public library modules
 src/engine.rs             Worker pool, transfers, retries, durable checkpoints
 src/database.rs           SQLite schema, migration, transactions, async DB boundary
+src/rate_limiter.rs       Rate parsing, shared token bucket, response-stream adapter
 src/model.rs              Internal records and public snapshots
 src/events.rs             Timestamped lifecycle and server events
 src/telemetry.rs          WebUI-only stdout event log and periodic summaries
@@ -82,7 +93,7 @@ The database module uses bundled SQLite through `rusqlite`. An `Arc<Mutex<Connec
 | --- | --- |
 | `downloads` | UUID `id`, `url`, `output_path`, nullable `total_size`, `status`, `created_at`, `updated_at`, `ranged`, `validator`, nullable `error` |
 | `chunks` | `download_id`, zero-based `chunk_index`, `start_byte`, nullable `end_byte`, `downloaded_bytes`, `status` |
-| `metadata` | One-time legacy-import completion marker |
+| `metadata` | One-time legacy-import completion marker and global `limit_rate` setting |
 
 `output_path` is a plain filename relative to the configured output directory. End offsets are exclusive; a null end denotes an unknown-length stream. Download states are queued, probing, downloading, paused, completed, or failed; chunk states are queued, downloading, paused, completed, or failed. Timestamps are UTC Unix epoch milliseconds. Byte counts use nonnegative SQLite signed 64-bit integers, and larger representations are rejected explicitly.
 
@@ -93,3 +104,15 @@ On startup, an application ID and schema version identify the database. Unknown/
 Legacy `state.json` version 1 imports into both tables in one transaction, along with a completion marker. The source is then renamed to `state.json.migrated` when that backup name is free. If import fails, the JSON is kept unchanged and no partial import commits. If a crash interrupts backup renaming, the marker prevents importing stale JSON again, including after all tasks have been deleted. Older records without creation timestamps receive their import time.
 
 WAL mode is intended for a local filesystem, not network shares. Do not copy only the main database file while Vise is running; SQLite may have committed data in its `-wal` file. Keep the complete `.vise` directory together, or stop Vise cleanly before copying it. The process-wide output-directory lock still prevents two managers from writing the same partial files. No external database service or SQLite runtime installation is needed.
+
+## Bandwidth control
+
+Every manager owns one `RateLimiter`, shared by all files, segments, and retries through an `Arc`. It wraps each Reqwest response body stream, reads one frame, and yields token-charged slices of at most 64 KiB. It retains the unconsumed frame until enough tokens arrive, applying backpressure without replacing the response or its connection. Range probes and headers are outside this body-byte budget; transport buffers can read ahead of the application. Intentional token waits happen between upstream polls and do not consume Reqwest's idle-read timeout.
+
+The bucket refills using integer byte-nanosecond credit and Tokio's monotonic clock. It starts empty and holds up to approximately 100 ms of credit, rounded up to at least one byte and capped at 8 MiB. This bounds idle bursts while accommodating fast connections and timer granularity. Grants target about 20 ms of traffic, up to 64 KiB. An asynchronous FIFO admission mutex prevents one segment from starving others; a short synchronous mutex protects only the arithmetic. All waits use Tokio timers and are cancellation-aware, including while waiting for admission. No synchronous lock spans an await.
+
+CLI `--limit-rate`, interactive `limit-rate RATE`, and POST `/api/config` all use the same parser and manager setting. `K/M/G/T` and `KiB/MiB/GiB/TiB` mean powers of 1,024; `KB/MB/GB/TB` mean powers of 1,000. Units are case-insensitive with an optional `/s` suffix. Decimal fractions use checked integer arithmetic and truncate fractional bytes; positive values below 1 B/s, negative values, malformed units, and overflow are rejected. Zero, `off`, and `unlimited` disable throttling.
+
+Settings changes serialize under their own asynchronous gate, commit the exact bytes-per-second value to SQLite's `metadata.limit_rate` key (zero for unlimited), and then update the live bucket. An owned task finishes this operation even if an HTTP caller disconnects. Changing a limit discards old credits and uses a watch notification to wake token waiters immediately; it never cancels or restarts chunk connections. WebUI telemetry receives a `RateLimitChanged` event. Startup inherits this setting unless `Config::limit_rate` or the CLI flag explicitly overrides it. The existing metadata table supports the setting without a schema migration.
+
+Low-rate transfers flush accumulated file bytes at least every 250 ms when token slices arrive, in addition to the normal 256 KiB threshold, so progress and journal checkpoints remain useful at slow speeds. At rates below four bytes per second, the interval is bounded by the next whole-byte grant. Reported speeds measure file progress and can differ briefly from the token budget because of buffering, retries, and sampling.

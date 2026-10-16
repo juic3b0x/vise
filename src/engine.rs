@@ -28,6 +28,7 @@ use crate::{
     error::{Error, Result},
     events::{Event, EventKind},
     model::{Chunk, ChunkStatus, Download, LegacyJournal, Record, Status, timestamp_millis},
+    rate_limiter::{RateConfiguration, RateLimit, RateLimiter},
 };
 
 const BUFFER_SIZE: usize = 256 * 1024;
@@ -40,6 +41,8 @@ pub struct Config {
     pub connections_per_download: usize,
     pub retries: u32,
     pub read_timeout: Duration,
+    /// None restores the saved setting; Some(UNLIMITED) explicitly disables it.
+    pub limit_rate: Option<RateLimit>,
 }
 
 impl Default for Config {
@@ -50,6 +53,7 @@ impl Default for Config {
             connections_per_download: 8,
             retries: 5,
             read_timeout: Duration::from_secs(30),
+            limit_rate: None,
         }
     }
 }
@@ -79,6 +83,8 @@ struct Inner {
     config: Config,
     client: Client,
     database: Database,
+    rate_limiter: RateLimiter,
+    settings: Mutex<()>,
     jobs: RwLock<BTreeMap<Uuid, Arc<Job>>>,
     pool: Semaphore,
     checkpoint: Mutex<()>,
@@ -133,6 +139,13 @@ impl Manager {
             .pool_max_idle_per_host(64)
             .build()?;
         let database = Database::open(state_dir.join(FILE_NAME)).await?;
+        let rate = match config.limit_rate {
+            Some(rate) => {
+                database.save_rate_limit(rate).await?;
+                rate
+            }
+            None => database.load_rate_limit().await?,
+        };
         if database.needs_legacy_import().await? {
             let legacy_path = state_dir.join("state.json");
             let legacy = match fs::read(&legacy_path).await {
@@ -215,6 +228,8 @@ impl Manager {
             config,
             client,
             database,
+            rate_limiter: RateLimiter::new(rate),
+            settings: Mutex::new(()),
             jobs: RwLock::new(jobs),
             checkpoint: Mutex::new(()),
             admission: Mutex::new(()),
@@ -233,6 +248,33 @@ impl Manager {
 
     pub fn subscribe(&self) -> watch::Receiver<u64> {
         self.0.events.subscribe()
+    }
+    pub fn rate_configuration(&self) -> RateConfiguration {
+        self.0.rate_limiter.limit().into()
+    }
+
+    pub async fn set_rate_limit(&self, rate: RateLimit) -> Result<RateConfiguration> {
+        let manager = self.clone();
+        // A disconnected HTTP client must not cancel the apply step after the
+        // SQLite transaction commits. Shutdown serializes with this operation.
+        tokio::spawn(async move {
+            let _settings = manager.0.settings.lock().await;
+            if manager.0.stopping.load(Ordering::Acquire) {
+                return Err(Error::Conflict("manager is shutting down".into()));
+            }
+            manager.0.database.save_rate_limit(rate).await?;
+            manager.0.rate_limiter.set_limit(rate);
+            manager.publish(
+                EventKind::RateLimitChanged {
+                    bytes_per_second: rate.bytes_per_second(),
+                },
+                None,
+            );
+            manager.notify();
+            Ok(manager.rate_configuration())
+        })
+        .await
+        .map_err(|error| Error::Worker(error.to_string()))?
     }
     pub fn subscribe_events(&self) -> broadcast::Receiver<Event> {
         self.0.activity.subscribe()
@@ -550,6 +592,7 @@ impl Manager {
 
     pub async fn shutdown(&self) -> Result<()> {
         let _admission = self.0.admission.lock().await;
+        let _settings = self.0.settings.lock().await;
         self.0.stopping.store(true, Ordering::Release);
         // Cancel all transfers first so a large queue does not delay shutdown.
         let jobs: Vec<_> = self.0.jobs.read().await.values().cloned().collect();
@@ -986,8 +1029,13 @@ impl Manager {
             .open(self.part_path(id))
             .await?;
         file.seek(std::io::SeekFrom::Start(offset)).await?;
-        let mut stream = response.bytes_stream();
+        let mut stream = self
+            .0
+            .rate_limiter
+            .throttle(response.bytes_stream(), cancel.clone())
+            .boxed();
         let mut pending = BytesMut::with_capacity(BUFFER_SIZE);
+        let mut last_flush = Instant::now();
         let mut received = 0u64;
         loop {
             let next = tokio::select! { biased; _ = cancel.cancelled() => return Err(Error::Cancelled), value = stream.next() => value };
@@ -1007,12 +1055,19 @@ impl Manager {
                         remaining = &remaining[size..];
                         if pending.len() == BUFFER_SIZE {
                             write_pending(&mut file, job, index, &mut pending).await?;
+                            last_flush = Instant::now();
                         }
+                    }
+                    // Keep low-bandwidth progress/checkpoints responsive without
+                    // forcing tiny disk writes on every token grant.
+                    if last_flush.elapsed() >= Duration::from_millis(250) {
+                        write_pending(&mut file, job, index, &mut pending).await?;
+                        last_flush = Instant::now();
                     }
                 }
                 Some(Err(error)) => {
                     write_pending(&mut file, job, index, &mut pending).await?;
-                    return Err(error.into());
+                    return Err(error);
                 }
                 None => break,
             }

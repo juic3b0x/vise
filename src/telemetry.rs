@@ -68,7 +68,10 @@ pub async fn run_with_writer<W: AsyncWrite + Unpin>(
             SystemTime::now(),
             "MONITOR",
             36,
-            "Browser controls downloads · live terminal telemetry · Ctrl+C to stop",
+            &format!(
+                "Browser controls downloads · global limit {} · Ctrl+C to stop",
+                manager.rate_configuration().limit_rate
+            ),
             options.color,
         ),
     )
@@ -215,6 +218,14 @@ fn format_event(event: &Event, color: bool) -> String {
             "STOPPED",
             33,
             "server stopped · transfer state saved".into(),
+        ),
+        EventKind::RateLimitChanged { bytes_per_second } => (
+            "LIMIT",
+            36,
+            format!(
+                "Global bandwidth limit: {}",
+                crate::rate_limiter::RateLimit::from_bytes_per_second(*bytes_per_second)
+            ),
         ),
     };
     line(event.timestamp, label, code, &message, color)

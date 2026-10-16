@@ -162,6 +162,31 @@ impl Database {
         self.call(|state| read_records(&mut state.connection)).await
     }
 
+    pub(crate) async fn load_rate_limit(&self) -> Result<crate::rate_limiter::RateLimit> {
+        self.call(|state| {
+            let value: Option<String> = state
+                .connection
+                .query_row(
+                    "SELECT value FROM metadata WHERE key='limit_rate'",
+                    [],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            value.as_deref().unwrap_or("off").parse()
+        })
+        .await
+    }
+
+    pub(crate) async fn save_rate_limit(&self, rate: crate::rate_limiter::RateLimit) -> Result<()> {
+        self.call(move |state| {
+            let transaction = state.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            transaction.execute("INSERT INTO metadata(key,value) VALUES ('limit_rate',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                [rate.bytes_per_second().unwrap_or(0).to_string()])?;
+            transaction.commit()?;
+            Ok(())
+        }).await
+    }
+
     pub(crate) async fn needs_legacy_import(&self) -> Result<bool> {
         self.call(|state| Ok(!import_done(&state.connection)?))
             .await

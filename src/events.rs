@@ -29,6 +29,9 @@ pub enum EventKind {
         address: String,
     },
     ServerStopped,
+    RateLimitChanged {
+        bytes_per_second: Option<u64>,
+    },
 }
 
 #[derive(Debug, Clone)]

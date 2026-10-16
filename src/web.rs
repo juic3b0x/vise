@@ -17,7 +17,10 @@ use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::{engine::Manager, error::Error, events::EventKind, model::Download};
+use crate::{
+    engine::Manager, error::Error, events::EventKind, model::Download,
+    rate_limiter::RateConfiguration,
+};
 
 #[derive(Clone)]
 struct AppState {
@@ -53,6 +56,7 @@ pub async fn run(
 fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(index))
+        .route("/api/config", get(configuration).post(set_configuration))
         .route("/api/downloads", get(list).post(add))
         .route("/api/downloads/{id}", get(detail).delete(delete))
         .route("/api/downloads/{id}/pause", post(pause))
@@ -136,6 +140,26 @@ async fn index() -> Html<&'static str> {
 }
 async fn list(State(state): State<AppState>) -> Json<Vec<Download>> {
     Json(state.manager.list().await)
+}
+async fn configuration(State(state): State<AppState>) -> Json<RateConfiguration> {
+    Json(state.manager.rate_configuration())
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConfigurationRequest {
+    limit_rate: String,
+}
+async fn set_configuration(
+    State(state): State<AppState>,
+    Json(input): Json<ConfigurationRequest>,
+) -> Result<Json<RateConfiguration>, ApiError> {
+    let rate = input
+        .limit_rate
+        .parse()
+        .inspect_err(|error| rejected_action(&state.manager, "limit-rate", error))?;
+    Ok(Json(state.manager.set_rate_limit(rate).await.inspect_err(
+        |error| rejected_action(&state.manager, "limit-rate", error),
+    )?))
 }
 async fn detail(
     State(state): State<AppState>,

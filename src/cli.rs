@@ -40,7 +40,7 @@ pub async fn run(manager: Manager, interactive: bool, stop: CancellationToken) -
     }
     let mut input_open = interactive;
     if interactive {
-        progress.println("Vise • add URL [FILENAME] | pause ID | resume ID | retry ID | list | quit\nPaste a URL to queue it. IDs may be shortened to a unique prefix.")?;
+        progress.println("Vise • add URL [FILENAME] | pause ID | resume ID | retry ID | limit-rate RATE | list | quit\nPaste a URL to queue it. IDs may be shortened to a unique prefix.")?;
     }
     let mut interval = tokio::time::interval(Duration::from_millis(250));
     let mut cancelled = false;
@@ -162,7 +162,12 @@ async fn command(manager: &Manager, progress: &MultiProgress, input: &str) -> Re
     match verb {
         "quit" | "exit" => return Ok(true),
         "help" => progress
-            .println("add URL [FILENAME] · pause ID · resume ID · retry ID · list · quit")?,
+            .println("add URL [FILENAME] · pause ID · resume ID · retry ID · limit-rate RATE (or off) · list · quit")?,
+        "limit-rate" => {
+            let configuration = if rest.trim().is_empty() { manager.rate_configuration() }
+                else { manager.set_rate_limit(rest.trim().parse()?).await? };
+            progress.println(format!("Global bandwidth limit: {}", configuration.limit_rate))?;
+        }
         "list" => {
             for item in manager.list().await {
                 progress.println(format!(
@@ -225,4 +230,41 @@ async fn resolve_id(manager: &Manager, prefix: &str) -> Result<Uuid> {
 
 pub fn stdin_is_terminal() -> bool {
     std::io::stdin().is_terminal()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test]
+    async fn runtime_rate_commands_update_and_clear_the_shared_limiter() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = Manager::open(crate::engine::Config {
+            output_dir: dir.path().into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let progress = MultiProgress::with_draw_target(indicatif::ProgressDrawTarget::hidden());
+        command(&manager, &progress, "limit-rate 1.5M")
+            .await
+            .unwrap();
+        assert_eq!(
+            manager.rate_configuration().limit_bytes_per_second,
+            Some(1_572_864)
+        );
+        assert!(
+            command(&manager, &progress, "limit-rate nonsense")
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            manager.rate_configuration().limit_bytes_per_second,
+            Some(1_572_864)
+        );
+        command(&manager, &progress, "limit-rate off")
+            .await
+            .unwrap();
+        assert_eq!(manager.rate_configuration().limit_bytes_per_second, None);
+        manager.shutdown().await.unwrap();
+    }
 }

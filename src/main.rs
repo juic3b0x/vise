@@ -5,6 +5,7 @@ use tokio_util::sync::CancellationToken;
 use vise::{
     cli,
     engine::{Config, Manager},
+    rate_limiter::RateLimit,
     telemetry, web,
 };
 
@@ -46,6 +47,9 @@ struct Args {
     /// Save a single URL under this filename
     #[arg(short = 'n', long)]
     name: Option<String>,
+    /// Global body-byte rate, e.g. 500K or 5M; off disables a saved limit
+    #[arg(long)]
+    limit_rate: Option<RateLimit>,
 }
 
 #[tokio::main]
@@ -91,6 +95,7 @@ async fn run(args: Args) -> anyhow::Result<u8> {
         connections_per_download: args.connections as usize,
         retries: args.retries,
         read_timeout: Duration::from_secs(args.timeout),
+        limit_rate: args.limit_rate,
     })
     .await?;
     let stop = CancellationToken::new();

@@ -14,6 +14,7 @@ Vise is a high-performance HTTP(S) download manager built in Rust. Multi-threade
 - **Clear progress:** Track downloaded bytes, percentage, transfer speed, and ETA in the terminal.
 - **SQLite crash recovery:** Control individual tasks and restore saved chunk offsets from an embedded transactional journal after restarting.
 - **Resilient downloads:** Retry dropped connections and transient HTTP failures with bounded backoff.
+- **Live bandwidth control:** Share one token-bucket speed limit across all downloads and change it from the interactive CLI or WebUI without reconnecting.
 - **CLI first:** Download from arguments or manage an interactive queue. The web server starts only with `--webui`.
 - **Embedded WebUI:** Add URLs, monitor transfers, pause or resume tasks, and delete queue entries through a local dashboard with live WebSocket updates.
 - **Live terminal monitor:** In WebUI mode, follow timestamped events and one-second transfer summaries on stdout while the browser controls downloads.
@@ -94,6 +95,20 @@ vise -o ./downloads -n release.zip https://example.com/archive.zip
 
 `-o` selects an output directory, which defaults to `downloads`. `-n` sets a filename for exactly one URL.
 
+### Limit bandwidth
+
+```sh
+vise --limit-rate 5M https://example.com/large.iso
+vise --interactive --limit-rate 500K
+vise --webui --limit-rate 5M
+```
+
+The limit is **global**: every active file and chunk shares the same byte budget. `K`, `M`, `G`, and `T` use powers of 1,024; `KB/s`, `MB/s`, `GB/s`, and `TB/s` use powers of 1,000. Explicit binary units such as `KiB/s` and `MiB/s` also work. Fractions are accepted (`1.5M`); fractional bytes are rounded down. Use `off`, `unlimited`, or `0` to remove the cap.
+
+Limits are saved in the output directory's SQLite journal and restored on the next launch. An explicit `--limit-rate` overrides the saved setting; use `--limit-rate off` to clear it. New journals start unlimited.
+
+The cap applies to streamed response body bytes, including retries. HTTP headers and range probes are excluded. A bounded token bucket permits short bursts, and network/client buffering can briefly receive data ahead of the stream; the limit controls sustained application throughput.
+
 ## Interactive mode
 
 Run `vise` without arguments in a terminal to open the interactive queue:
@@ -117,11 +132,16 @@ list
 pause 9ac2
 resume 9ac2
 retry 9ac2
+limit-rate 2M
+limit-rate
+limit-rate off
 help
 quit
 ```
 
 Task IDs accept a unique prefix of at least four characters. Use `list` to find them. `retry` resumes a failed task after checking the remote resource again.
+
+`limit-rate RATE` changes the shared cap immediately while transfers remain connected. `limit-rate` displays the current cap; `limit-rate off` removes it.
 
 `quit`, Ctrl+C, and SIGTERM stop active transfers and save partial progress. Resume saved paused or failed tasks using the same output directory:
 
@@ -153,6 +173,8 @@ Open **[http://127.0.0.1:8080](http://127.0.0.1:8080)** in your browser. Use the
 
 The dashboard lets you add URLs, inspect progress and transfer speed, and pause, resume, retry, or delete individual downloads. Delete removes the queue entry and partial data; completed output files are kept. It is served directly from the executable: no Node.js, frontend build, external assets, or separate server is required.
 
+Use **Global bandwidth limit** and **Apply limit** to change the cap during a transfer. Enter values such as `500K`, `5M`, or `off`. The dashboard displays the current setting and refreshes it across browser tabs. Applied changes also appear in the WebUI terminal monitor.
+
 You can also seed the queue or restore saved tasks at startup:
 
 ```sh
@@ -183,6 +205,7 @@ WebUI mode uses the same download engine and worker pool as the CLI, and replace
 | `-n, --name` | Filename for one URL | Derived from URL |
 | `--retries` | Retries per segment, 0–20 | `5` |
 | `--timeout` | Idle read timeout in seconds | `30` |
+| `--limit-rate` | Shared body-byte cap, e.g. `5M`, `500KB/s`, or `off` | Saved setting; otherwise unlimited |
 | `-i, --interactive` | Keep the terminal queue open | Off with URL arguments |
 | `--batch` | Never read terminal input | Off |
 | `--resume-all` | Resume saved paused and failed tasks | Off |
@@ -213,7 +236,7 @@ cargo clippy --all-targets --locked -- -D warnings
 cargo test --all-targets --locked
 ```
 
-The test suite exercises parallel transfers, connection limits, retries, pause/resume, abrupt process recovery, safe output handling, CLI behavior, and REST/WebSocket controls using local HTTP fixtures.
+The test suite exercises parallel transfers, connection limits, shared bandwidth budgets, live rate changes without reconnecting, settings persistence, retries, pause/resume, abrupt process recovery, safe output handling, CLI behavior, and REST/WebSocket controls using local HTTP fixtures. Token-bucket timing is also checked with Tokio's virtual clock.
 
 ## License
 
