@@ -1,8 +1,5 @@
 use super::Manager;
-use crate::{
-    error::{Error, Result},
-    model::Status,
-};
+use crate::{error::Result, model::Status};
 use std::{
     collections::BTreeMap,
     path::PathBuf,
@@ -80,7 +77,7 @@ pub(super) async fn sync_directory(path: PathBuf) -> Result<()> {
     #[cfg(unix)]
     tokio::task::spawn_blocking(move || std::fs::File::open(path)?.sync_all())
         .await
-        .map_err(|e| Error::Worker(e.to_string()))??;
+        .map_err(|e| crate::error::Error::Worker(e.to_string()))??;
     #[cfg(not(unix))]
     let _ = path;
     Ok(())
