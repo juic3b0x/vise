@@ -112,7 +112,8 @@ fn render(
                 .map_err(|e| Error::Invalid(e.to_string()))?
                 .progress_chars("=>-"),
         );
-        bar.set_prefix(format!("{} {}", &item.id.to_string()[..8], item.filename));
+        let id = item.id.to_string();
+        bar.set_prefix(format!("{} {}", id.get(..8).unwrap_or(&id), item.filename));
         if let Some(total) = item.total_bytes {
             bar.set_length(total);
         }
@@ -161,54 +162,72 @@ async fn command(manager: &Manager, progress: &MultiProgress, input: &str) -> Re
     let (verb, rest) = input.split_once(char::is_whitespace).unwrap_or((input, ""));
     match verb {
         "quit" | "exit" => return Ok(true),
-        "help" => progress
-            .println("add URL [FILENAME] · pause ID · resume ID · retry ID · limit-rate RATE (or off) · list · quit")?,
-        "limit-rate" => {
-            let configuration = if rest.trim().is_empty() { manager.rate_configuration() }
-                else { manager.set_rate_limit(rest.trim().parse()?).await? };
-            progress.println(format!("Global bandwidth limit: {}", configuration.limit_rate))?;
-        }
-        "list" => {
-            for item in manager.list().await {
-                progress.println(format!(
-                    "{} {:?} {} ({}/{}){}",
-                    item.id,
-                    item.status,
-                    item.filename,
-                    item.downloaded_bytes,
-                    item.total_bytes
-                        .map(|n| n.to_string())
-                        .unwrap_or_else(|| "?".into()),
-                    item.error.map(|e| format!(" — {e}")).unwrap_or_default()
-                ))?;
-            }
-        }
-        "pause" | "resume" | "retry" => {
-            let id = resolve_id(manager, rest.trim()).await?;
-            if verb == "pause" {
-                manager.pause(id).await?;
-            } else if verb == "retry" {
-                manager.retry(id).await?;
-            } else {
-                manager.resume(id).await?;
-            }
-        }
-        "add" => {
-            let rest = rest.trim();
-            let (url, filename) = rest
-                .split_once(char::is_whitespace)
-                .map(|(url, name)| (url, Some(name.trim())))
-                .unwrap_or((rest, None));
-            let item = manager.add(url, filename).await?;
-            progress.println(format!("Queued {}: {}", item.id, item.filename))?;
-        }
-        _ if input.starts_with("http://") || input.starts_with("https://") => {
-            let item = manager.add(input, None).await?;
-            progress.println(format!("Queued {}: {}", item.id, item.filename))?;
-        }
-        _ => return Err(Error::Invalid("unknown command; type help".into())),
+        "help" => progress.println("add URL [FILENAME] · pause ID · resume ID · retry ID · limit-rate RATE (or off) · list · quit")?,
+        "limit-rate" => configure_rate(manager, progress, rest.trim()).await?,
+        "list" => list_downloads(manager, progress).await?,
+        "pause" | "resume" | "retry" => control_download(manager, verb, rest.trim()).await?,
+        "add" => add_download(manager, progress, rest.trim()).await?,
+        _ => add_bare_url(manager, progress, input).await?,
     }
     Ok(false)
+}
+
+async fn configure_rate(manager: &Manager, progress: &MultiProgress, rate: &str) -> Result<()> {
+    let configuration = if rate.is_empty() {
+        manager.rate_configuration()
+    } else {
+        manager.set_rate_limit(rate.parse()?).await?
+    };
+    progress.println(format!(
+        "Global bandwidth limit: {}",
+        configuration.limit_rate
+    ))?;
+    Ok(())
+}
+
+async fn list_downloads(manager: &Manager, progress: &MultiProgress) -> Result<()> {
+    for item in manager.list().await {
+        progress.println(format!(
+            "{} {:?} {} ({}/{}){}",
+            item.id,
+            item.status,
+            item.filename,
+            item.downloaded_bytes,
+            item.total_bytes
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "?".into()),
+            item.error.map(|e| format!(" — {e}")).unwrap_or_default()
+        ))?;
+    }
+    Ok(())
+}
+
+async fn control_download(manager: &Manager, verb: &str, prefix: &str) -> Result<()> {
+    let id = resolve_id(manager, prefix).await?;
+    match verb {
+        "pause" => manager.pause(id).await,
+        "retry" => manager.retry(id).await,
+        _ => manager.resume(id).await,
+    }
+}
+
+async fn add_download(manager: &Manager, progress: &MultiProgress, input: &str) -> Result<()> {
+    let (url, filename) = input
+        .split_once(char::is_whitespace)
+        .map(|(url, name)| (url, Some(name.trim())))
+        .unwrap_or((input, None));
+    let item = manager.add(url, filename).await?;
+    progress.println(format!("Queued {}: {}", item.id, item.filename))?;
+    Ok(())
+}
+
+async fn add_bare_url(manager: &Manager, progress: &MultiProgress, input: &str) -> Result<()> {
+    if !input.starts_with("http://") && !input.starts_with("https://") {
+        return Err(Error::Invalid("unknown command; type help".into()));
+    }
+    let item = manager.add(input, None).await?;
+    progress.println(format!("Queued {}: {}", item.id, item.filename))?;
+    Ok(())
 }
 
 async fn resolve_id(manager: &Manager, prefix: &str) -> Result<Uuid> {

@@ -2,6 +2,27 @@
 
 All notable changes to Vise are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.1] - 2026-10-16
+
+Maintenance release focused on reliability, code organization, and leaner dependencies.
+
+### Added
+
+- Regression coverage for missing chunk indices, telemetry unit boundaries, Unicode rate inputs, and error-output write failures.
+
+### Changed
+
+- Split the download engine into focused modules for queue control, transfers, HTTP handling, recovery, checkpoints, state, and chunk layout. Extracted application supervision and SQLite initialization into dedicated modules.
+- Organized integration tests by behavior and simplified CLI dispatch, journal decoding, recovery, rate parsing, and proxy test helpers while preserving existing interfaces and persistence ordering.
+- Reduced checksum hex-formatting allocations, shared journal paths as `Arc<Path>`, and removed unused tracing macro support. Aligned the MD5 dependency name with its Rust imports.
+
+### Fixed
+
+- Enabled integer overflow checks in optimized release builds.
+- Replaced unchecked chunk indexing and byte/string slicing with checked access and explicit errors or safe fallbacks, including UTF-8 boundaries in rate parsing and download ID displays.
+- Validated fixed WebUI response headers at compile time instead of parsing them with runtime `expect` calls. Existing cache, content-type, and Content Security Policy safeguards remain intact.
+- Routed top-level CLI error reporting through a caller-provided writer, preserving error context and failure exit codes when output cannot be written.
+
 ## [0.1.0] - 2026-10-16
 
 Initial release.
@@ -27,4 +48,5 @@ Initial release.
 - **Local WebUI safeguards:** Loopback-only binding, host and browser-origin validation, JSON-only mutations, and a Content Security Policy constrain browser access.
 - **Safe publication:** Existing output files are never overwritten, and configured checksum verification must succeed before final publication. SHA-256 from a trusted source is preferred for security-sensitive verification; MD5 supports legacy compatibility and accidental-corruption detection.
 
+[0.1.1]: https://github.com/juic3b0x/vise/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/juic3b0x/vise/releases/tag/v0.1.0

@@ -213,59 +213,10 @@ async fn socks(
     authenticated: bool,
     requests: Arc<Mutex<Vec<Request>>>,
 ) -> io::Result<()> {
-    if socket.read_u8().await? != 5 {
-        return Err(io::Error::other("SOCKS version"));
-    }
-    let count = socket.read_u8().await?;
-    let mut methods = vec![0; count as usize];
-    socket.read_exact(&mut methods).await?;
-    let method = if authenticated { 2 } else { 0 };
-    if !methods.contains(&method) {
-        socket.write_all(&[5, 255]).await?;
+    if !negotiate_socks(&mut socket, authenticated).await? {
         return Ok(());
     }
-    socket.write_all(&[5, method]).await?;
-    if authenticated {
-        if socket.read_u8().await? != 1 {
-            return Err(io::Error::other("auth version"));
-        }
-        let length = socket.read_u8().await?;
-        let mut username = vec![0; length as usize];
-        socket.read_exact(&mut username).await?;
-        let length = socket.read_u8().await?;
-        let mut password = vec![0; length as usize];
-        socket.read_exact(&mut password).await?;
-        let valid = username == b"alice" && password == b"p@ssword";
-        socket.write_all(&[1, if valid { 0 } else { 1 }]).await?;
-        if !valid {
-            return Ok(());
-        }
-    }
-    let mut prefix = [0; 4];
-    socket.read_exact(&mut prefix).await?;
-    if prefix[..3] != [5, 1, 0] {
-        return Err(io::Error::other("SOCKS command"));
-    }
-    let (host, domain) = match prefix[3] {
-        1 => {
-            let mut address = [0; 4];
-            socket.read_exact(&mut address).await?;
-            (std::net::Ipv4Addr::from(address).to_string(), false)
-        }
-        4 => {
-            let mut address = [0; 16];
-            socket.read_exact(&mut address).await?;
-            (std::net::Ipv6Addr::from(address).to_string(), false)
-        }
-        3 => {
-            let length = socket.read_u8().await?;
-            let mut name = vec![0; length as usize];
-            socket.read_exact(&mut name).await?;
-            (String::from_utf8(name).map_err(io::Error::other)?, true)
-        }
-        _ => return Err(io::Error::other("SOCKS address")),
-    };
-    let port = socket.read_u16().await?;
+    let (host, domain, port) = socks_destination(&mut socket).await?;
     requests.lock().unwrap().push(Request {
         authority: format!("{host}:{port}"),
         method: "SOCKS CONNECT".into(),
@@ -276,6 +227,71 @@ async fn socks(
     socket.write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 0]).await?;
     tokio::io::copy_bidirectional(&mut socket, &mut remote).await?;
     Ok(())
+}
+
+async fn negotiate_socks(socket: &mut Socket, authenticated: bool) -> io::Result<bool> {
+    if socket.read_u8().await? != 5 {
+        return Err(io::Error::other("SOCKS version"));
+    }
+    let methods = socks_bytes(socket).await?;
+    let method = if authenticated { 2 } else { 0 };
+    if !methods.contains(&method) {
+        socket.write_all(&[5, 255]).await?;
+        return Ok(false);
+    }
+    socket.write_all(&[5, method]).await?;
+    if authenticated {
+        authenticate_socks(socket).await
+    } else {
+        Ok(true)
+    }
+}
+
+async fn authenticate_socks(socket: &mut Socket) -> io::Result<bool> {
+    if socket.read_u8().await? != 1 {
+        return Err(io::Error::other("auth version"));
+    }
+    let username = socks_bytes(socket).await?;
+    let password = socks_bytes(socket).await?;
+    let valid = username == b"alice" && password == b"p@ssword";
+    socket.write_all(&[1, if valid { 0 } else { 1 }]).await?;
+    Ok(valid)
+}
+
+async fn socks_bytes(socket: &mut Socket) -> io::Result<Vec<u8>> {
+    let length = socket.read_u8().await?;
+    let mut bytes = vec![0; length as usize];
+    socket.read_exact(&mut bytes).await?;
+    Ok(bytes)
+}
+
+async fn socks_array<const N: usize>(socket: &mut Socket) -> io::Result<[u8; N]> {
+    let mut bytes = [0; N];
+    socket.read_exact(&mut bytes).await?;
+    Ok(bytes)
+}
+
+async fn socks_destination(socket: &mut Socket) -> io::Result<(String, bool, u16)> {
+    let prefix = socks_array::<4>(socket).await?;
+    if prefix[..3] != [5, 1, 0] {
+        return Err(io::Error::other("SOCKS command"));
+    }
+    let (host, domain) = match prefix[3] {
+        1 => (
+            std::net::Ipv4Addr::from(socks_array::<4>(socket).await?).to_string(),
+            false,
+        ),
+        4 => (
+            std::net::Ipv6Addr::from(socks_array::<16>(socket).await?).to_string(),
+            false,
+        ),
+        3 => (
+            String::from_utf8(socks_bytes(socket).await?).map_err(io::Error::other)?,
+            true,
+        ),
+        _ => return Err(io::Error::other("SOCKS address")),
+    };
+    Ok((host, domain, socket.read_u16().await?))
 }
 
 pub struct HttpsOrigin {

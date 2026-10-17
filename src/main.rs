@@ -1,15 +1,15 @@
 use std::{net::SocketAddr, path::PathBuf, process::ExitCode, time::Duration};
 
 use clap::Parser;
-use tokio_util::sync::CancellationToken;
 use vise::{
     checksum::ExpectedChecksums,
     cli,
     engine::{Config, Manager},
     proxy::ProxyUrl,
     rate_limiter::RateLimit,
-    telemetry, web,
 };
+
+mod app;
 
 #[derive(Parser)]
 #[command(version, about = "Vise — concurrent, resumable downloads", long_about = None)]
@@ -75,10 +75,14 @@ async fn main() -> ExitCode {
     match run(Args::parse()).await {
         Ok(code) => ExitCode::from(code),
         Err(error) => {
-            eprintln!("Vise: {error:#}");
+            let _ = report_error(&mut std::io::stderr().lock(), &error);
             ExitCode::FAILURE
         }
     }
+}
+
+fn report_error(writer: &mut impl std::io::Write, error: &anyhow::Error) -> std::io::Result<()> {
+    writeln!(writer, "Vise: {error:#}")
 }
 
 async fn run(args: Args) -> anyhow::Result<u8> {
@@ -114,7 +118,7 @@ async fn run(args: Args) -> anyhow::Result<u8> {
         );
     }
     let manager = Manager::open(Config {
-        output_dir: args.output,
+        output_dir: args.output.clone(),
         concurrent_downloads: args.jobs as usize,
         connections_per_download: args.connections as usize,
         retries: args.retries,
@@ -123,137 +127,24 @@ async fn run(args: Args) -> anyhow::Result<u8> {
         proxy_url,
     })
     .await?;
-    let stop = CancellationToken::new();
-    let telemetry_stop = CancellationToken::new();
-    // Subscribe before seeding/resuming the queue so initial events cannot race
-    // the logger startup. The default CLI never constructs a terminal logger.
-    let mut terminal = if args.webui {
-        let events = manager.subscribe_events();
-        let terminal_manager = manager.clone();
-        let token = telemetry_stop.clone();
-        Some(tokio::spawn(async move {
-            telemetry::run(terminal_manager, events, token).await
-        }))
-    } else {
-        None
-    };
-    let monitor_stop = CancellationToken::new();
-    let monitor_manager = manager.clone();
-    let monitor_token = monitor_stop.clone();
-    let mut monitor = tokio::spawn(async move { monitor_manager.monitor(monitor_token).await });
-    let signal_stop = stop.clone();
-    let signal = tokio::spawn(async move {
-        match shutdown_signal().await {
-            Ok(()) => signal_stop.cancel(),
-            Err(error) => {
-                tracing::error!(%error, "cannot install shutdown signal handler");
-                signal_stop.cancel();
-            }
-        }
-    });
-    let mut monitor_consumed = false;
-    let mut terminal_consumed = false;
-    let result = async {
-        if args.resume_all {
-            manager.resume_all().await?;
-        }
-        for url in &args.urls {
-            manager
-                .add_with_checksums(url, args.name.as_deref(), expected.clone())
-                .await?;
-        }
-        let controller = async {
-            if args.webui {
-                web::run(manager.clone(), args.bind, stop.clone())
-                    .await
-                    .map(|_| true)
-            } else {
-                cli::run(manager.clone(), interactive, stop.clone())
-                    .await
-                    .map_err(anyhow::Error::from)
-            }
-        };
-        tokio::select! {
-            result = controller => result,
-            result = &mut monitor => {
-                monitor_consumed = true;
-                stop.cancel();
-                match result {
-                    Ok(Err(error)) => Err(anyhow::anyhow!("state monitor failed: {error}")),
-                    Err(error) => Err(anyhow::anyhow!("state monitor crashed: {error}")),
-                    Ok(Ok(())) => Err(anyhow::anyhow!("state monitor stopped unexpectedly")),
-                }
-            }
-            result = async {
-                match terminal.as_mut() {
-                    Some(handle) => handle.await,
-                    None => std::future::pending().await,
-                }
-            } => {
-                terminal_consumed = true;
-                stop.cancel();
-                match result {
-                    Ok(Err(error)) => Err(anyhow::anyhow!("terminal monitor failed: {error}")),
-                    Err(error) => Err(anyhow::anyhow!("terminal monitor crashed: {error}")),
-                    Ok(Ok(())) => Err(anyhow::anyhow!("terminal monitor stopped unexpectedly")),
-                }
-            }
-        }
-    }
-    .await;
-    let interrupted = stop.is_cancelled();
-    stop.cancel();
-    // Stop periodic snapshots before the final quiescent checkpoint.
-    monitor_stop.cancel();
-    let monitor_result = if monitor_consumed {
-        Ok(())
-    } else {
-        monitor
-            .await
-            .map_err(anyhow::Error::from)
-            .and_then(|r| r.map_err(anyhow::Error::from))
-    };
-    signal.abort();
-    let shutdown = manager.shutdown().await;
-    if args.webui {
-        if shutdown.is_ok() {
-            manager.server_stopped();
-        } else if let Err(error) = &shutdown {
-            manager.publish_shutdown_error(error.to_string());
-        }
-    }
-    // Keep the logger alive through shutdown, then flush its remaining events.
-    telemetry_stop.cancel();
-    let terminal_result = if terminal_consumed {
-        Ok(())
-    } else if let Some(handle) = terminal {
-        handle
-            .await
-            .map_err(anyhow::Error::from)
-            .and_then(|r| r.map_err(anyhow::Error::from))
-    } else {
-        Ok(())
-    };
-    shutdown?;
-    monitor_result?;
-    terminal_result?;
-    let success = result?;
-    Ok(if interrupted {
-        130
-    } else if success {
-        0
-    } else {
-        1
-    })
+    app::run_session(manager, &args, interactive, expected).await
 }
 
-async fn shutdown_signal() -> std::io::Result<()> {
-    #[cfg(unix)]
-    {
-        let mut terminate =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-        tokio::select! { result = tokio::signal::ctrl_c() => result, _ = terminate.recv() => Ok(()) }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn error_reporting_preserves_context_and_returns_write_failures() {
+        let error = anyhow::anyhow!("disk unavailable").context("cannot open journal");
+        let mut output = Vec::new();
+        report_error(&mut output, &error).unwrap();
+        assert_eq!(output, b"Vise: cannot open journal: disk unavailable\n");
+        assert_eq!(
+            report_error(&mut std::io::Cursor::new([]), &error)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::WriteZero
+        );
     }
-    #[cfg(not(unix))]
-    tokio::signal::ctrl_c().await
 }

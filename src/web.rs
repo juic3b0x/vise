@@ -6,7 +6,7 @@ use axum::{
         DefaultBodyLimit, Path, State, WebSocketUpgrade,
         ws::{Message, WebSocket},
     },
-    http::{StatusCode, header},
+    http::{HeaderValue, StatusCode, header},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
     routing::{get, post},
@@ -25,6 +25,13 @@ use crate::{
     model::Download,
     rate_limiter::RateConfiguration,
 };
+
+// Validate fixed response headers at compile time rather than parsing per request.
+const NO_STORE: HeaderValue = HeaderValue::from_static("no-store");
+const NO_SNIFF: HeaderValue = HeaderValue::from_static("nosniff");
+const CONTENT_SECURITY_POLICY: HeaderValue = HeaderValue::from_static(
+    "default-src 'none'; script-src 'self'; style-src 'self'; style-src-attr 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+);
 
 #[derive(Clone)]
 struct AppState {
@@ -124,15 +131,15 @@ async fn local_requests(
         }
     }
     let mut response = next.run(request).await;
-    response.headers_mut().insert(
-        header::CACHE_CONTROL,
-        "no-store".parse().expect("static header"),
-    );
-    response.headers_mut().insert(
-        "x-content-type-options",
-        "nosniff".parse().expect("static header"),
-    );
-    response.headers_mut().insert("content-security-policy", "default-src 'none'; script-src 'self'; style-src 'self'; style-src-attr 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'".parse().expect("static header"));
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, NO_STORE);
+    response
+        .headers_mut()
+        .insert("x-content-type-options", NO_SNIFF);
+    response
+        .headers_mut()
+        .insert("content-security-policy", CONTENT_SECURITY_POLICY);
     response
 }
 fn rejection(message: &str) -> Response {
@@ -410,6 +417,10 @@ mod tests {
                 .unwrap();
             assert_eq!(response.status(), StatusCode::OK);
             assert_eq!(response.headers()[header::CONTENT_TYPE], content_type);
+            assert_eq!(
+                response.headers().get(header::CACHE_CONTROL).unwrap(),
+                "no-store"
+            );
             assert_eq!(response.headers()["x-content-type-options"], "nosniff");
             let policy = response.headers()["content-security-policy"]
                 .to_str()

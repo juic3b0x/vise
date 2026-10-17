@@ -68,62 +68,68 @@ impl FromStr for RateLimit {
         let split = input
             .find(|c: char| !c.is_ascii_digit() && c != '.')
             .unwrap_or(input.len());
-        let number = &input[..split];
-        let unit = input[split..].trim().to_ascii_lowercase();
-        let unit = unit.strip_suffix("/s").unwrap_or(&unit).trim();
-        let factor: u128 = match unit {
-            "" | "b" => 1,
-            "k" | "ki" | "kib" => 1 << 10,
-            "m" | "mi" | "mib" => 1 << 20,
-            "g" | "gi" | "gib" => 1 << 30,
-            "t" | "ti" | "tib" => 1 << 40,
-            "kb" => 1_000,
-            "mb" => 1_000_000,
-            "gb" => 1_000_000_000,
-            "tb" => 1_000_000_000_000,
-            _ => {
-                return Err(Error::Invalid(
-                    "unknown rate unit; use B/s, K, M, G, KB/s, MB/s, or KiB/s".into(),
-                ));
-            }
-        };
-        let invalid = || {
-            Error::Invalid(
-                "invalid rate; use a positive byte rate such as 500K or 1.5M, or off".into(),
-            )
-        };
-        let (whole, fraction) = number.split_once('.').unwrap_or((number, ""));
-        if number.is_empty()
-            || (whole.is_empty() && fraction.is_empty())
-            || !fraction.bytes().all(|b| b.is_ascii_digit())
-            || fraction.len() > 18
-        {
-            return Err(invalid());
-        }
-        let whole = if whole.is_empty() {
-            0
-        } else {
-            whole.parse::<u128>().map_err(|_| invalid())?
-        };
-        let scale = 10u128.pow(fraction.len() as u32);
-        let fractional = if fraction.is_empty() {
-            0
-        } else {
-            fraction.parse::<u128>().map_err(|_| invalid())?
-        };
-        let numerator = whole
-            .checked_mul(scale)
-            .and_then(|v| v.checked_add(fractional))
-            .and_then(|v| v.checked_mul(factor))
-            .ok_or_else(invalid)?;
-        if numerator != 0 && numerator / scale == 0 {
-            return Err(Error::Invalid(
-                "rate must be at least one byte per second".into(),
-            ));
-        }
-        let bytes = u64::try_from(numerator / scale).map_err(|_| invalid())?;
+        let (number, unit) = input
+            .split_at_checked(split)
+            .ok_or_else(|| Error::Invalid("invalid rate boundary".into()))?;
+        let unit = unit.trim().to_ascii_lowercase();
+        let factor = unit_factor(unit.strip_suffix("/s").unwrap_or(&unit).trim())?;
+        let bytes = parse_byte_rate(number, factor)?;
         Ok(Self::from_bytes_per_second(Some(bytes)))
     }
+}
+
+fn unit_factor(unit: &str) -> Result<u128> {
+    match unit {
+        "" | "b" => Ok(1),
+        "k" | "ki" | "kib" => Ok(1 << 10),
+        "m" | "mi" | "mib" => Ok(1 << 20),
+        "g" | "gi" | "gib" => Ok(1 << 30),
+        "t" | "ti" | "tib" => Ok(1 << 40),
+        "kb" => Ok(1_000),
+        "mb" => Ok(1_000_000),
+        "gb" => Ok(1_000_000_000),
+        "tb" => Ok(1_000_000_000_000),
+        _ => Err(Error::Invalid(
+            "unknown rate unit; use B/s, K, M, G, KB/s, MB/s, or KiB/s".into(),
+        )),
+    }
+}
+
+fn parse_byte_rate(number: &str, factor: u128) -> Result<u64> {
+    let invalid = || {
+        Error::Invalid("invalid rate; use a positive byte rate such as 500K or 1.5M, or off".into())
+    };
+    let (whole, fraction) = number.split_once('.').unwrap_or((number, ""));
+    if number.is_empty()
+        || (whole.is_empty() && fraction.is_empty())
+        || !fraction.bytes().all(|b| b.is_ascii_digit())
+        || fraction.len() > 18
+    {
+        return Err(invalid());
+    }
+    let whole = if whole.is_empty() {
+        0
+    } else {
+        whole.parse::<u128>().map_err(|_| invalid())?
+    };
+    let scale = 10u128.pow(fraction.len() as u32);
+    let fractional = if fraction.is_empty() {
+        0
+    } else {
+        fraction.parse::<u128>().map_err(|_| invalid())?
+    };
+    let numerator = whole
+        .checked_mul(scale)
+        .and_then(|v| v.checked_add(fractional))
+        .and_then(|v| v.checked_mul(factor))
+        .ok_or_else(invalid)?;
+    if numerator != 0 && numerator / scale == 0 {
+        return Err(Error::Invalid(
+            "rate must be at least one byte per second".into(),
+        ));
+    }
+    let bytes = u64::try_from(numerator / scale).map_err(|_| invalid())?;
+    Ok(bytes)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -330,6 +336,7 @@ mod tests {
             (".5K", 512),
             ("32", 32),
             ("1B/s", 1),
+            ("\u{2003}1.5 MiB/s\u{2003}", 1_572_864),
             ("18446744073709551615", u64::MAX),
         ] {
             let rate: RateLimit = input.parse().unwrap();
@@ -350,6 +357,9 @@ mod tests {
             "0.1B/s",
             "18446744073709551616",
             "999999999999999999999999999999999999999M",
+            "1\u{1f680}M",
+            "\u{ff11}M",
+            "1M\u{00e9}",
         ] {
             assert!(input.parse::<RateLimit>().is_err(), "{input}");
         }

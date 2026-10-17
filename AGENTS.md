@@ -26,3 +26,11 @@ Use conventional commit prefixes enclosed in parentheses:
 - `fix(scope): description`
 - `refactor(scope): description`
 - `test(scope): description`
+
+## Rust Doctor Audits
+
+Always pass `--rule rust_doctor::cargo::duplicate_major_versions=off` when running Rust Doctor. Use this command from the repository root:
+
+```sh
+rust-doctor . --yes --rule rust_doctor::cargo::duplicate_major_versions=off
+```

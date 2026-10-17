@@ -1,6 +1,6 @@
 [package]
 name = "vise"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.85"
 description = "A resumable concurrent download manager with a CLI and optional local WebUI"
@@ -12,7 +12,7 @@ axum = { version = "0.8", features = ["ws"] }
 bytes = "1"
 base64 = "0.22"
 sha2 = "0.10"
-md-5 = "0.10"
+md5 = { package = "md-5", version = "0.10" }
 clap = { version = "4", features = ["derive"] }
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 fs2 = "0.4"
@@ -26,7 +26,7 @@ same-file = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "fs", "io-util", "io-std", "net", "signal", "sync", "time"] }
 tokio-util = "0.7"
-tracing = "0.1"
+tracing = { version = "0.1", default-features = false, features = ["std"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
@@ -39,6 +39,7 @@ tower = { version = "0.5", features = ["util"] }
 tokio-tungstenite = "0.29"
 
 [profile.release]
+overflow-checks = true
 lto = "thin"
 codegen-units = 1
 strip = true

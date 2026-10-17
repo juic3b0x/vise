@@ -4,16 +4,17 @@ use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
-    time::Duration,
 };
 
-use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, Row, Transaction, TransactionBehavior, params};
 use uuid::Uuid;
 
 use crate::{
     error::{Error, Result},
     model::{Chunk, Download, Record, timestamp_millis},
 };
+
+mod setup;
 
 const APPLICATION_ID: i32 = 0x5649_5345; // VISE
 const SCHEMA_VERSION: i32 = 3;
@@ -80,7 +81,7 @@ impl Drop for Shared {
 #[derive(Clone)]
 pub struct Database {
     state: Arc<Shared>,
-    path: Arc<PathBuf>,
+    path: Arc<Path>,
     gate: Arc<tokio::sync::Mutex<()>>,
 }
 
@@ -88,61 +89,12 @@ impl Database {
     pub async fn open(path: impl Into<PathBuf>) -> Result<Self> {
         let path = path.into();
         let open_path = path.clone();
-        let state = tokio::task::spawn_blocking(move || -> Result<State> {
-            let mut connection = Connection::open(open_path)?;
-            connection.busy_timeout(Duration::from_secs(5))?;
-            let application: i32 = connection.pragma_query_value(None, "application_id", |row| row.get(0))?;
-            let version: i32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-            if version > SCHEMA_VERSION || (application != 0 && application != APPLICATION_ID) {
-                return Err(Error::Invalid("unsupported or foreign SQLite journal".into()));
-            }
-            if version == 0 {
-                let tables: i64 = connection.query_row("SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'", [], |row| row.get(0))?;
-                if tables != 0 || application != 0 { return Err(Error::Invalid("refusing to initialize an existing non-Vise database".into())); }
-            } else if !(1..=SCHEMA_VERSION).contains(&version) || application != APPLICATION_ID {
-                return Err(Error::Invalid("invalid Vise SQLite journal identity".into()));
-            }
-            connection.pragma_update(None, "foreign_keys", "ON")?;
-            let mode: String = connection.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
-            if !mode.eq_ignore_ascii_case("wal") { return Err(Error::Invalid("SQLite journal requires WAL support on the output filesystem".into())); }
-            connection.pragma_update(None, "synchronous", "FULL")?;
-            connection.pragma_update(None, "wal_autocheckpoint", 1000)?;
-            if version == 0 {
-                let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-                transaction.execute_batch(DOWNLOADS_SCHEMA)?;
-                transaction.execute_batch(SCHEMA)?;
-                transaction.pragma_update(None, "application_id", APPLICATION_ID)?;
-                transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-                transaction.commit()?;
-            } else if version == 1 {
-                // Rebuild the parent to extend its CHECK constraint. Foreign keys
-                // are disabled only outside the migration transaction; chunk rows
-                // and their references keep their original table name throughout.
-                connection.pragma_update(None, "foreign_keys", "OFF")?;
-                let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-                transaction.execute_batch(&DOWNLOADS_SCHEMA.replace("CREATE TABLE downloads (", "CREATE TABLE downloads_new ("))?;
-                transaction.execute_batch("INSERT INTO downloads_new(id,url,output_path,total_size,status,created_at,updated_at,ranged,validator,error) SELECT id,url,output_path,total_size,status,created_at,updated_at,ranged,validator,error FROM downloads;
-                    DROP TABLE downloads; ALTER TABLE downloads_new RENAME TO downloads;
-                    CREATE INDEX downloads_status ON downloads(status);")?;
-                let violation = transaction.prepare("PRAGMA foreign_key_check")?.exists([])?;
-                if violation { return Err(Error::Invalid("foreign-key violation during journal migration".into())); }
-                transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-                transaction.commit()?;
-                connection.pragma_update(None, "foreign_keys", "ON")?;
-            } else if version == 2 {
-                let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-                transaction.execute_batch("ALTER TABLE downloads ADD COLUMN proxy_url TEXT")?;
-                transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-                transaction.commit()?;
-            }
-            let check: String = connection.query_row("PRAGMA quick_check(1)", [], |row| row.get(0))?;
-            if check != "ok" { return Err(Error::Invalid(format!("SQLite journal integrity check failed: {check}"))); }
-            let saved = read_records(&mut connection)?.into_iter().map(|record| (record.id, record)).collect();
-            Ok(State { connection, saved })
-        }).await.map_err(|error| Error::Worker(error.to_string()))??;
+        let state = tokio::task::spawn_blocking(move || setup::open(open_path))
+            .await
+            .map_err(|error| Error::Worker(error.to_string()))??;
         Ok(Self {
             state: Arc::new(Shared(Mutex::new(Some(state)))),
-            path: Arc::new(path),
+            path: Arc::from(path.into_boxed_path()),
             gate: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
@@ -382,77 +334,98 @@ fn write_rows<'a>(
 
 fn read_records(connection: &mut Connection) -> Result<Vec<Record>> {
     let transaction = connection.transaction()?;
-    let mut records = BTreeMap::new();
-    {
-        let mut statement = transaction.prepare("SELECT id,url,output_path,total_size,status,created_at,ranged,validator,error,expected_sha256,expected_md5,actual_sha256,actual_md5,verified_at,proxy_url FROM downloads ORDER BY id")?;
-        let mut rows = statement.query([])?;
-        while let Some(row) = rows.next()? {
-            let id: String = row.get(0)?;
-            let id = Uuid::parse_str(&id)
-                .map_err(|error| Error::Invalid(format!("invalid journal download ID: {error}")))?;
-            let status: String = row.get(4)?;
-            records.insert(
-                id,
-                Record {
-                    id,
-                    url: row.get(1)?,
-                    filename: row.get(2)?,
-                    proxy_url: row
-                        .get::<_, Option<String>>(14)?
-                        .map(|value| value.parse())
-                        .transpose()?,
-                    total_bytes: row.get::<_, Option<i64>>(3)?.map(unsigned).transpose()?,
-                    status: status.parse()?,
-                    created_at: row.get(5)?,
-                    ranged: row.get(6)?,
-                    validator: row.get(7)?,
-                    error: row.get(8)?,
-                    checksums: crate::checksum::Checksums {
-                        expected_sha256: row.get(9)?,
-                        expected_md5: row.get(10)?,
-                        actual_sha256: row.get(11)?,
-                        actual_md5: row.get(12)?,
-                        verified_at: row.get(13)?,
-                    },
-                    chunks: Vec::new(),
-                    speed: 0.0,
-                },
-            );
-        }
-    }
-    {
-        let mut statement = transaction.prepare("SELECT download_id,chunk_index,start_byte,end_byte,downloaded_bytes,status FROM chunks ORDER BY download_id,chunk_index")?;
-        let mut rows = statement.query([])?;
-        while let Some(row) = rows.next()? {
-            let id: String = row.get(0)?;
-            let id = Uuid::parse_str(&id)
-                .map_err(|error| Error::Invalid(format!("invalid journal chunk ID: {error}")))?;
-            let record = records
-                .get_mut(&id)
-                .ok_or_else(|| Error::Invalid("orphan chunk in SQLite journal".into()))?;
-            let index = unsigned(row.get(1)?)?;
-            if index != record.chunks.len() as u64 {
-                return Err(Error::Invalid(
-                    "non-contiguous chunk indices in SQLite journal".into(),
-                ));
-            }
-            let status: String = row.get(5)?;
-            record.chunks.push(Chunk {
-                start: unsigned(row.get(2)?)?,
-                end: row.get::<_, Option<i64>>(3)?.map(unsigned).transpose()?,
-                written: unsigned(row.get(4)?)?,
-                status: status.parse()?,
-            });
-        }
-    }
+    let mut records = read_downloads(&transaction)?;
+    read_chunks(&transaction, &mut records)?;
     transaction.commit()?;
     Ok(records.into_values().collect())
+}
+
+fn read_downloads(transaction: &Transaction<'_>) -> Result<BTreeMap<Uuid, Record>> {
+    let mut statement = transaction.prepare("SELECT id,url,output_path,total_size,status,created_at,ranged,validator,error,expected_sha256,expected_md5,actual_sha256,actual_md5,verified_at,proxy_url FROM downloads ORDER BY id")?;
+    let mut rows = statement.query([])?;
+    let mut records = BTreeMap::new();
+    while let Some(row) = rows.next()? {
+        let record = decode_download(row)?;
+        records.insert(record.id, record);
+    }
+    Ok(records)
+}
+
+fn journal_id(row: &Row<'_>, kind: &str) -> Result<Uuid> {
+    let id: String = row.get(0)?;
+    Uuid::parse_str(&id)
+        .map_err(|error| Error::Invalid(format!("invalid journal {kind} ID: {error}")))
+}
+
+fn decode_download(row: &Row<'_>) -> Result<Record> {
+    let id = journal_id(row, "download")?;
+    let status: String = row.get(4)?;
+    Ok(Record {
+        id,
+        url: row.get(1)?,
+        filename: row.get(2)?,
+        proxy_url: row
+            .get::<_, Option<String>>(14)?
+            .map(|value| value.parse())
+            .transpose()?,
+        total_bytes: row.get::<_, Option<i64>>(3)?.map(unsigned).transpose()?,
+        status: status.parse()?,
+        created_at: row.get(5)?,
+        ranged: row.get(6)?,
+        validator: row.get(7)?,
+        error: row.get(8)?,
+        checksums: decode_checksums(row)?,
+        chunks: Vec::new(),
+        speed: 0.0,
+    })
+}
+
+fn decode_checksums(row: &Row<'_>) -> Result<crate::checksum::Checksums> {
+    Ok(crate::checksum::Checksums {
+        expected_sha256: row.get(9)?,
+        expected_md5: row.get(10)?,
+        actual_sha256: row.get(11)?,
+        actual_md5: row.get(12)?,
+        verified_at: row.get(13)?,
+    })
+}
+
+fn read_chunks(transaction: &Transaction<'_>, records: &mut BTreeMap<Uuid, Record>) -> Result<()> {
+    let mut statement = transaction.prepare("SELECT download_id,chunk_index,start_byte,end_byte,downloaded_bytes,status FROM chunks ORDER BY download_id,chunk_index")?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        let id = journal_id(row, "chunk")?;
+        let record = records
+            .get_mut(&id)
+            .ok_or_else(|| Error::Invalid("orphan chunk in SQLite journal".into()))?;
+        record
+            .chunks
+            .push(decode_chunk(row, record.chunks.len() as u64)?);
+    }
+    Ok(())
+}
+
+fn decode_chunk(row: &Row<'_>, expected_index: u64) -> Result<Chunk> {
+    let index = unsigned(row.get(1)?)?;
+    if index != expected_index {
+        return Err(Error::Invalid(
+            "non-contiguous chunk indices in SQLite journal".into(),
+        ));
+    }
+    let status: String = row.get(5)?;
+    Ok(Chunk {
+        start: unsigned(row.get(2)?)?,
+        end: row.get::<_, Option<i64>>(3)?.map(unsigned).transpose()?,
+        written: unsigned(row.get(4)?)?,
+        status: status.parse()?,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::model::{ChunkStatus, Status};
+    use std::time::Duration;
 
     #[tokio::test]
     async fn migrates_v1_atomically_without_losing_chunks_or_configuration() {

@@ -128,11 +128,14 @@ pub async fn hash_file(
             if count == 0 {
                 break;
             }
+            let bytes = buffer
+                .get(..count)
+                .ok_or_else(|| Error::Worker("hash read exceeds buffer capacity".into()))?;
             if let Some(hash) = &mut sha256 {
-                hash.update(&buffer[..count]);
+                hash.update(bytes);
             }
             if let Some(hash) = &mut md5 {
-                hash.update(&buffer[..count]);
+                hash.update(bytes);
             }
         }
         if cancel.is_cancelled() {
@@ -225,10 +228,11 @@ fn merge_digest(
     if bytes.len() != length {
         return Err(Error::Protocol(format!("invalid digest length in {field}")));
     }
-    let hex = bytes
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
+    use std::fmt::Write;
+    let mut hex = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        write!(&mut hex, "{byte:02x}").map_err(|error| Error::Worker(error.to_string()))?;
+    }
     if slot.as_ref().is_some_and(|old| old != &hex) {
         return Err(Error::Protocol(format!("conflicting checksums in {field}")));
     }

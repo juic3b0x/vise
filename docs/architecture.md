@@ -61,10 +61,19 @@ Local journal and partial files are trusted application data; do not modify them
 
 ```text
 Cargo.toml / Cargo.lock    Dependencies and reproducible resolution
-src/main.rs               Arguments, lifecycle, signals, mode selection
+src/main.rs               Arguments, configuration, mode selection
+src/app.rs                Controller supervision, signals, ordered shutdown
 src/lib.rs                Public library modules
-src/engine.rs             Worker pool, transfers, retries, durable checkpoints
+src/engine.rs             Shared manager types and configuration
+src/engine/recovery.rs    Journal import and startup recovery
+src/engine/queue.rs       Admission, pause/resume/retry, deletion, shutdown
+src/engine/state.rs       Snapshots, events, bandwidth configuration
+src/engine/journal.rs     Progress sampling and durable checkpoints
+src/engine/http.rs        Probes, requests, response validation, retry backoff
+src/engine/transfer.rs    Chunk workers, throttled I/O, verified publication
+src/engine/layout.rs      Chunk layout, filenames, persisted-record validation
 src/database.rs           SQLite schema, migration, transactions, async DB boundary
+src/database/setup.rs     Blocking journal validation, initialization, migrations
 src/checksum.rs           Expected digests, representation headers, cancellable file hashing
 src/proxy.rs              Validated proxy URLs, credential redaction, common client builder
 src/rate_limiter.rs       Rate parsing, shared token bucket, response-stream adapter
@@ -77,7 +86,9 @@ src/web.rs                REST, WebSocket, and local request guards
 src/dashboard.html        Embedded dashboard markup and accessible card template
 src/dashboard.css         Responsive industrial dark theme, no external fonts
 src/dashboard.js          Live telemetry, SVG graphs, chunk grids, runtime controls
-tests/downloads.rs        Local HTTP fixtures and integration tests
+tests/downloads.rs        Integration-test module declarations
+tests/downloads/          Shared HTTP fixture and tests grouped by behavior
+tests/support/            Local proxy and TLS fixtures
 ```
 
 

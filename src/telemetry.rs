@@ -251,9 +251,10 @@ fn line(timestamp: SystemTime, label: &str, code: u8, message: &str, color: bool
 }
 
 fn identity(download: &Download) -> String {
+    let id = download.id.to_string();
     format!(
         "{} {}",
-        &download.id.to_string()[..8],
+        id.get(..8).unwrap_or(&id),
         clean(&download.filename)
     )
 }
@@ -299,13 +300,16 @@ fn state(status: Status) -> &'static str {
 }
 
 fn bytes(mut value: f64) -> String {
-    let units = ["B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB"];
-    let mut index = 0;
-    while value >= 1024.0 && index < units.len() - 1 {
-        value /= 1024.0;
-        index += 1;
+    let mut unit = "B";
+    for next in ["KiB", "MiB", "GiB", "TiB", "PiB", "EiB"] {
+        if value >= 1024.0 {
+            value /= 1024.0;
+            unit = next;
+        } else {
+            break;
+        }
     }
-    format!("{value:.1} {}", units[index])
+    format!("{value:.1} {unit}")
 }
 
 fn clean(value: &str) -> String {
@@ -324,6 +328,23 @@ fn clean(value: &str) -> String {
 mod tests {
     use super::*;
     use uuid::Uuid;
+
+    #[test]
+    fn byte_units_preserve_boundaries_and_non_finite_values() {
+        for (value, expected) in [
+            (0.0, "0.0 B"),
+            (1023.0, "1023.0 B"),
+            (1024.0, "1.0 KiB"),
+            (1024.0 * 1024.0, "1.0 MiB"),
+            (1024f64.powi(6), "1.0 EiB"),
+            (1024f64.powi(7), "1024.0 EiB"),
+            (-1.0, "-1.0 B"),
+            (f64::INFINITY, "inf EiB"),
+            (f64::NAN, "NaN B"),
+        ] {
+            assert_eq!(bytes(value), expected);
+        }
+    }
 
     #[test]
     fn events_are_timestamped_colorized_and_terminal_safe() {
