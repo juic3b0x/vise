@@ -26,6 +26,26 @@ use crate::{
     rate_limiter::RateConfiguration,
 };
 
+mod access;
+use access::Access;
+
+/// Validated daemon listener configuration. Credentials never enter the journal.
+pub struct DaemonConfig {
+    bind: SocketAddr,
+    token: Option<access::Token>,
+}
+
+impl DaemonConfig {
+    pub fn new(bind: SocketAddr, token: Option<String>) -> anyhow::Result<Self> {
+        let token = token.map(access::Token::new).transpose()?;
+        anyhow::ensure!(
+            bind.ip().is_loopback() || token.is_some(),
+            "non-loopback daemon binds require VISE_API_TOKEN (32–256 ASCII letters, digits, '-' or '_')"
+        );
+        Ok(Self { bind, token })
+    }
+}
+
 // Validate fixed response headers at compile time rather than parsing per request.
 const NO_STORE: HeaderValue = HeaderValue::from_static("no-store");
 const NO_SNIFF: HeaderValue = HeaderValue::from_static("nosniff");
@@ -36,7 +56,7 @@ const CONTENT_SECURITY_POLICY: HeaderValue = HeaderValue::from_static(
 #[derive(Clone)]
 struct AppState {
     manager: Manager,
-    authority: String,
+    access: Access,
     stop: CancellationToken,
 }
 
@@ -51,10 +71,29 @@ pub async fn run(
         "WebUI must bind to a loopback address"
     );
     let listener = TcpListener::bind(bind).await?;
+    serve(manager, listener, None, stop).await
+}
+
+/// Quiet server mode; process supervision and terminal detachment belong to the service manager.
+pub async fn run_daemon(
+    manager: Manager,
+    config: DaemonConfig,
+    stop: CancellationToken,
+) -> anyhow::Result<()> {
+    let listener = TcpListener::bind(config.bind).await?;
+    serve(manager, listener, config.token, stop).await
+}
+
+async fn serve(
+    manager: Manager,
+    listener: TcpListener,
+    token: Option<access::Token>,
+    stop: CancellationToken,
+) -> anyhow::Result<()> {
     let address = listener.local_addr()?;
     let state = AppState {
         manager: manager.clone(),
-        authority: address.to_string(),
+        access: Access::new(address, token),
         stop: stop.clone(),
     };
     manager.server_started(format!("http://{address}"));
@@ -81,37 +120,20 @@ fn router(state: AppState) -> Router {
         .layer(DefaultBodyLimit::max(16 * 1024))
         .layer(middleware::from_fn_with_state(
             state.clone(),
-            local_requests,
+            guard_requests,
         ))
         .with_state(state)
 }
 
 // Host validation blocks DNS rebinding. Origin checks and JSON-only mutations
-// prevent other websites from controlling a user's unauthenticated local server.
-async fn local_requests(
+// prevent cross-site control. Daemon authentication also protects remote binds.
+async fn guard_requests(
     State(state): State<AppState>,
     request: axum::extract::Request,
     next: Next,
 ) -> Response {
-    let host = request
-        .headers()
-        .get(header::HOST)
-        .and_then(|v| v.to_str().ok());
-    if host != Some(state.authority.as_str()) {
-        return rejection("use the exact loopback URL printed by Vise");
-    }
-    if let Some(origin) = request.headers().get(header::ORIGIN) {
-        let expected = format!("http://{}", state.authority);
-        if origin.to_str().ok() != Some(expected.as_str()) {
-            return rejection("cross-origin requests are forbidden");
-        }
-    }
-    if request
-        .headers()
-        .get("sec-fetch-site")
-        .is_some_and(|v| v == "cross-site")
-    {
-        return rejection("cross-site requests are forbidden");
+    if let Err(response) = state.access.check(request.headers()) {
+        return response.into_response();
     }
     if matches!(
         *request.method(),
@@ -396,7 +418,7 @@ mod tests {
         .unwrap();
         let app = router(AppState {
             manager: manager.clone(),
-            authority: "127.0.0.1:8080".into(),
+            access: Access::new("127.0.0.1:8080".parse().unwrap(), None),
             stop: CancellationToken::new(),
         });
         for (path, content_type) in [
@@ -458,7 +480,7 @@ mod tests {
         .unwrap();
         let app = router(AppState {
             manager,
-            authority: "127.0.0.1:8080".into(),
+            access: Access::new("127.0.0.1:8080".parse().unwrap(), None),
             stop: CancellationToken::new(),
         });
         for (host, origin) in [

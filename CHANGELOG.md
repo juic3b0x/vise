@@ -2,6 +2,18 @@
 
 All notable changes to Vise are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.0] - 2026-10-20
+
+### Added
+
+- **Daemon mode:** `-d` / `--daemon` runs the shared download manager, REST API, WebSockets, and embedded dashboard quietly in the foreground for systemd or container supervision. No stdin reader, progress bars, or terminal telemetry loop is started.
+- **Remote control:** Daemon mode accepts configured IPv4/IPv6 interfaces through `--bind`. Non-loopback listeners require `VISE_API_TOKEN`; API clients use Bearer authentication, and browsers use HTTP Basic authentication with username `vise` and the token as password. The same authentication protects WebSocket upgrades and dashboard assets.
+- **Service deployment:** A systemd user-service example includes restrictive file permissions, graceful SIGTERM shutdown, and optional resume of saved transfers. Daemon sessions reuse SQLite WAL initialization, atomic checkpoints, and startup recovery.
+
+### Security
+
+- Kept unauthenticated `--webui` restricted to loopback. Daemon requests retain Host validation, same-origin/cross-site guards, JSON-only mutations, and the existing response security headers. Daemon credentials are not journaled or included in API snapshots.
+
 ## [0.1.1] - 2026-10-16
 
 Maintenance release focused on reliability, code organization, and leaner dependencies.
@@ -48,5 +60,6 @@ Initial release.
 - **Local WebUI safeguards:** Loopback-only binding, host and browser-origin validation, JSON-only mutations, and a Content Security Policy constrain browser access.
 - **Safe publication:** Existing output files are never overwritten, and configured checksum verification must succeed before final publication. SHA-256 from a trusted source is preferred for security-sensitive verification; MD5 supports legacy compatibility and accidental-corruption detection.
 
+[0.2.0]: https://github.com/juic3b0x/vise/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/juic3b0x/vise/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/juic3b0x/vise/releases/tag/v0.1.0

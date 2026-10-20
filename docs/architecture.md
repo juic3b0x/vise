@@ -1,6 +1,12 @@
 # Architecture and API
 
-Vise uses one shared download manager for its CLI and WebUI.
+Vise uses one shared download manager for its CLI, WebUI, and daemon.
+
+## Execution modes
+
+Default CLI sessions use Indicatif and optional interactive input. `--webui` runs a loopback-only Axum server with a terminal telemetry bridge. `-d` / `--daemon` runs the same Axum routes and shared manager quietly in the foreground for a service manager, without the stdin thread, progress bars, or terminal telemetry task. All modes use the existing Tokio runtime, SQLite WAL initialization, ordered shutdown, and crash recovery; WAL permits external readers while Vise serializes its own transactional writes. The output-directory lock still prevents competing Vise writer processes.
+
+Daemon mode uses `--bind` for IPv4/IPv6 listeners and requires `VISE_API_TOKEN` for non-loopback binds. Bearer authentication and HTTP Basic authentication (`vise` / token) protect REST, assets, and WebSocket upgrades. Basic authentication lets the embedded dashboard use the browser's normal HTTP authentication cache. Invalid authentication returns HTTP 401. Browser origins must match the request Host; only authenticated daemon requests may use arbitrary valid hostnames, including names preserved by an HTTPS reverse proxy. The local unauthenticated WebUI retains its exact loopback Host check.
 
 ## HTTP and WebSocket API
 
@@ -83,6 +89,7 @@ src/telemetry.rs          WebUI-only stdout event log and periodic summaries
 src/error.rs              Typed errors and retry classification
 src/cli.rs                Interactive commands and progress rendering
 src/web.rs                REST, WebSocket, and local request guards
+src/web/access.rs         Local Host/origin guards and daemon authentication
 src/dashboard.html        Embedded dashboard markup and accessible card template
 src/dashboard.css         Responsive industrial dark theme, no external fonts
 src/dashboard.js          Live telemetry, SVG graphs, chunk grids, runtime controls
@@ -138,7 +145,7 @@ Low-rate transfers flush accumulated file bytes at least every 250 ms when token
 
 ## Embedded dashboard
 
-Axum embeds the HTML, CSS, and JavaScript independently with `include_str!`, so installation still produces one executable. The combined frontend source is approximately 55 KiB, with no new crate or browser dependencies. Asset routes use explicit MIME types and `nosniff`. The content security policy allows scripts only from the same origin, with no inline scripts or dynamic code evaluation; inline style attributes support progress indicators. The loopback Host/Origin guards apply to assets and both WebSocket routes as well as REST endpoints.
+Axum embeds the HTML, CSS, and JavaScript independently with `include_str!`, so installation still produces one executable. The combined frontend source is approximately 55 KiB, with no new crate or browser dependencies. Asset routes use explicit MIME types and `nosniff`. The content security policy allows scripts only from the same origin, with no inline scripts or dynamic code evaluation; inline style attributes support progress indicators. Host/Origin guards and configured daemon authentication apply to assets and both WebSocket routes as well as REST endpoints.
 
 The frontend patches reusable card nodes and chunk tiles instead of replacing the queue on each message. A single animation-frame callback coalesces incoming updates. Each SVG graph holds at most 65 samples across a rolling 60-second window, sampled once per second; per-transfer histories are removed when their queue entries disappear. Plot rendering pauses while the document is hidden. The activity feed holds at most 40 entries derived from observed snapshots and successful controls; it is a browser-session feed, not a durable audit log, and can miss transitions between snapshots.
 

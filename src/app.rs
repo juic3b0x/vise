@@ -1,4 +1,4 @@
-//! Controller supervision and ordered shutdown for CLI and WebUI sessions.
+//! Controller supervision and ordered shutdown for CLI, WebUI, and daemon sessions.
 use super::Args;
 use std::{error::Error, future::Future};
 use tokio::task::{JoinError, JoinHandle};
@@ -10,16 +10,20 @@ pub(super) async fn run_session(
     args: &Args,
     interactive: bool,
     expected: ExpectedChecksums,
+    daemon: Option<web::DaemonConfig>,
 ) -> anyhow::Result<u8> {
     let mut background = Background::start(&manager, args.webui);
     let result = async {
         seed_queue(&manager, args, expected).await?;
-        let controller = run_controller(&manager, args, interactive, background.stop.clone());
+        let controller =
+            run_controller(&manager, args, interactive, background.stop.clone(), daemon);
         background.supervise(controller).await
     }
     .await;
     let interrupted = background.stop.is_cancelled();
-    background.shutdown(&manager, args.webui).await?;
+    background
+        .shutdown(&manager, args.webui || args.daemon)
+        .await?;
     let success = result?;
     Ok(if interrupted {
         130
@@ -51,8 +55,13 @@ async fn run_controller(
     args: &Args,
     interactive: bool,
     stop: CancellationToken,
+    daemon: Option<web::DaemonConfig>,
 ) -> anyhow::Result<bool> {
-    if args.webui {
+    if let Some(config) = daemon {
+        web::run_daemon(manager.clone(), config, stop)
+            .await
+            .map(|_| true)
+    } else if args.webui {
         web::run(manager.clone(), args.bind, stop)
             .await
             .map(|_| true)
@@ -79,7 +88,7 @@ impl Background {
         let stop = CancellationToken::new();
         let telemetry_stop = CancellationToken::new();
         // Subscribe before seeding so even an immediately completed task is logged.
-        // CLI mode never starts a terminal telemetry task.
+        // CLI and daemon modes never start a terminal telemetry task.
         let terminal = if webui {
             let events = manager.subscribe_events();
             let manager = manager.clone();
@@ -132,14 +141,14 @@ impl Background {
         }
     }
 
-    async fn shutdown(self, manager: &Manager, webui: bool) -> anyhow::Result<()> {
+    async fn shutdown(self, manager: &Manager, server: bool) -> anyhow::Result<()> {
         self.stop.cancel();
         // Stop periodic snapshots before the final quiescent checkpoint.
         self.monitor_stop.cancel();
         let monitor_result = join_if_pending(self.monitor, self.monitor_consumed).await;
         self.signal.abort();
         let shutdown = manager.shutdown().await;
-        if webui {
+        if server {
             publish_shutdown(manager, &shutdown);
         }
         // Keep telemetry alive through shutdown, then flush remaining events.

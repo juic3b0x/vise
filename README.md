@@ -15,7 +15,8 @@ Vise is a high-performance HTTP(S) download manager built in Rust. Multi-threade
 - **SQLite crash recovery:** Control individual tasks and restore saved chunk offsets from an embedded transactional journal after restarting.
 - **Resilient downloads:** Retry dropped connections and transient HTTP failures with bounded backoff.
 - **Live bandwidth control:** Share one token-bucket speed limit across all downloads and change it from the interactive CLI or WebUI without reconnecting.
-- **CLI first:** Download from arguments or manage an interactive queue. The web server starts only with `--webui`.
+- **CLI first:** Download from arguments or manage an interactive queue. The web server starts only with `--webui` or `--daemon`.
+- **Quiet daemon:** Run the same engine and API under a service manager, with authenticated remote control and no terminal loop.
 - **Embedded WebUI:** An industrial dark console with live speed graphs, actual chunk-progress grids, queue filters, and controls that update without reloading.
 - **Live terminal monitor:** In WebUI mode, follow timestamped events and one-second transfer summaries on stdout while the browser controls downloads.
 - **Careful file handling:** Validate range responses, save durable checkpoints, and refuse to overwrite existing output files.
@@ -203,6 +204,50 @@ Existing `.vise/state.json` journals are imported automatically once and preserv
 
 Parallel range downloads require server range support and a strong ETag or Last-Modified validator. If either is unavailable, Vise uses a single streaming request and restarts that transfer when resumed. Unknown-length streams are supported.
 
+## Daemon / service mode
+
+Run the engine, REST/WebSocket API, and embedded dashboard without terminal input or progress output:
+
+```sh
+vise -d
+vise --daemon --bind 127.0.0.1:8080 -o ./downloads --resume-all
+```
+
+Daemon mode stays in the foreground for systemd, Docker, or another process supervisor; it does not fork or detach itself. It keeps serving when the queue is empty. SIGTERM or Ctrl+C stops workers and commits recoverable progress. It is exclusive with `--webui`, `--interactive`, and `--batch`. Startup errors and warnings still go to stderr.
+
+For a LAN or wildcard bind, set a secret token first. Tokens must contain 32–256 ASCII letters, digits, `-`, or `_`; generate a random value rather than a memorable password:
+
+```sh
+export VISE_API_TOKEN="$(openssl rand -hex 32)"
+vise --daemon --bind 0.0.0.0:8080 -o ./downloads --resume-all
+```
+
+`--bind` accepts numeric IPv4 and IPv6 socket addresses, including `[::]:8080`. The default is `127.0.0.1:8080`. Non-loopback binds fail before opening the journal unless a valid `VISE_API_TOKEN` is present. Setting a token on a loopback daemon enables authentication there too. Protect remote connections with an HTTPS reverse proxy or an authenticated SSH tunnel: the embedded listener itself uses HTTP, so authentication alone does not encrypt credentials or metadata.
+
+API clients send `Authorization: Bearer`; all REST endpoints and both WebSocket endpoints use the same token:
+
+```sh
+curl -H "Authorization: Bearer $VISE_API_TOKEN" \
+  http://127.0.0.1:8080/api/downloads
+curl -H "Authorization: Bearer $VISE_API_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"url":"https://example.com/archive.zip"}' \
+  http://127.0.0.1:8080/api/downloads
+```
+
+Open the daemon's address in a browser for the dashboard. In the browser's HTTP authentication prompt, enter **`vise`** as the username and your token as the password. Same-origin browser requests and WebSocket upgrades use those credentials. Native WebSocket clients may supply either Bearer authentication or HTTP Basic authentication. Tokens are supplied through the environment and are not stored in SQLite; use the same protected environment configuration when restarting the service.
+
+For a systemd user service, install Vise with Cargo, create a private environment file, then install the provided unit:
+
+```sh
+install -d -m 700 ~/.config/vise
+(umask 077; printf 'VISE_API_TOKEN=%s\n' "$(openssl rand -hex 32)" > ~/.config/vise/daemon.env)
+install -D -m 644 docs/vise.service ~/.config/systemd/user/vise.service
+systemctl --user daemon-reload
+systemctl --user enable --now vise.service
+```
+
+The example binds all IPv4 interfaces on port 8080 and saves downloads to `~/Downloads/vise`. Adjust its bind/output paths to your deployment. User services that must survive logout also need user lingering enabled by the system administrator. See [docs/vise.service](docs/vise.service).
+
 ## WebUI
 
 Launch the embedded dashboard:
@@ -263,7 +308,8 @@ WebUI mode uses the same download engine and worker pool as the CLI, and replace
 | `--batch` | Never read terminal input | Off |
 | `--resume-all` | Resume saved paused and failed tasks | Off |
 | `--webui` | Start the embedded dashboard | Off |
-| `--bind` | WebUI loopback address | `127.0.0.1:8080` |
+| `-d, --daemon` | Run the API/dashboard quietly for a service manager | Off |
+| `--bind` | Server address; remote binds require daemon mode and a token | `127.0.0.1:8080` |
 
 Run `vise --help` for the full command reference. Set `RUST_LOG=vise=info` for diagnostic logs.
 
@@ -273,7 +319,7 @@ Run `vise --help` for the full command reference. Set `RUST_LOG=vise=info` for d
 | --- | --- |
 | [Tokio](https://docs.rs/tokio/) | Async execution on a multithreaded runtime |
 | [Reqwest](https://docs.rs/reqwest/) | HTTP(S), streaming responses, and range requests |
-| [Axum](https://docs.rs/axum/) | Optional local HTTP server, REST API, and WebSockets |
+| [Axum](https://docs.rs/axum/) | Optional HTTP server, REST API, and WebSockets |
 | [Indicatif](https://docs.rs/indicatif/) | Terminal progress bars and transfer monitoring |
 | [Clap](https://docs.rs/clap/) | Argument parsing and CLI help |
 | [rusqlite](https://docs.rs/rusqlite/) | Embedded SQLite state journal with bundled SQLite |

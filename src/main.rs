@@ -7,20 +7,25 @@ use vise::{
     engine::{Config, Manager},
     proxy::ProxyUrl,
     rate_limiter::RateLimit,
+    web::DaemonConfig,
 };
 
 mod app;
 
 #[derive(Parser)]
 #[command(version, about = "Vise — concurrent, resumable downloads", long_about = None)]
+#[command(group(clap::ArgGroup::new("server").args(["webui", "daemon"])))]
 struct Args {
     /// HTTP(S) URLs to enqueue
     urls: Vec<String>,
     /// Launch the local dashboard instead of the terminal controller
     #[arg(long)]
     webui: bool,
-    /// Local WebUI listen address (loopback only)
-    #[arg(long, default_value = "127.0.0.1:8080", requires = "webui")]
+    /// Run the API and dashboard quietly for a service manager (no terminal input)
+    #[arg(short = 'd', long)]
+    daemon: bool,
+    /// Server listen address; non-loopback daemon binds require VISE_API_TOKEN
+    #[arg(long, default_value = "127.0.0.1:8080", requires = "server")]
     bind: SocketAddr,
     /// Directory for downloaded files and the .vise journal
     #[arg(short, long, default_value = "downloads")]
@@ -41,10 +46,10 @@ struct Args {
     #[arg(long)]
     resume_all: bool,
     /// Keep the interactive command queue open even with URL arguments
-    #[arg(short, long, conflicts_with = "webui")]
+    #[arg(short, long, conflicts_with_all = ["webui", "daemon"])]
     interactive: bool,
     /// Run without reading terminal input
-    #[arg(long, conflicts_with_all = ["interactive", "webui"])]
+    #[arg(long, conflicts_with_all = ["interactive", "webui", "daemon"])]
     batch: bool,
     /// Save a single URL under this filename
     #[arg(short = 'n', long)]
@@ -104,12 +109,13 @@ async fn run(args: Args) -> anyhow::Result<u8> {
         "--name requires exactly one URL"
     );
     let interactive = !args.webui
+        && !args.daemon
         && !args.batch
         && (args.interactive
             || (args.urls.is_empty() && !args.resume_all && cli::stdin_is_terminal()));
     anyhow::ensure!(
-        args.webui || interactive || !args.urls.is_empty() || args.resume_all,
-        "provide a URL, use --resume-all, --interactive, or --webui"
+        args.webui || args.daemon || interactive || !args.urls.is_empty() || args.resume_all,
+        "provide a URL, use --resume-all, --interactive, --webui, or --daemon"
     );
     if args.webui {
         anyhow::ensure!(
@@ -117,6 +123,16 @@ async fn run(args: Args) -> anyhow::Result<u8> {
             "--bind must use a loopback address"
         );
     }
+    let daemon = if args.daemon {
+        let token = match std::env::var("VISE_API_TOKEN") {
+            Ok(token) => Some(token),
+            Err(std::env::VarError::NotPresent) => None,
+            Err(_) => anyhow::bail!("VISE_API_TOKEN must contain valid Unicode"),
+        };
+        Some(DaemonConfig::new(args.bind, token)?)
+    } else {
+        None
+    };
     let manager = Manager::open(Config {
         output_dir: args.output.clone(),
         concurrent_downloads: args.jobs as usize,
@@ -127,12 +143,28 @@ async fn run(args: Args) -> anyhow::Result<u8> {
         proxy_url,
     })
     .await?;
-    app::run_session(manager, &args, interactive, expected).await
+    app::run_session(manager, &args, interactive, expected, daemon).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn daemon_arguments_are_exclusive_and_allow_a_remote_bind() {
+        for flag in ["-d", "--daemon"] {
+            let args = Args::try_parse_from(["vise", flag, "--bind", "0.0.0.0:8080"]).unwrap();
+            assert!(args.daemon);
+            assert!(!args.webui);
+            for conflict in ["--webui", "--interactive", "--batch"] {
+                assert!(Args::try_parse_from(["vise", flag, conflict]).is_err());
+            }
+        }
+        assert!(Args::try_parse_from(["vise", "--bind", "127.0.0.1:8080"]).is_err());
+        assert!(Args::try_parse_from(["vise", "--daemon"]).is_ok());
+        assert!(Args::try_parse_from(["vise", "--webui"]).is_ok());
+        assert!(Args::try_parse_from(["vise"]).is_ok());
+    }
 
     #[test]
     fn error_reporting_preserves_context_and_returns_write_failures() {
