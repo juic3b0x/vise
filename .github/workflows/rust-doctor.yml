@@ -1,0 +1,40 @@
+name: Rust Doctor
+
+on:
+  push:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    name: Inspect
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      # Baseline comparisons require the base ref and its history.
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Pass the branch name as data rather than interpolating it into the shell.
+      - name: Inspect the workspace
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          if [ -n "$BASE_REF" ]; then
+            npx -y rust-doctor@latest . --yes --verbose \
+              --scope baseline --base "origin/$BASE_REF" --blocking error \
+              --rule rust_doctor::cargo::duplicate_major_versions=off
+          else
+            npx -y rust-doctor@latest . --yes --verbose --blocking error \
+              --rule rust_doctor::cargo::duplicate_major_versions=off
+          fi
