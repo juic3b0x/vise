@@ -1,6 +1,15 @@
 name: Rust
 on: [push, pull_request]
 jobs:
+  extension:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: node extension/tests/extension.test.cjs
+      - run: node --check extension/background.js && node --check extension/common.js && node --check extension/options.js
   check:
     strategy:
       matrix:

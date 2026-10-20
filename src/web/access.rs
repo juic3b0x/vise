@@ -34,16 +34,7 @@ impl Token {
     }
 
     fn authorized(&self, headers: &HeaderMap) -> bool {
-        let Some(value) = headers
-            .get(header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-        else {
-            return false;
-        };
-        if value.len() > 1024 {
-            return false;
-        }
-        let Some((scheme, credential)) = value.split_once(' ') else {
+        let Some((scheme, credential)) = credential(headers) else {
             return false;
         };
         if scheme.eq_ignore_ascii_case("bearer") {
@@ -62,6 +53,32 @@ impl Token {
             })
             .unwrap_or(false)
     }
+
+    fn bearer_authorized(&self, headers: &HeaderMap) -> bool {
+        credential(headers).is_some_and(|(scheme, value)| {
+            scheme.eq_ignore_ascii_case("bearer") && self.matches(value.as_bytes())
+        })
+    }
+}
+
+fn credential(headers: &HeaderMap) -> Option<(&str, &str)> {
+    let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
+    if value.len() > 1024 {
+        return None;
+    }
+    value.split_once(' ')
+}
+
+fn extension_origin(headers: &HeaderMap) -> bool {
+    let Some(origin) = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) else {
+        return false;
+    };
+    if let Some(id) = origin.strip_prefix("chrome-extension://") {
+        return id.len() == 32 && id.bytes().all(|b| (b'a'..=b'p').contains(&b));
+    }
+    origin
+        .strip_prefix("moz-extension://")
+        .is_some_and(|id| id.len() == 36 && uuid::Uuid::parse_str(id).is_ok())
 }
 
 #[derive(Clone)]
@@ -90,6 +107,15 @@ impl Access {
             return Err(Denied::Forbidden(
                 "use the exact loopback URL printed by Vise",
             ));
+        }
+        // Privileged extension fetches bypass browser CORS using host permissions.
+        // Require an explicit secret rather than accepting cached Basic credentials.
+        if let Some(token) = self.token.as_ref().filter(|_| extension_origin(headers)) {
+            return if token.bearer_authorized(headers) {
+                Ok(())
+            } else {
+                Err(Denied::Unauthorized)
+            };
         }
         self.check_origin(headers, host)?;
         if self
@@ -152,6 +178,60 @@ mod tests {
     use super::*;
 
     const SECRET: &str = "synthetic-test-token-0123456789abcdef";
+
+    #[test]
+    fn extension_requests_require_explicit_bearer_authentication() {
+        let address = "127.0.0.1:8080".parse().unwrap();
+        let access = Access::new(address, Some(Token::new(SECRET.into()).unwrap()));
+        for origin in [
+            "chrome-extension://abcdefghijklmnopabcdefghijklmnop",
+            "moz-extension://d5f97730-863b-4f81-964b-61ab81541856",
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::HOST, "127.0.0.1:8080".parse().unwrap());
+            headers.insert(header::ORIGIN, origin.parse().unwrap());
+            headers.insert("sec-fetch-site", "cross-site".parse().unwrap());
+            for value in [
+                None,
+                Some("Bearer invalid".to_owned()),
+                Some(format!(
+                    "Basic {}",
+                    STANDARD.encode(format!("vise:{SECRET}"))
+                )),
+            ] {
+                headers.remove(header::AUTHORIZATION);
+                if let Some(value) = value {
+                    headers.insert(header::AUTHORIZATION, value.parse().unwrap());
+                }
+                assert!(matches!(access.check(&headers), Err(Denied::Unauthorized)));
+            }
+            headers.insert(
+                header::AUTHORIZATION,
+                format!("Bearer {SECRET}").parse().unwrap(),
+            );
+            assert!(access.check(&headers).is_ok());
+            assert!(matches!(
+                Access::new(address, None).check(&headers),
+                Err(Denied::Forbidden(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn malformed_or_website_origins_do_not_get_the_extension_exception() {
+        for origin in [
+            "null",
+            "https://untrusted.example",
+            "chrome-extension://evil",
+            "chrome-extension://abcdefghijklmnopabcdefghijklmnop.evil",
+            "chrome-extension://abcdefghijklmnopabcdefghijklmnop/path",
+            "moz-extension://not-a-uuid",
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::ORIGIN, origin.parse().unwrap());
+            assert!(!extension_origin(&headers));
+        }
+    }
 
     #[test]
     fn daemon_configuration_requires_valid_credentials_for_remote_interfaces() {

@@ -22,6 +22,7 @@ Vise is a high-performance HTTP(S) download manager built in Rust. Multi-threade
 - **Careful file handling:** Validate range responses, save durable checkpoints, and refuse to overwrite existing output files.
 - **Checksum verification:** Verify SHA-256 and MD5 before publishing a file; preserve corrupt downloads for inspection or an explicit retry.
 - **Per-transfer proxies:** HTTP/HTTPS proxies and SOCKS5 tunnels, including authentication and saved routes for resumed downloads.
+- **Browser integration:** A lightweight Chrome/Firefox extension adds **Send to Vise** to HTTP(S) link menus. See [extension setup](INSTALL.md#browser-extension).
 
 ## Installation
 

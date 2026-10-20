@@ -220,6 +220,27 @@ async fn remote_daemon_authenticates_dashboard_api_and_websockets() {
         socket.close(None).await.unwrap();
     }
     concurrent_reader_allows_api_commit(&client, &base, dir.path()).await;
+    for origin in [
+        "chrome-extension://abcdefghijklmnopabcdefghijklmnop",
+        "moz-extension://d5f97730-863b-4f81-964b-61ab81541856",
+    ] {
+        let response = client
+            .post(format!("{base}/api/config"))
+            .bearer_auth(SECRET)
+            .header(header::ORIGIN, origin)
+            .header("sec-fetch-site", "cross-site")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(r#"{"limit_rate":"1M"}"#)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            !response
+                .headers()
+                .contains_key(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+        );
+    }
     let rejected = client
         .post(format!("{base}/api/config"))
         .bearer_auth(SECRET)

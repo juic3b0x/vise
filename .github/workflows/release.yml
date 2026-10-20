@@ -75,6 +75,7 @@ jobs:
           chmod 755 "$staging/vise"
           cp README.md INSTALL.md LICENSE LICENSE-APACHE "$staging/"
           cp -R docs "$staging/docs"
+          cp -R extension "$staging/extension"
           tar -czf "dist/$package.tar.gz" -C "$RUNNER_TEMP" "$package"
 
       - name: Package Windows archive
@@ -89,6 +90,7 @@ jobs:
           Copy-Item "target/$env:TARGET/release/vise.exe" (Join-Path $staging 'vise.exe')
           Copy-Item README.md, INSTALL.md, LICENSE, LICENSE-APACHE $staging
           Copy-Item docs (Join-Path $staging 'docs') -Recurse
+          Copy-Item extension (Join-Path $staging 'extension') -Recurse
           Compress-Archive -Path $staging -DestinationPath "dist/$package.zip" -CompressionLevel Optimal
 
       - name: Upload packaged binary
