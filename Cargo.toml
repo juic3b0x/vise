@@ -10,7 +10,7 @@ license = "MIT OR Apache-2.0"
 anyhow = "1"
 axum = { version = "0.8", features = ["ws"] }
 bytes = "1"
-base64 = "0.22"
+base64 = "0.23"
 sha2 = "0.10"
 md5 = { package = "md-5", version = "0.10" }
 clap = { version = "4", features = ["derive"] }
