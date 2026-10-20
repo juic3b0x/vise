@@ -73,7 +73,7 @@ jobs:
           mkdir -p "$staging" dist
           cp "target/$TARGET/release/vise" "$staging/vise"
           chmod 755 "$staging/vise"
-          cp README.md LICENSE LICENSE-APACHE "$staging/"
+          cp README.md INSTALL.md LICENSE LICENSE-APACHE "$staging/"
           cp -R docs "$staging/docs"
           tar -czf "dist/$package.tar.gz" -C "$RUNNER_TEMP" "$package"
 
@@ -87,7 +87,7 @@ jobs:
           $staging = Join-Path $env:RUNNER_TEMP $package
           New-Item -ItemType Directory -Path $staging, 'dist' -Force | Out-Null
           Copy-Item "target/$env:TARGET/release/vise.exe" (Join-Path $staging 'vise.exe')
-          Copy-Item README.md, LICENSE, LICENSE-APACHE $staging
+          Copy-Item README.md, INSTALL.md, LICENSE, LICENSE-APACHE $staging
           Copy-Item docs (Join-Path $staging 'docs') -Recurse
           Compress-Archive -Path $staging -DestinationPath "dist/$package.zip" -CompressionLevel Optimal
 

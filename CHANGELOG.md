@@ -12,6 +12,10 @@ All notable changes to Vise are documented here. The format follows [Keep a Chan
 - **Remote control:** Daemon mode accepts configured IPv4/IPv6 interfaces through configuration or CLI overrides. Non-loopback listeners require a valid file or environment token; API clients use Bearer authentication, and browsers use HTTP Basic authentication with username `vise` and the token as password. The same authentication protects WebSocket upgrades and dashboard assets.
 - **Service deployment:** A systemd user-service example includes restrictive file permissions, graceful SIGTERM shutdown, and optional resume of saved transfers. Daemon sessions reuse SQLite WAL initialization, atomic checkpoints, and startup recovery.
 
+### Changed
+
+- Moved requirements, Cargo installation, verification, and systemd setup into `INSTALL.md`, keeping the README focused on features and usage. Release archives include the installation guide alongside the README.
+
 ### Security
 
 - Kept unauthenticated `--webui` restricted to loopback. Daemon requests retain Host validation, same-origin/cross-site guards, JSON-only mutations, and the existing response security headers. Daemon credentials are not journaled or included in API snapshots.

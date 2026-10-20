@@ -25,41 +25,7 @@ Vise is a high-performance HTTP(S) download manager built in Rust. Multi-threade
 
 ## Installation
 
-### Requirements
-
-Install a Rust toolchain with Cargo. Vise declares Rust **1.85 or newer** as its minimum version. Git is also required to clone the repository. A working C build toolchain is needed for bundled SQLite; no separate SQLite installation or database server is required.
-
-### From a cloned repository
-
-```sh
-git clone https://github.com/juic3b0x/vise.git
-cd vise
-cargo install --path .
-```
-
-### Directly from GitHub
-
-```sh
-cargo install --git https://github.com/juic3b0x/vise.git
-```
-
-For a reproducible build using the repository's `Cargo.lock`, append `--locked` to either installation command:
-
-```sh
-cargo install --path . --locked
-cargo install --git https://github.com/juic3b0x/vise.git --locked
-```
-
-By default, Cargo places the executable in `~/.cargo/bin/` (`%USERPROFILE%\.cargo\bin\` on Windows). Ensure that directory is on your `PATH` to run `vise` instantly from any terminal. Custom Cargo installation roots change this location; see the [Cargo installation reference](https://doc.rust-lang.org/cargo/commands/cargo-install.html).
-
-Confirm the installation:
-
-```sh
-vise --version
-vise --help
-```
-
-Local source installation and Git-source installation have been verified in isolated installation directories. The Git check used a local repository; installation from the live GitHub repository has not yet been verified.
+See [INSTALL.md](INSTALL.md) for system requirements, Cargo installation, verification, and systemd service setup.
 
 ## Persistent configuration
 
@@ -263,15 +229,7 @@ curl -H "Authorization: Bearer $VISE_API_TOKEN" -H 'Content-Type: application/js
 
 Open the daemon's address in a browser for the dashboard. In the browser's HTTP authentication prompt, enter **`vise`** as the username and your token as the password. Same-origin browser requests and WebSocket upgrades use those credentials. Native WebSocket clients may supply either Bearer authentication or HTTP Basic authentication. Tokens live in the protected TOML file or environment, and are not stored in SQLite.
 
-For a systemd user service, install Vise with Cargo, then install the provided unit:
-
-```sh
-install -D -m 644 docs/vise.service ~/.config/systemd/user/vise.service
-systemctl --user daemon-reload
-systemctl --user enable --now vise.service
-```
-
-The example loads `~/.vise/config.toml`, creating it on first startup, and resumes saved transfers. Edit the file's host, port, output path, or token and restart the service to apply changes. An optional `~/.config/vise/daemon.env` file can override `VISE_API_TOKEN`. User services that must survive logout also need user lingering enabled by the system administrator. See [docs/vise.service](docs/vise.service).
+For service setup, see [Systemd user service](INSTALL.md#systemd-user-service).
 
 ## WebUI
 
