@@ -13,7 +13,7 @@ async fn cli_batch_download_is_successful_and_failure_exits_nonzero() {
         let url = fixture.url.clone();
         let output_dir = dir.path().to_owned();
         let output = tokio::task::spawn_blocking(move || {
-            std::process::Command::new(env!("CARGO_BIN_EXE_vise"))
+            super::fixture::command(&output_dir)
                 .args(["--batch", "--output"])
                 .arg(output_dir)
                 .arg(url)
@@ -44,7 +44,7 @@ async fn cli_batch_download_is_successful_and_failure_exits_nonzero() {
 #[tokio::test]
 async fn interactive_sigterm_exits_without_waiting_for_stdin() {
     let dir = tempfile::tempdir().unwrap();
-    let mut process = std::process::Command::new(env!("CARGO_BIN_EXE_vise"))
+    let mut process = super::fixture::command(dir.path())
         .arg("--interactive")
         .arg("--output")
         .arg(dir.path())
@@ -90,7 +90,7 @@ async fn webui_binary_logs_actions_progress_and_shutdown_to_stdout() {
     let socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let bind = socket.local_addr().unwrap();
     drop(socket);
-    let mut process = std::process::Command::new(env!("CARGO_BIN_EXE_vise"))
+    let mut process = super::fixture::command(dir.path())
         .args(["--webui", "--bind"])
         .arg(bind.to_string())
         .args(["--connections", "1", "--output"])
@@ -213,7 +213,7 @@ async fn cli_checksum_flags_accept_uppercase_and_mismatches_exit_nonzero() {
         let fixture = Fixture::start(Mode::Ranges).await;
         let dir = tempfile::tempdir().unwrap();
         let expected = expected_hashes(&fixture.state.data);
-        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_vise"));
+        let mut command = super::fixture::command(dir.path());
         command
             .arg("--batch")
             .arg("--output")
@@ -256,7 +256,7 @@ async fn cli_proxy_flag_routes_the_entire_batch_and_debug_logs_hide_credentials(
     let fixture = Fixture::start(Mode::Ranges).await;
     let proxy = TestProxy::start(Kind::Http, true).await;
     let dir = tempfile::tempdir().unwrap();
-    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_vise"));
+    let mut command = super::fixture::command(dir.path());
     command
         .env("RUST_LOG", "reqwest=debug")
         .args(["--batch", "--proxy"])

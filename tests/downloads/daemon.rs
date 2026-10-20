@@ -13,6 +13,82 @@ use vise::{
 
 const SECRET: &str = "synthetic-daemon-token-0123456789abcdef";
 
+#[cfg(unix)]
+#[tokio::test]
+async fn daemon_loads_file_settings_and_environment_authentication_wins() {
+    for environment_override in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let mut command = super::fixture::command(root.path());
+        let home = root.path().join("test-home");
+        let config_dir = home.join(".vise");
+        std::fs::create_dir(&config_dir).unwrap();
+        let socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let bind = socket.local_addr().unwrap();
+        drop(socket);
+        let file_token = if environment_override {
+            "overridden-file-token-0123456789abcdef"
+        } else {
+            SECRET
+        };
+        std::fs::write(
+            config_dir.join("config.toml"),
+            format!(
+                r#"[daemon]
+host = "127.0.0.1"
+port = {}
+VISE_API_TOKEN = "{file_token}"
+[downloads]
+default_dir = "~/Configured"
+max_concurrent = 2
+global_speed_limit_kbps = 8
+"#,
+                bind.port()
+            ),
+        )
+        .unwrap();
+        command.arg("--daemon");
+        if environment_override {
+            command.env("VISE_API_TOKEN", SECRET);
+        }
+        let child = Daemon(
+            command
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap(),
+        );
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(3))
+            .build()
+            .unwrap();
+        let base = format!("http://{bind}");
+        wait_ready(&client, &base).await;
+        let response = client
+            .get(format!("{base}/api/config"))
+            .bearer_auth(SECRET)
+            .send()
+            .await
+            .unwrap();
+        let config: serde_json::Value =
+            serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+        assert_eq!(config["limit_bytes_per_second"], 8 * 1024);
+        if environment_override {
+            let response = client
+                .get(format!("{base}/api/config"))
+                .bearer_auth(file_token)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+        child.stop().await;
+        assert!(home.join("Configured/.vise/state.sqlite3").is_file());
+        assert!(!root.path().join("downloads").exists());
+    }
+}
+
 #[tokio::test]
 async fn unsafe_server_configuration_fails_before_creating_a_journal() {
     for (flag, token, message) in [
@@ -31,7 +107,14 @@ async fn unsafe_server_configuration_fails_before_creating_a_journal() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().to_owned();
         let output = tokio::task::spawn_blocking(move || {
-            let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_vise"));
+            let mut command = super::fixture::command(&path);
+            let home = path.join("test-home");
+            std::fs::create_dir_all(home.join(".vise")).unwrap();
+            std::fs::write(
+                home.join(".vise/config.toml"),
+                "[daemon]\nVISE_API_TOKEN = \"\"\n",
+            )
+            .unwrap();
             command
                 .args([flag, "--bind", "0.0.0.0:8080", "--output"])
                 .arg(path)
@@ -227,7 +310,7 @@ impl Drop for Daemon {
 impl Daemon {
     fn start(flag: &str, bind: SocketAddr, output: &std::path::Path) -> Self {
         Self(
-            std::process::Command::new(env!("CARGO_BIN_EXE_vise"))
+            super::fixture::command(output)
                 .env("VISE_API_TOKEN", SECRET)
                 .env_remove("RUST_LOG")
                 .args([flag, "--bind", &bind.to_string(), "--output"])

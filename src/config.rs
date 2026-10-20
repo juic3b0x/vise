@@ -1,0 +1,136 @@
+//! User preferences, independent of the SQLite transfer journal.
+use std::{
+    net::IpAddr,
+    path::{Path, PathBuf},
+};
+
+use anyhow::{Context, Result};
+use serde::Deserialize;
+
+mod storage;
+#[cfg(test)]
+mod tests;
+
+pub fn default_contents() -> String {
+    let token = format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    );
+    format!(
+        r#"[daemon]
+host = "127.0.0.1"
+port = 8080
+VISE_API_TOKEN = "{token}"
+
+[downloads]
+default_dir = "~/Downloads/Vise"
+max_concurrent = 5
+global_speed_limit_kbps = 0 # 0 for unlimited
+
+[proxy]
+url = "" # optional default proxy
+"#
+    )
+}
+
+#[derive(Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct FileConfig {
+    pub daemon: Daemon,
+    pub downloads: Downloads,
+    pub proxy: Proxy,
+}
+
+// Deliberately omit Debug: these values may contain credentials.
+#[derive(Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Daemon {
+    pub host: IpAddr,
+    pub port: u16,
+    #[serde(rename = "VISE_API_TOKEN", alias = "auth_token")]
+    pub api_token: String,
+}
+
+impl Default for Daemon {
+    fn default() -> Self {
+        Self {
+            host: std::net::Ipv4Addr::LOCALHOST.into(),
+            port: 8080,
+            api_token: String::new(),
+        }
+    }
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Downloads {
+    pub default_dir: PathBuf,
+    pub max_concurrent: u16,
+    /// KiB per second: one unit is 1024 bytes; zero disables throttling.
+    pub global_speed_limit_kbps: u64,
+}
+
+impl Default for Downloads {
+    fn default() -> Self {
+        Self {
+            default_dir: "~/Downloads/Vise".into(),
+            max_concurrent: 5,
+            global_speed_limit_kbps: 0,
+        }
+    }
+}
+
+#[derive(Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Proxy {
+    pub url: String,
+}
+
+pub struct LoadedConfig {
+    pub home: PathBuf,
+    pub path: PathBuf,
+    pub values: FileConfig,
+}
+
+/// Resolve the home directory and perform all file I/O on the blocking pool.
+pub async fn load() -> Result<LoadedConfig> {
+    load_from_home(home_directory()?).await
+}
+
+/// Explicit home injection keeps embedding applications and tests isolated.
+pub async fn load_from_home(home: PathBuf) -> Result<LoadedConfig> {
+    anyhow::ensure!(
+        home.is_absolute(),
+        "home directory must be an absolute path"
+    );
+    tokio::task::spawn_blocking(move || storage::load(home))
+        .await
+        .context("configuration loader task failed")?
+}
+
+pub fn expand_home(path: &Path, home: &Path) -> Result<PathBuf> {
+    anyhow::ensure!(
+        !path.as_os_str().is_empty(),
+        "download directory must not be empty"
+    );
+    Ok(match path.strip_prefix("~") {
+        Ok(suffix) => home.join(suffix),
+        Err(_) => path.to_owned(),
+    })
+}
+
+fn home_directory() -> Result<PathBuf> {
+    #[cfg(windows)]
+    let home = std::env::var_os("USERPROFILE")
+        .filter(|v| !v.is_empty())
+        .or_else(|| {
+            let mut drive = std::env::var_os("HOMEDRIVE")?;
+            drive.push(std::env::var_os("HOMEPATH")?);
+            Some(drive)
+        });
+    #[cfg(not(windows))]
+    let home = std::env::var_os("HOME").filter(|v| !v.is_empty());
+    home.map(PathBuf::from)
+        .context("cannot resolve the user's home directory for .vise/config.toml")
+}

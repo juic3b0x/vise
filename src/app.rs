@@ -1,22 +1,27 @@
 //! Controller supervision and ordered shutdown for CLI, WebUI, and daemon sessions.
 use super::Args;
-use std::{error::Error, future::Future};
+use std::{error::Error, future::Future, net::SocketAddr};
 use tokio::task::{JoinError, JoinHandle};
 use tokio_util::sync::CancellationToken;
 use vise::{checksum::ExpectedChecksums, cli, engine::Manager, telemetry, web};
+
+pub(super) enum Controller {
+    Cli,
+    WebUi(SocketAddr),
+    Daemon(web::DaemonConfig),
+}
 
 pub(super) async fn run_session(
     manager: Manager,
     args: &Args,
     interactive: bool,
     expected: ExpectedChecksums,
-    daemon: Option<web::DaemonConfig>,
+    controller: Controller,
 ) -> anyhow::Result<u8> {
     let mut background = Background::start(&manager, args.webui);
     let result = async {
         seed_queue(&manager, args, expected).await?;
-        let controller =
-            run_controller(&manager, args, interactive, background.stop.clone(), daemon);
+        let controller = run_controller(&manager, interactive, background.stop.clone(), controller);
         background.supervise(controller).await
     }
     .await;
@@ -52,23 +57,18 @@ async fn seed_queue(
 
 async fn run_controller(
     manager: &Manager,
-    args: &Args,
     interactive: bool,
     stop: CancellationToken,
-    daemon: Option<web::DaemonConfig>,
+    controller: Controller,
 ) -> anyhow::Result<bool> {
-    if let Some(config) = daemon {
-        web::run_daemon(manager.clone(), config, stop)
+    match controller {
+        Controller::Daemon(config) => web::run_daemon(manager.clone(), config, stop)
             .await
-            .map(|_| true)
-    } else if args.webui {
-        web::run(manager.clone(), args.bind, stop)
+            .map(|_| true),
+        Controller::WebUi(bind) => web::run(manager.clone(), bind, stop).await.map(|_| true),
+        Controller::Cli => cli::run(manager.clone(), interactive, stop)
             .await
-            .map(|_| true)
-    } else {
-        cli::run(manager.clone(), interactive, stop)
-            .await
-            .map_err(anyhow::Error::from)
+            .map_err(anyhow::Error::from),
     }
 }
 

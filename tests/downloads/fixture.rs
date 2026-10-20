@@ -25,6 +25,18 @@ use vise::{
     model::Status,
 };
 
+/// Child binaries must never create or read the developer's real home config.
+pub(super) fn command(root: &std::path::Path) -> std::process::Command {
+    let home = root.join("test-home");
+    std::fs::create_dir_all(&home).unwrap();
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_vise"));
+    command
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .env_remove("VISE_API_TOKEN");
+    command
+}
+
 #[derive(Clone, Copy)]
 pub(super) enum Mode {
     Ranges,

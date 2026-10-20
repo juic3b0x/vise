@@ -1,16 +1,14 @@
-use std::{net::SocketAddr, path::PathBuf, process::ExitCode, time::Duration};
-
-use clap::Parser;
-use vise::{
-    checksum::ExpectedChecksums,
-    cli,
-    engine::{Config, Manager},
-    proxy::ProxyUrl,
-    rate_limiter::RateLimit,
-    web::DaemonConfig,
+use std::{
+    net::{IpAddr, SocketAddr},
+    path::PathBuf,
+    process::ExitCode,
 };
 
+use clap::Parser;
+use vise::{checksum::ExpectedChecksums, cli, engine::Manager, rate_limiter::RateLimit};
+
 mod app;
+mod startup;
 
 #[derive(Parser)]
 #[command(version, about = "Vise — concurrent, resumable downloads", long_about = None)]
@@ -24,15 +22,21 @@ struct Args {
     /// Run the API and dashboard quietly for a service manager (no terminal input)
     #[arg(short = 'd', long)]
     daemon: bool,
-    /// Server listen address; non-loopback daemon binds require VISE_API_TOKEN
-    #[arg(long, default_value = "127.0.0.1:8080", requires = "server")]
-    bind: SocketAddr,
+    /// Override the configured server address (exclusive with --host/--port)
+    #[arg(long, requires = "server", conflicts_with_all = ["host", "port"])]
+    bind: Option<SocketAddr>,
+    /// Override daemon.host from ~/.vise/config.toml
+    #[arg(long, requires = "server")]
+    host: Option<IpAddr>,
+    /// Override daemon.port from ~/.vise/config.toml
+    #[arg(long, requires = "server")]
+    port: Option<u16>,
     /// Directory for downloaded files and the .vise journal
-    #[arg(short, long, default_value = "downloads")]
-    output: PathBuf,
+    #[arg(short, long)]
+    output: Option<PathBuf>,
     /// Number of downloads running at once
-    #[arg(short = 'j', long, default_value_t = 3, value_parser = clap::value_parser!(u16).range(1..=64))]
-    jobs: u16,
+    #[arg(short = 'j', long, value_parser = clap::value_parser!(u16).range(1..=64))]
+    jobs: Option<u16>,
     /// Maximum parallel connections per download
     #[arg(short = 'c', long, default_value_t = 8, value_parser = clap::value_parser!(u16).range(1..=64))]
     connections: u16,
@@ -91,11 +95,6 @@ fn report_error(writer: &mut impl std::io::Write, error: &anyhow::Error) -> std:
 }
 
 async fn run(args: Args) -> anyhow::Result<u8> {
-    let proxy_url = args
-        .proxy
-        .as_deref()
-        .map(str::parse::<ProxyUrl>)
-        .transpose()?;
     let expected = ExpectedChecksums::new(
         args.expected_sha256.as_deref(),
         args.expected_md5.as_deref(),
@@ -117,33 +116,9 @@ async fn run(args: Args) -> anyhow::Result<u8> {
         args.webui || args.daemon || interactive || !args.urls.is_empty() || args.resume_all,
         "provide a URL, use --resume-all, --interactive, --webui, or --daemon"
     );
-    if args.webui {
-        anyhow::ensure!(
-            args.bind.ip().is_loopback(),
-            "--bind must use a loopback address"
-        );
-    }
-    let daemon = if args.daemon {
-        let token = match std::env::var("VISE_API_TOKEN") {
-            Ok(token) => Some(token),
-            Err(std::env::VarError::NotPresent) => None,
-            Err(_) => anyhow::bail!("VISE_API_TOKEN must contain valid Unicode"),
-        };
-        Some(DaemonConfig::new(args.bind, token)?)
-    } else {
-        None
-    };
-    let manager = Manager::open(Config {
-        output_dir: args.output.clone(),
-        concurrent_downloads: args.jobs as usize,
-        connections_per_download: args.connections as usize,
-        retries: args.retries,
-        read_timeout: Duration::from_secs(args.timeout),
-        limit_rate: args.limit_rate,
-        proxy_url,
-    })
-    .await?;
-    app::run_session(manager, &args, interactive, expected, daemon).await
+    let startup = startup::load(&args).await?;
+    let manager = Manager::open(startup.engine).await?;
+    app::run_session(manager, &args, interactive, expected, startup.controller).await
 }
 
 #[cfg(test)]
@@ -164,6 +139,18 @@ mod tests {
         assert!(Args::try_parse_from(["vise", "--daemon"]).is_ok());
         assert!(Args::try_parse_from(["vise", "--webui"]).is_ok());
         assert!(Args::try_parse_from(["vise"]).is_ok());
+        assert!(
+            Args::try_parse_from([
+                "vise",
+                "--daemon",
+                "--bind",
+                "127.0.0.1:8080",
+                "--host",
+                "127.0.0.1"
+            ])
+            .is_err()
+        );
+        assert!(Args::try_parse_from(["vise", "--port", "8080"]).is_err());
     }
 
     #[test]

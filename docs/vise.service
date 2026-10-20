@@ -5,8 +5,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-EnvironmentFile=%h/.config/vise/daemon.env
-ExecStart=%h/.cargo/bin/vise --daemon --bind 0.0.0.0:8080 --output %h/Downloads/vise --resume-all
+EnvironmentFile=-%h/.config/vise/daemon.env
+ExecStart=%h/.cargo/bin/vise --daemon --resume-all
 Restart=on-failure
 RestartSec=5
 KillSignal=SIGTERM

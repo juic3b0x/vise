@@ -26,6 +26,7 @@ same-file = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "fs", "io-util", "io-std", "net", "signal", "sync", "time"] }
 tokio-util = "0.7"
+toml = { version = "0.9", default-features = false, features = ["std", "serde", "parse"] }
 tracing = { version = "0.1", default-features = false, features = ["std"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"

@@ -61,6 +61,33 @@ vise --help
 
 Local source installation and Git-source installation have been verified in isolated installation directories. The Git check used a local repository; installation from the live GitHub repository has not yet been verified.
 
+## Persistent configuration
+
+On the first normal startup, Vise creates `~/.vise/config.toml`. On Unix it resolves `~` from `HOME`; on Windows it uses `USERPROFILE`, falling back to `HOMEDRIVE` plus `HOMEPATH`. `--help` and `--version` exit without creating files. Edit the file and restart Vise to apply preferences.
+
+| Setting | Initial value / meaning |
+| --- | --- |
+| `daemon.host` | `"127.0.0.1"`; numeric IPv4 or IPv6 |
+| `daemon.port` | `8080` |
+| `daemon.VISE_API_TOKEN` | Random 64-character token generated once and preserved |
+| `downloads.default_dir` | `"~/Downloads/Vise"`; `~` expands to the resolved home |
+| `downloads.max_concurrent` | `5`; accepted range 1–64 |
+| `downloads.global_speed_limit_kbps` | `0` for unlimited; positive values are KiB/s (1024 bytes per unit) |
+| `proxy.url` | `""` for no explicit proxy |
+
+Explicit CLI options take precedence, even if their values match a previous default. `--bind` overrides the complete address; alternatively use `--host` and/or `--port` to override individual file fields. These address options require `--daemon` or `--webui`; `--bind` is exclusive with `--host`/`--port`.
+
+```sh
+vise --daemon --host 127.0.0.1 --port 9090
+vise -o ./downloads -j 3 --limit-rate off --proxy "" https://example.com/archive.zip
+```
+
+The environment variable `VISE_API_TOKEN` overrides `daemon.VISE_API_TOKEN`. The original `auth_token` spelling is accepted as an alias; define only one spelling in a file. A missing/empty token disables authentication only on loopback; non-loopback binds still require a valid token. New files contain a generated token, so daemon authentication is enabled by default. The local `--webui` mode retains its existing loopback-only, unauthenticated behavior.
+
+Creation runs on the blocking pool, serializes concurrent startup, and publishes a complete file atomically. Existing files and comments are preserved. Newly created Unix directories use mode `0700` and files use `0600`; on Windows, protect the home directory with its account ACLs. Malformed TOML, unknown keys, or incorrect field types produce an error without echoing credential values. Missing sections/fields use defaults; an omitted token in an existing file is left empty rather than generating a new credential on every restart.
+
+These are startup preferences. Transfer state, chunk offsets, and live settings still belong to SQLite. On CLI startup, the file's bandwidth cap (including `0` for unlimited) or an explicit `--limit-rate` takes precedence over the journal's previous cap. Runtime controls persist in the journal without rewriting `config.toml`; edit the file to choose the cap for future starts.
+
 ## Quick start
 
 ### Download one file
@@ -96,7 +123,7 @@ vise -o ./downloads https://example.com/archive.zip
 vise -o ./downloads -n release.zip https://example.com/archive.zip
 ```
 
-`-o` selects an output directory, which defaults to `downloads`. `-n` sets a filename for exactly one URL.
+`-o` overrides the configured output directory, initially `~/Downloads/Vise`. `-n` sets a filename for exactly one URL.
 
 ### Limit bandwidth
 
@@ -108,7 +135,7 @@ vise --webui --limit-rate 5M
 
 The limit is **global**: every active file and chunk shares the same byte budget. `K`, `M`, `G`, and `T` use powers of 1,024; `KB/s`, `MB/s`, `GB/s`, and `TB/s` use powers of 1,000. Explicit binary units such as `KiB/s` and `MiB/s` also work. Fractions are accepted (`1.5M`); fractional bytes are rounded down. Use `off`, `unlimited`, or `0` to remove the cap.
 
-Limits are saved in the output directory's SQLite journal and restored on the next launch. An explicit `--limit-rate` overrides the saved setting; use `--limit-rate off` to clear it. New journals start unlimited.
+Live limits are saved in the output directory's SQLite journal. The next CLI launch applies `downloads.global_speed_limit_kbps` from the configuration file unless `--limit-rate` explicitly overrides it; use `--limit-rate off` for an unlimited session. New configuration files start unlimited.
 
 The cap applies to streamed response body bytes, including retries. HTTP headers and range probes are excluded. A bounded token bucket permits short bursts, and network/client buffering can briefly receive data ahead of the stream; the limit controls sustained application throughput.
 
@@ -215,14 +242,14 @@ vise --daemon --bind 127.0.0.1:8080 -o ./downloads --resume-all
 
 Daemon mode stays in the foreground for systemd, Docker, or another process supervisor; it does not fork or detach itself. It keeps serving when the queue is empty. SIGTERM or Ctrl+C stops workers and commits recoverable progress. It is exclusive with `--webui`, `--interactive`, and `--batch`. Startup errors and warnings still go to stderr.
 
-For a LAN or wildcard bind, set a secret token first. Tokens must contain 32–256 ASCII letters, digits, `-`, or `_`; generate a random value rather than a memorable password:
+For a LAN or wildcard bind, use the generated `daemon.VISE_API_TOKEN` from your configuration file or override it through the environment. Tokens must contain 32–256 ASCII letters, digits, `-`, or `_`:
 
 ```sh
 export VISE_API_TOKEN="$(openssl rand -hex 32)"
 vise --daemon --bind 0.0.0.0:8080 -o ./downloads --resume-all
 ```
 
-`--bind` accepts numeric IPv4 and IPv6 socket addresses, including `[::]:8080`. The default is `127.0.0.1:8080`. Non-loopback binds fail before opening the journal unless a valid `VISE_API_TOKEN` is present. Setting a token on a loopback daemon enables authentication there too. Protect remote connections with an HTTPS reverse proxy or an authenticated SSH tunnel: the embedded listener itself uses HTTP, so authentication alone does not encrypt credentials or metadata.
+`--bind` accepts numeric IPv4 and IPv6 socket addresses, including `[::]:8080`, and overrides the configured host/port. The initial default is `127.0.0.1:8080`. Non-loopback binds fail before opening the journal unless a valid file or environment token is present. Protect remote connections with an HTTPS reverse proxy or an authenticated SSH tunnel: the embedded listener itself uses HTTP, so authentication alone does not encrypt credentials or metadata.
 
 API clients send `Authorization: Bearer`; all REST endpoints and both WebSocket endpoints use the same token:
 
@@ -234,19 +261,17 @@ curl -H "Authorization: Bearer $VISE_API_TOKEN" -H 'Content-Type: application/js
   http://127.0.0.1:8080/api/downloads
 ```
 
-Open the daemon's address in a browser for the dashboard. In the browser's HTTP authentication prompt, enter **`vise`** as the username and your token as the password. Same-origin browser requests and WebSocket upgrades use those credentials. Native WebSocket clients may supply either Bearer authentication or HTTP Basic authentication. Tokens are supplied through the environment and are not stored in SQLite; use the same protected environment configuration when restarting the service.
+Open the daemon's address in a browser for the dashboard. In the browser's HTTP authentication prompt, enter **`vise`** as the username and your token as the password. Same-origin browser requests and WebSocket upgrades use those credentials. Native WebSocket clients may supply either Bearer authentication or HTTP Basic authentication. Tokens live in the protected TOML file or environment, and are not stored in SQLite.
 
-For a systemd user service, install Vise with Cargo, create a private environment file, then install the provided unit:
+For a systemd user service, install Vise with Cargo, then install the provided unit:
 
 ```sh
-install -d -m 700 ~/.config/vise
-(umask 077; printf 'VISE_API_TOKEN=%s\n' "$(openssl rand -hex 32)" > ~/.config/vise/daemon.env)
 install -D -m 644 docs/vise.service ~/.config/systemd/user/vise.service
 systemctl --user daemon-reload
 systemctl --user enable --now vise.service
 ```
 
-The example binds all IPv4 interfaces on port 8080 and saves downloads to `~/Downloads/vise`. Adjust its bind/output paths to your deployment. User services that must survive logout also need user lingering enabled by the system administrator. See [docs/vise.service](docs/vise.service).
+The example loads `~/.vise/config.toml`, creating it on first startup, and resumes saved transfers. Edit the file's host, port, output path, or token and restart the service to apply changes. An optional `~/.config/vise/daemon.env` file can override `VISE_API_TOKEN`. User services that must survive logout also need user lingering enabled by the system administrator. See [docs/vise.service](docs/vise.service).
 
 ## WebUI
 
@@ -295,21 +320,22 @@ WebUI mode uses the same download engine and worker pool as the CLI, and replace
 | Option | Purpose | Default |
 | --- | --- | --- |
 | `-c, --connections` | Maximum connections per download, 1–64 | `8` |
-| `-j, --jobs` | Simultaneous downloads, 1–64 | `3` |
-| `-o, --output` | Output directory | `downloads` |
+| `-j, --jobs` | Simultaneous downloads, 1–64 | Configured; initially `5` |
+| `-o, --output` | Output directory | Configured; initially `~/Downloads/Vise` |
 | `-n, --name` | Filename for one URL | Derived from URL |
 | `--retries` | Retries per segment, 0–20 | `5` |
 | `--timeout` | Idle read timeout in seconds | `30` |
-| `--limit-rate` | Shared body-byte cap, e.g. `5M`, `500KB/s`, or `off` | Saved setting; otherwise unlimited |
+| `--limit-rate` | Shared body-byte cap, e.g. `5M`, `500KB/s`, or `off` | Configured; initially unlimited |
 | `--expected-sha256` | Expected SHA-256 for one URL, 64 hex digits | Learn from metadata if available |
 | `--expected-md5` | Expected MD5 for one URL, 32 hex digits | Learn from metadata if available |
-| `--proxy` | Default HTTP/HTTPS/SOCKS5/SOCKS5h route for new downloads | No explicit route |
+| `--proxy` | Default HTTP/HTTPS/SOCKS5/SOCKS5h route for new downloads; `""` clears it | Configured; initially no explicit route |
 | `-i, --interactive` | Keep the terminal queue open | Off with URL arguments |
 | `--batch` | Never read terminal input | Off |
 | `--resume-all` | Resume saved paused and failed tasks | Off |
 | `--webui` | Start the embedded dashboard | Off |
 | `-d, --daemon` | Run the API/dashboard quietly for a service manager | Off |
-| `--bind` | Server address; remote binds require daemon mode and a token | `127.0.0.1:8080` |
+| `--bind` | Override the complete server address | Configured; initially `127.0.0.1:8080` |
+| `--host`, `--port` | Override individual server address fields | Configured |
 
 Run `vise --help` for the full command reference. Set `RUST_LOG=vise=info` for diagnostic logs.
 

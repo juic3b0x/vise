@@ -66,7 +66,7 @@ async fn pause_resume_survives_process_restart() {
 async fn abrupt_process_death_restores_durable_offsets_and_finishes_exactly() {
     let fixture = Fixture::start(Mode::SlowRanges).await;
     let dir = tempfile::tempdir().unwrap();
-    let mut process = std::process::Command::new(env!("CARGO_BIN_EXE_vise"))
+    let mut process = super::fixture::command(dir.path())
         .args(["--batch", "--connections", "1", "--output"])
         .arg(dir.path())
         .arg(&fixture.url)

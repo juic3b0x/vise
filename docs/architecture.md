@@ -6,7 +6,13 @@ Vise uses one shared download manager for its CLI, WebUI, and daemon.
 
 Default CLI sessions use Indicatif and optional interactive input. `--webui` runs a loopback-only Axum server with a terminal telemetry bridge. `-d` / `--daemon` runs the same Axum routes and shared manager quietly in the foreground for a service manager, without the stdin thread, progress bars, or terminal telemetry task. All modes use the existing Tokio runtime, SQLite WAL initialization, ordered shutdown, and crash recovery; WAL permits external readers while Vise serializes its own transactional writes. The output-directory lock still prevents competing Vise writer processes.
 
-Daemon mode uses `--bind` for IPv4/IPv6 listeners and requires `VISE_API_TOKEN` for non-loopback binds. Bearer authentication and HTTP Basic authentication (`vise` / token) protect REST, assets, and WebSocket upgrades. Basic authentication lets the embedded dashboard use the browser's normal HTTP authentication cache. Invalid authentication returns HTTP 401. Browser origins must match the request Host; only authenticated daemon requests may use arbitrary valid hostnames, including names preserved by an HTTPS reverse proxy. The local unauthenticated WebUI retains its exact loopback Host check.
+Daemon mode uses configured host/port values or `--bind` / `--host` / `--port` overrides for IPv4/IPv6 listeners. Non-loopback binds require a valid token from configuration or the environment. Bearer authentication and HTTP Basic authentication (`vise` / token) protect REST, assets, and WebSocket upgrades. Basic authentication lets the embedded dashboard use the browser's normal HTTP authentication cache. Invalid authentication returns HTTP 401. Browser origins must match the request Host; only authenticated daemon requests may use arbitrary valid hostnames, including names preserved by an HTTPS reverse proxy. The local unauthenticated WebUI retains its exact loopback Host check.
+
+## User configuration
+
+`src/config.rs` deserializes `~/.vise/config.toml` into typed daemon, downloads, and proxy settings using Serde and TOML. Home resolution uses `HOME` on Unix and `USERPROFILE` (or `HOMEDRIVE` plus `HOMEPATH`) on Windows. Blocking I/O, a cross-process creation lock, staging-file synchronization, and atomic publication run on Tokio's blocking pool. First startup creates missing directories and a complete file with a random persistent token. Existing files are never rewritten. Newly created Unix directories/files use `0700`/`0600`. Malformed or unknown fields fail without echoing source text; missing fields use defaults.
+
+`src/startup.rs` resolves CLI options over file settings before opening the manager. Optional CLI fields distinguish absence from an explicit value equal to an older default. `--bind` overrides the whole socket address; `--host` and `--port` independently override file fields. `VISE_API_TOKEN` overrides `daemon.VISE_API_TOKEN` (`auth_token` is an alias). Output paths beginning with a standalone `~` component expand to the resolved home. `downloads.global_speed_limit_kbps` uses 1024 bytes per unit and checked multiplication; zero means unlimited. The selected startup rate is passed explicitly to the engine, overriding the previous journal cap. Live controls still persist in SQLite and do not rewrite user configuration.
 
 ## HTTP and WebSocket API
 
@@ -69,7 +75,10 @@ Local journal and partial files are trusted application data; do not modify them
 Cargo.toml / Cargo.lock    Dependencies and reproducible resolution
 src/main.rs               Arguments, configuration, mode selection
 src/app.rs                Controller supervision, signals, ordered shutdown
+src/startup.rs            CLI/config precedence and validated startup settings
 src/lib.rs                Public library modules
+src/config.rs             Typed persistent user preferences and home resolution
+src/config/storage.rs     Blocking, private, atomic first-run configuration creation
 src/engine.rs             Shared manager types and configuration
 src/engine/recovery.rs    Journal import and startup recovery
 src/engine/queue.rs       Admission, pause/resume/retry, deletion, shutdown
@@ -139,7 +148,7 @@ The bucket refills using integer byte-nanosecond credit and Tokio's monotonic cl
 
 CLI `--limit-rate`, interactive `limit-rate RATE`, and POST `/api/config` all use the same parser and manager setting. `K/M/G/T` and `KiB/MiB/GiB/TiB` mean powers of 1,024; `KB/MB/GB/TB` mean powers of 1,000. Units are case-insensitive with an optional `/s` suffix. Decimal fractions use checked integer arithmetic and truncate fractional bytes; positive values below 1 B/s, negative values, malformed units, and overflow are rejected. Zero, `off`, and `unlimited` disable throttling.
 
-Settings changes serialize under their own asynchronous gate, commit the exact bytes-per-second value to SQLite's `metadata.limit_rate` key (zero for unlimited), and then update the live bucket. An owned task finishes this operation even if an HTTP caller disconnects. Changing a limit discards old credits and uses a watch notification to wake token waiters immediately; it never cancels or restarts chunk connections. WebUI telemetry receives a `RateLimitChanged` event. Startup inherits this setting unless `Config::limit_rate` or the CLI flag explicitly overrides it. The existing metadata table supports the setting without a schema migration.
+Settings changes serialize under their own asynchronous gate, commit the exact bytes-per-second value to SQLite's `metadata.limit_rate` key (zero for unlimited), and then update the live bucket. An owned task finishes this operation even if an HTTP caller disconnects. Changing a limit discards old credits and uses a watch notification to wake token waiters immediately; it never cancels or restarts chunk connections. WebUI telemetry receives a `RateLimitChanged` event. Library callers inherit this setting when `Config::limit_rate` is `None`; the CLI supplies the file's startup cap or an explicit `--limit-rate` override. The existing metadata table supports the setting without a schema migration.
 
 Low-rate transfers flush accumulated file bytes at least every 250 ms when token slices arrive, in addition to the normal 256 KiB threshold, so progress and journal checkpoints remain useful at slow speeds. At rates below four bytes per second, the interval is bounded by the next whole-byte grant. Reported speeds measure file progress and can differ briefly from the token budget because of buffering, retries, and sampling.
 
