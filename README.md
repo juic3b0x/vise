@@ -14,6 +14,7 @@ Vise is a high-performance HTTP(S) download manager built in Rust. Multi-threade
 - **Clear progress:** Track downloaded bytes, percentage, transfer speed, and ETA in the terminal.
 - **SQLite crash recovery:** Control individual tasks and restore saved chunk offsets from an embedded transactional journal after restarting.
 - **Resilient downloads:** Retry dropped connections and transient HTTP failures with bounded backoff.
+- **Authenticated downloads:** Import Netscape `cookies.txt` files into isolated per-task cookie jars, with saved file paths for resume.
 - **Live bandwidth control:** Share one token-bucket speed limit across all downloads and change it from the interactive CLI or WebUI without reconnecting.
 - **CLI first:** Download from arguments or manage an interactive queue. The web server starts only with `--webui` or `--daemon`.
 - **Quiet daemon:** Run the same engine and API under a service manager, with authenticated remote control and no terminal loop.
@@ -41,6 +42,7 @@ On the first normal startup, Vise creates `~/.vise/config.toml`. On Unix it reso
 | `downloads.max_concurrent` | `5`; accepted range 1–64 |
 | `downloads.global_speed_limit_kbps` | `0` for unlimited; positive values are KiB/s (1024 bytes per unit) |
 | `proxy.url` | `""` for no explicit proxy |
+| `downloads.cookies_file` | Unset; optional Netscape cookie-file path |
 
 Explicit CLI options take precedence, even if their values match a previous default. `--bind` overrides the complete address; alternatively use `--host` and/or `--port` to override individual file fields. These address options require `--daemon` or `--webui`; `--bind` is exclusive with `--host`/`--port`.
 
@@ -131,6 +133,19 @@ curl -H 'Content-Type: application/json' \
 Omitting `proxy_url` or passing null inherits the CLI default. Each transfer saves its effective route in SQLite and reuses it for probes, chunks, retries, and resume. A later `--proxy` value does not replace routes for saved tasks. Failed explicit proxies never fall back to direct connections. With no explicit route, Reqwest's existing environment-proxy behavior is preserved; an explicit route overrides environment proxy and `NO_PROXY` settings. See the [Reqwest proxy guide](https://docs.rs/reqwest/0.12.28/reqwest/#proxies).
 
 Authentication can be included as `scheme://username:password@host:port`; percent-encode reserved characters in credentials. API/telemetry responses expose a credential-free `proxy_url` and `proxy_authenticated` flag. The complete route, including credentials, is stored in the local journal so authenticated downloads can resume. Protect the output directory and journal as local credential-bearing data.
+
+### Cookie-authenticated downloads
+
+```sh
+vise --cookies ./cookies.txt https://example.com/private/archive.zip
+vise --daemon --cookies ./cookies.txt --resume-all
+```
+
+`--cookies FILE` imports a Netscape-format cookie file for new tasks, including additions through the interactive queue, WebUI, and daemon API. Alternatively, set `cookies_file = "~/cookies.txt"` under `[downloads]` in `~/.vise/config.toml`; the CLI flag overrides it. Domain/host-only scope, paths, secure flags, expiration, and `#HttpOnly_` records are preserved. Empty lines and comments are ignored; expired cookies are skipped. Invalid records report the file and line number without echoing their contents.
+
+Each task has its own Reqwest cookie jar, shared by that task's probe, chunks, retries, and redirects. Response cookies update that jar during the run. SQLite stores the absolute cookie-file path, **not cookie values**. Resume reloads the saved file, so keep it available and replace its contents when the login session needs refreshing. A new process default does not replace a saved task's file. Missing or malformed saved files fail only their task, without sending an unauthenticated request or discarding saved progress. Cookies learned from responses are kept in memory and are not written back to the file; after a restart the file remains the source of authentication.
+
+Cookie files are plaintext credentials: keep them private and outside source control. Cookie paths and values are omitted from public download snapshots. The browser extension still forwards only the selected URL; it does not export browser cookies.
 
 ## Checksum verification
 
@@ -288,6 +303,7 @@ WebUI mode uses the same download engine and worker pool as the CLI, and replace
 | `--expected-sha256` | Expected SHA-256 for one URL, 64 hex digits | Learn from metadata if available |
 | `--expected-md5` | Expected MD5 for one URL, 32 hex digits | Learn from metadata if available |
 | `--proxy` | Default HTTP/HTTPS/SOCKS5/SOCKS5h route for new downloads; `""` clears it | Configured; initially no explicit route |
+| `--cookies FILE` | Netscape cookie file for new tasks; its path is journaled for resume | Configured; initially none |
 | `-i, --interactive` | Keep the terminal queue open | Off with URL arguments |
 | `--batch` | Never read terminal input | Off |
 | `--resume-all` | Resume saved paused and failed tasks | Off |

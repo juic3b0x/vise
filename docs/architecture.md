@@ -92,7 +92,9 @@ src/engine/layout.rs      Chunk layout, filenames, persisted-record validation
 src/database.rs           SQLite schema, migration, transactions, async DB boundary
 src/database/setup.rs     Blocking journal validation, initialization, migrations
 src/checksum.rs           Expected digests, representation headers, cancellable file hashing
-src/proxy.rs              Validated proxy URLs, credential redaction, common client builder
+src/proxy.rs              Validated proxy URLs, credential redaction, required routes
+src/net/mod.rs            Common per-task HTTP client and cookie-provider setup
+src/net/cookies.rs        Bounded Netscape import, scope/expiry checks, async I/O boundary
 src/rate_limiter.rs       Rate parsing, shared token bucket, response-stream adapter
 src/model.rs              Internal records and public snapshots
 src/events.rs             Timestamped lifecycle and server events
@@ -128,7 +130,7 @@ The database module uses bundled SQLite through `rusqlite`. An `Arc<Mutex<Connec
 
 | Table | Stored fields |
 | --- | --- |
-| `downloads` | UUID `id`, `url`, `output_path`, nullable `proxy_url`, nullable `total_size`, `status`, `created_at`, `updated_at`, `ranged`, `validator`, nullable `error`, expected/actual SHA-256 and MD5, nullable `verified_at` |
+| `downloads` | UUID `id`, `url`, `output_path`, nullable `proxy_url`, nullable `cookies_file`, nullable `total_size`, `status`, `created_at`, `updated_at`, `ranged`, `validator`, nullable `error`, expected/actual SHA-256 and MD5, nullable `verified_at` |
 | `chunks` | `download_id`, zero-based `chunk_index`, `start_byte`, nullable `end_byte`, `downloaded_bytes`, `status` |
 | `metadata` | One-time legacy-import completion marker and global `limit_rate` setting |
 
@@ -172,7 +174,7 @@ Every public snapshot adds nullable `expected_sha256`, `expected_md5`, `actual_s
 
 After chunk workers join, Vise flushes and synchronizes the staging file, checkpoints its offsets under `verifying`, and hashes only the requested algorithms in one sequential pass. RustCrypto `sha2` and `md-5` share the Digest interface. The blocking pool performs reads and hashing with a 1 MiB buffer, checking cancellation between reads. Transfer controls join the worker before resetting or deleting staging data. The manager commits matching results before atomically linking the staging file to its final filename; checksum failure never creates that link. Verification and corruption events flow through the existing terminal telemetry channel, and CLI batch mode returns a nonzero status for corrupt downloads.
 
-SQLite schema version 2 introduced the extended download-status constraint and checksum columns; the current version is 3, which also stores `proxy_url`. Version 1 journals migrate transactionally by rebuilding the parent table while preserving chunk rows, timestamps, and metadata; foreign-key validation runs before commit and enforcement is restored after migration. Version 2 journals add the proxy column in one transaction. Failed migrations roll back. Existing journals without checksum expectations retain their previous transfer behavior.
+SQLite schema version 2 introduced the extended download-status constraint and checksum columns. Version 3 added `proxy_url`; the current version is 4, which adds nullable `cookies_file`. Version 1 journals migrate transactionally by rebuilding the parent table while preserving chunk rows, timestamps, and metadata; foreign-key validation runs before commit and enforcement is restored after migration. Versions 2 and 3 add their missing metadata columns in one transaction. Failed migrations roll back. Existing journals without checksum expectations or cookie files retain their previous transfer behavior.
 
 On mismatch, actual digests and the expected-versus-actual error are committed with `status='corrupt'`. The staging file stays available for inspection. Resume returns HTTP 409 for corrupt tasks, and `--resume-all` excludes them. Explicit retry invalidates all durable offsets before truncating the file and retains the expected digests. SHA-256/MD5 whole-file checksums cannot locate a damaged segment, so automatic partial-chunk guessing is avoided. Retrying with an incorrect pinned expectation will fail again; create a new task with a corrected expectation when necessary.
 
@@ -193,3 +195,11 @@ An explicit route uses `ClientBuilder::no_proxy()` followed by `Proxy::all()`, s
 SQLite version 3 adds nullable `downloads.proxy_url`, persisted atomically alongside transfer state and chunks. Null means no explicitly selected route. The complete normalized URL is local credential-bearing metadata and survives restart; it is never copied into the public snapshot unchanged. Snapshot `proxy_url` contains only scheme/host/port, and `proxy_authenticated` indicates whether authentication was configured. Display and Debug implementations also remove user information. JSON serialization of the internal route deliberately preserves it for journal/import recovery; do not expose internal records as API payloads. Credentials are not encrypted in SQLite, so the journal's local access controls matter.
 
 The test suite uses local authenticated HTTP and SOCKS proxies, remote-DNS fixtures with an otherwise unresolvable origin, and TLS fixtures for CONNECT and encrypted HTTPS proxy hops. The self-signed test certificate is trusted only in explicitly configured test clients; untrusted-certificate requests are checked to fail. `tokio-rustls` is a development dependency already present transitively, and enabling Reqwest's `socks` feature adds no new production dependency crate.
+
+## Cookie sessions
+
+`src/net/cookies.rs` imports seven-field, tab-separated Netscape records into `reqwest::cookie::Jar`. It supports `#HttpOnly_`, host-only and subdomain scope, paths, secure flags, Unix expiration, and session cookies. Strict field/header validation prevents attribute injection, and import rejection is surfaced instead of silently dropping authentication. File reads and parsing run on the blocking pool, limited to 16 MiB per file and 64 KiB per record. Diagnostics contain paths and line numbers, never cookie contents.
+
+`--cookies FILE` overrides optional `downloads.cookies_file` in the TOML configuration. `Manager::open` validates and canonicalizes this default before creating the journal. Queue admission imports a separate jar and saves the effective absolute UTF-8 path in the task record. REST/interactive additions inherit the process default, while library callers can supply `TransferOptions.cookies_file`. Cookie paths and values are not part of public download snapshots.
+
+At the start of each run, the engine reloads the task's saved file and rebuilds its client with the saved proxy route. All requests in that run share the jar, including server cookie updates. Recovered tasks retain their saved authentication source independently of new CLI defaults. Missing or malformed saved files fail only their task before HTTP requests, preserving offsets. No cookie values or response cookie changes are written to SQLite or back to the source file; refresh that file when authentication expires. The engine client lock is held only to swap or clone the client, never across HTTP I/O.

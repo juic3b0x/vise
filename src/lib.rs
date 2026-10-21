@@ -6,6 +6,7 @@ pub mod engine;
 pub mod error;
 pub mod events;
 pub mod model;
+pub mod net;
 pub mod proxy;
 pub mod rate_limiter;
 pub mod telemetry;

@@ -139,6 +139,15 @@ pub(super) fn validate_record(record: &Record) -> Result<()> {
     validate_url(&record.url)?;
     validate_filename(&record.filename)?;
     record.checksums.validate()?;
+    if record
+        .cookies_file
+        .as_ref()
+        .is_some_and(|path| !path.is_absolute() || path.to_str().is_none())
+    {
+        return Err(Error::Invalid(
+            "journal cookie file path must be absolute UTF-8".into(),
+        ));
+    }
     if record.created_at < 0 {
         return Err(Error::Invalid(
             "negative creation timestamp in journal".into(),

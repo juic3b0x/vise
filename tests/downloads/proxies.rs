@@ -38,6 +38,7 @@ async fn http_and_socks_proxy_routes_carry_probes_parallel_chunks_and_authentica
                 TransferOptions {
                     proxy_url: Some(proxy_url.parse().unwrap()),
                     expected: expected_hashes(&fixture.state.data),
+                    ..TransferOptions::default()
                 },
             )
             .await

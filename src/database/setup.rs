@@ -63,7 +63,7 @@ fn migrate(connection: &mut Connection, version: i32) -> Result<()> {
     match version {
         0 => initialize(connection),
         1 => migrate_v1(connection),
-        2 => migrate_v2(connection),
+        2 | 3 => migrate_metadata(connection, version),
         _ => Ok(()),
     }
 }
@@ -104,9 +104,12 @@ fn migrate_v1(connection: &mut Connection) -> Result<()> {
     Ok(())
 }
 
-fn migrate_v2(connection: &mut Connection) -> Result<()> {
+fn migrate_metadata(connection: &mut Connection, version: i32) -> Result<()> {
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    transaction.execute_batch("ALTER TABLE downloads ADD COLUMN proxy_url TEXT")?;
+    if version == 2 {
+        transaction.execute_batch("ALTER TABLE downloads ADD COLUMN proxy_url TEXT")?;
+    }
+    transaction.execute_batch("ALTER TABLE downloads ADD COLUMN cookies_file TEXT")?;
     transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     transaction.commit()?;
     Ok(())
