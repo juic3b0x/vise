@@ -9,6 +9,7 @@ use crate::{
     error::{Error, Result},
     events::EventKind,
     model::{Chunk, ChunkStatus, Record, Status, timestamp_millis},
+    net,
 };
 use bytes::BytesMut;
 use futures_util::StreamExt;
@@ -36,12 +37,27 @@ impl Manager {
             permit = self.0.pool.acquire() => permit.map_err(|error| Error::Worker(error.to_string()))?,
         };
         self.transition(&job, Status::Probing).await?;
+        self.refresh_cookies(&job).await?;
         let url = job.record.read().await.url.clone();
-        let metadata = self.probe(&job.client, &url, &cancel).await?;
+        let client = job.client.read().await.clone();
+        let metadata = self.probe(&client, &url, &cancel).await?;
         let (file, path) = self.prepare_partial(&job, metadata).await?;
         self.transition(&job, Status::Downloading).await?;
         self.run_chunks(&job, &cancel).await?;
         self.publish_file(&job, file, path, &cancel).await
+    }
+
+    async fn refresh_cookies(&self, job: &Job) -> Result<()> {
+        let (path, proxy) = {
+            let record = job.record.read().await;
+            (record.cookies_file.clone(), record.proxy_url.clone())
+        };
+        if let Some(path) = path {
+            let (client, _) =
+                net::client(self.0.config.read_timeout, proxy.as_ref(), Some(&path)).await?;
+            *job.client.write().await = client;
+        }
+        Ok(())
     }
 
     async fn prepare_partial(&self, job: &Job, metadata: Metadata) -> Result<(fs::File, PathBuf)> {
@@ -240,9 +256,10 @@ impl Manager {
             0
         };
         let range = requested_range(ranged, offset, chunk.end)?;
+        let client = job.client.read().await.clone();
         let response = self
             .request(
-                &job.client,
+                &client,
                 &url,
                 range.as_deref(),
                 if ranged { validator.as_deref() } else { None },
@@ -514,6 +531,7 @@ mod tests {
                 url: "http://127.0.0.1:1/unused".into(),
                 filename: "payload.bin".into(),
                 proxy_url: None,
+                cookies_file: None,
                 status: Status::Downloading,
                 total_bytes: Some(3),
                 ranged: true,

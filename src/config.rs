@@ -27,6 +27,7 @@ VISE_API_TOKEN = "{token}"
 default_dir = "~/Downloads/Vise"
 max_concurrent = 5
 global_speed_limit_kbps = 0 # 0 for unlimited
+# cookies_file = "~/cookies.txt" # optional Netscape cookie file
 
 [proxy]
 url = "" # optional default proxy
@@ -69,6 +70,7 @@ pub struct Downloads {
     pub max_concurrent: u16,
     /// KiB per second: one unit is 1024 bytes; zero disables throttling.
     pub global_speed_limit_kbps: u64,
+    pub cookies_file: Option<PathBuf>,
 }
 
 impl Default for Downloads {
@@ -77,6 +79,7 @@ impl Default for Downloads {
             default_dir: "~/Downloads/Vise".into(),
             max_concurrent: 5,
             global_speed_limit_kbps: 0,
+            cookies_file: None,
         }
     }
 }

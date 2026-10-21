@@ -50,6 +50,10 @@ The SQLite journal is **not encrypted**. It stores full authenticated proxy URLs
 
 Vise assumes its journal and staging directory are trusted local state. Do not import another person's journal into a privileged or sensitive environment. Vise is not a sandbox or malware scanner; downloaded files remain untrusted content.
 
+Netscape cookie files contain plaintext session credentials. Keep them private, use HTTPS for authenticated destinations, and never attach real cookie files to bug reports. Imports validate fields and report file/line information without including cookie contents. Each transfer uses a separate jar; normal domain, path, and secure-cookie matching applies to every request and redirect. Broadly scoped cookies in an imported file remain broadly scoped, so import only trusted exports. Avoid enabling verbose third-party HTTP/cookie logging when handling real credentials; use `RUST_LOG=vise=info` for application diagnostics.
+
+SQLite stores only the canonical cookie-file path, never imported cookie values. Paths are internal metadata and are omitted from API/telemetry snapshots. Keep the saved file available for resume; cookies learned from responses are in-memory only and are not exported or persisted. Replacing the file refreshes the session on the next resume. Missing or malformed saved files fail that task before network I/O without removing its durable offsets. CLI/config cookie defaults apply to new tasks only, including tasks added by authorized API clients; those clients can use the configured authenticated session for downloads within its cookie scope.
+
 ## Integrity and final publication
 
 When expected checksums are available, Vise verifies the complete staging file before publishing the final destination. All supplied algorithms must match. A mismatch is recorded as `corrupt`, expected and actual hashes are retained, and the staging file remains available for inspection or explicit re-download. Final publication must not overwrite an existing output file.

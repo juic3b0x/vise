@@ -261,6 +261,7 @@ async fn add(
             .map(str::parse)
             .transpose()
             .inspect_err(|error| rejected_action(&state.manager, "add", error))?,
+        cookies_file: None,
     };
     Ok((
         StatusCode::CREATED,

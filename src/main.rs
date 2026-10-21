@@ -70,6 +70,9 @@ struct Args {
     /// Default proxy for new downloads: http(s)://host:port or socks5(h)://host:port
     #[arg(long)]
     proxy: Option<String>,
+    /// Netscape cookies.txt file for new downloads; saved tasks retain their file
+    #[arg(long, value_name = "FILE")]
+    cookies: Option<PathBuf>,
 }
 
 #[tokio::main]

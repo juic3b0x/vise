@@ -2,6 +2,19 @@
 
 All notable changes to Vise are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.3.0] - 2026-10-20
+
+### Added
+
+- **Cookie-authenticated transfers:** `--cookies FILE` and optional `downloads.cookies_file` configuration import Netscape cookie files into isolated Reqwest jars. Preserve host-only/domain scope, paths, secure flags, session/expiring cookies, and `#HttpOnly_` records. Probes, parallel chunks, redirects, and retries share the task's jar, including cookies set by responses.
+- **Authenticated resume:** SQLite schema 4 journals each task's absolute cookie-file path with its chunk offsets. Resume reloads that file without copying cookie values into SQLite or public snapshots. Missing or malformed saved files fail the affected task before network requests while allowing other tasks to recover.
+- Parser, CLI/configuration precedence, authenticated range/retry, cookie isolation, session refresh, and migration regression tests. File parsing runs on the blocking pool with bounded input size and diagnostics that omit cookie contents.
+
+### Changed
+
+- Moved common HTTP client construction into `src/net/`, preserving proxy routing and TLS verification. Existing schema 1–3 journals migrate transactionally without losing transfer state.
+- Enabled Reqwest's optional `cookies` feature; added no direct parser dependency.
+
 ## [0.2.0] - 2026-10-20
 
 ### Added
@@ -66,6 +79,7 @@ Initial release.
 - **Local WebUI safeguards:** Loopback-only binding, host and browser-origin validation, JSON-only mutations, and a Content Security Policy constrain browser access.
 - **Safe publication:** Existing output files are never overwritten, and configured checksum verification must succeed before final publication. SHA-256 from a trusted source is preferred for security-sensitive verification; MD5 supports legacy compatibility and accidental-corruption detection.
 
+[0.3.0]: https://github.com/juic3b0x/vise/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/juic3b0x/vise/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/juic3b0x/vise/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/juic3b0x/vise/releases/tag/v0.1.0

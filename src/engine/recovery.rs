@@ -8,7 +8,7 @@ use crate::{
     database::{Database, FILE_NAME},
     error::{Error, Result},
     model::{LegacyJournal, Record, Status, timestamp_millis},
-    proxy,
+    net,
     rate_limiter::{RateLimit, RateLimiter},
 };
 use fs2::FileExt;
@@ -27,6 +27,9 @@ use tokio_util::sync::CancellationToken;
 impl Manager {
     pub async fn open(mut config: Config) -> Result<Self> {
         validate_config(&config)?;
+        if let Some(path) = config.cookies_file.take() {
+            config.cookies_file = Some(net::cookies::load(path).await?.path);
+        }
         let (state_dir, lock) = prepare_directory(&mut config).await?;
         let database = Database::open(state_dir.join(FILE_NAME)).await?;
         let rate = restore_rate(&database, config.limit_rate).await?;
@@ -259,7 +262,9 @@ async fn restore_jobs(database: &Database, state_dir: &Path, config: &Config) ->
             &mut recovered.corrupt_targets,
         )
         .await?;
-        let client = proxy::client(config.read_timeout, record.proxy_url.as_ref())?;
+        // Load saved cookie files when the task runs. A removed/expired session
+        // must not prevent unrelated tasks or the controller from recovering.
+        let (client, _) = net::client(config.read_timeout, record.proxy_url.as_ref(), None).await?;
         recovered
             .jobs
             .insert(record.id, Arc::new(Job::new(record, client)));

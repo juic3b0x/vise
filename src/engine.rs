@@ -41,6 +41,8 @@ pub struct Config {
     pub limit_rate: Option<RateLimit>,
     /// Default for newly created tasks; recovered tasks retain their own route.
     pub proxy_url: Option<ProxyUrl>,
+    /// Default Netscape file for new tasks; saved tasks retain their own file.
+    pub cookies_file: Option<PathBuf>,
 }
 
 impl Default for Config {
@@ -53,6 +55,7 @@ impl Default for Config {
             read_timeout: Duration::from_secs(30),
             limit_rate: None,
             proxy_url: None,
+            cookies_file: None,
         }
     }
 }
@@ -63,7 +66,7 @@ struct Run {
 }
 struct Job {
     record: RwLock<Record>,
-    client: Client,
+    client: RwLock<Client>,
     control: Mutex<()>,
     run: Mutex<Option<Run>>,
     removed: AtomicBool,
@@ -72,7 +75,7 @@ impl Job {
     fn new(record: Record, client: Client) -> Self {
         Self {
             record: RwLock::new(record),
-            client,
+            client: RwLock::new(client),
             control: Mutex::new(()),
             run: Mutex::new(None),
             removed: AtomicBool::new(false),
@@ -110,4 +113,5 @@ struct Metadata {
 pub struct TransferOptions {
     pub expected: ExpectedChecksums,
     pub proxy_url: Option<ProxyUrl>,
+    pub cookies_file: Option<PathBuf>,
 }

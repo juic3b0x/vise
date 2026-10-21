@@ -17,7 +17,7 @@ use crate::{
 mod setup;
 
 const APPLICATION_ID: i32 = 0x5649_5345; // VISE
-const SCHEMA_VERSION: i32 = 3;
+const SCHEMA_VERSION: i32 = 4;
 pub const FILE_NAME: &str = "state.sqlite3";
 
 const DOWNLOADS_SCHEMA: &str = r#"
@@ -37,7 +37,8 @@ CREATE TABLE downloads (
     actual_sha256 TEXT CHECK (actual_sha256 IS NULL OR length(actual_sha256)=64),
     actual_md5 TEXT CHECK (actual_md5 IS NULL OR length(actual_md5)=32),
     verified_at INTEGER CHECK (verified_at IS NULL OR verified_at>=0),
-    proxy_url TEXT
+    proxy_url TEXT,
+    cookies_file TEXT
 ) STRICT;
 "#;
 const SCHEMA: &str = r#"
@@ -276,14 +277,14 @@ fn write_rows<'a>(
     records: impl Iterator<Item = &'a Record>,
 ) -> Result<()> {
     let mut download = transaction.prepare_cached(r#"
-        INSERT INTO downloads(id,url,output_path,total_size,status,created_at,updated_at,ranged,validator,error,expected_sha256,expected_md5,actual_sha256,actual_md5,verified_at,proxy_url)
-        VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)
+        INSERT INTO downloads(id,url,output_path,total_size,status,created_at,updated_at,ranged,validator,error,expected_sha256,expected_md5,actual_sha256,actual_md5,verified_at,proxy_url,cookies_file)
+        VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)
         ON CONFLICT(id) DO UPDATE SET url=excluded.url, output_path=excluded.output_path,
             total_size=excluded.total_size, status=excluded.status, updated_at=excluded.updated_at,
             ranged=excluded.ranged, validator=excluded.validator, error=excluded.error,
             expected_sha256=excluded.expected_sha256, expected_md5=excluded.expected_md5,
             actual_sha256=excluded.actual_sha256, actual_md5=excluded.actual_md5, verified_at=excluded.verified_at,
-            proxy_url=excluded.proxy_url
+            proxy_url=excluded.proxy_url, cookies_file=excluded.cookies_file
     "#)?;
     let mut chunk = transaction.prepare_cached(r#"
         INSERT INTO chunks(download_id,chunk_index,start_byte,end_byte,downloaded_bytes,status)
@@ -312,7 +313,14 @@ fn write_rows<'a>(
             record
                 .proxy_url
                 .as_ref()
-                .map(crate::proxy::ProxyUrl::as_str)
+                .map(crate::proxy::ProxyUrl::as_str),
+            record
+                .cookies_file
+                .as_ref()
+                .map(|path| path
+                    .to_str()
+                    .ok_or_else(|| Error::Invalid("cookie file path must be UTF-8".into())))
+                .transpose()?
         ])?;
         transaction.execute(
             "DELETE FROM chunks WHERE download_id=?1 AND chunk_index>=?2",
@@ -341,7 +349,7 @@ fn read_records(connection: &mut Connection) -> Result<Vec<Record>> {
 }
 
 fn read_downloads(transaction: &Transaction<'_>) -> Result<BTreeMap<Uuid, Record>> {
-    let mut statement = transaction.prepare("SELECT id,url,output_path,total_size,status,created_at,ranged,validator,error,expected_sha256,expected_md5,actual_sha256,actual_md5,verified_at,proxy_url FROM downloads ORDER BY id")?;
+    let mut statement = transaction.prepare("SELECT id,url,output_path,total_size,status,created_at,ranged,validator,error,expected_sha256,expected_md5,actual_sha256,actual_md5,verified_at,proxy_url,cookies_file FROM downloads ORDER BY id")?;
     let mut rows = statement.query([])?;
     let mut records = BTreeMap::new();
     while let Some(row) = rows.next()? {
@@ -364,6 +372,7 @@ fn decode_download(row: &Row<'_>) -> Result<Record> {
         id,
         url: row.get(1)?,
         filename: row.get(2)?,
+        cookies_file: row.get::<_, Option<String>>(15)?.map(PathBuf::from),
         proxy_url: row
             .get::<_, Option<String>>(14)?
             .map(|value| value.parse())
@@ -499,6 +508,7 @@ mod tests {
             url: "https://example.com/file.bin".into(),
             filename: "file.bin".into(),
             proxy_url: None,
+            cookies_file: None,
             status: Status::Paused,
             total_bytes: Some(1024),
             ranged: true,
@@ -676,6 +686,55 @@ mod tests {
                         .connection
                         .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?,
                     i64::from(SCHEMA_VERSION)
+                );
+                assert!(
+                    !state
+                        .connection
+                        .prepare("PRAGMA foreign_key_check")?
+                        .exists([])?
+                );
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn migrates_v3_and_round_trips_cookie_paths_without_changing_offsets() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        let connection = Connection::open(&path).unwrap();
+        connection.execute_batch(DOWNLOADS_SCHEMA).unwrap();
+        connection
+            .execute_batch("ALTER TABLE downloads DROP COLUMN cookies_file")
+            .unwrap();
+        connection.execute_batch(SCHEMA).unwrap();
+        connection
+            .pragma_update(None, "application_id", APPLICATION_ID)
+            .unwrap();
+        connection.pragma_update(None, "user_version", 3).unwrap();
+        let mut original = record();
+        connection.execute("INSERT INTO downloads(id,url,output_path,total_size,status,created_at,updated_at,ranged,validator) VALUES(?1,?2,?3,1024,'paused',1234,1234,1,'\"v1\"')", params![original.id.to_string(), original.url, original.filename]).unwrap();
+        connection
+            .execute(
+                "INSERT INTO chunks VALUES(?1,0,0,1024,256,'paused')",
+                [original.id.to_string()],
+            )
+            .unwrap();
+        drop(connection);
+        let database = Database::open(&path).await.unwrap();
+        assert_eq!(database.load().await.unwrap(), vec![original.clone()]);
+        original.cookies_file = Some(dir.path().join("cookies.txt"));
+        database.persist(vec![original.clone()]).await.unwrap();
+        let reopened = Database::open(&path).await.unwrap();
+        assert_eq!(reopened.load().await.unwrap(), vec![original]);
+        reopened
+            .call(|state| {
+                assert_eq!(
+                    state
+                        .connection
+                        .pragma_query_value(None, "user_version", |row| row.get::<_, i32>(0))?,
+                    SCHEMA_VERSION
                 );
                 assert!(
                     !state

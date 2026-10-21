@@ -117,6 +117,9 @@ pub(crate) struct Record {
     pub filename: String,
     #[serde(default)]
     pub proxy_url: Option<crate::proxy::ProxyUrl>,
+    /// Local source path only; cookie values never enter journal snapshots.
+    #[serde(default)]
+    pub cookies_file: Option<std::path::PathBuf>,
     pub status: Status,
     pub total_bytes: Option<u64>,
     pub ranged: bool,

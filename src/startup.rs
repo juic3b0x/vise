@@ -70,6 +70,12 @@ fn resolve(
         read_timeout: Duration::from_secs(args.timeout),
         limit_rate: Some(limit_rate),
         proxy_url,
+        cookies_file: args
+            .cookies
+            .as_deref()
+            .or(file.downloads.cookies_file.as_deref())
+            .map(|path| config::expand_home(path, &loaded.home))
+            .transpose()?,
     };
     let controller = controller(args, loaded, bind, environment_token)?;
     Ok(Startup { engine, controller })
@@ -182,6 +188,25 @@ mod tests {
             Args::try_parse_from(["vise", "--webui", "--host", "::1", "--port", "8282"]).unwrap();
         assert!(
             matches!(resolve(&args, &loaded(home.path()), None).unwrap().controller, Controller::WebUi(bind) if bind.to_string()=="[::1]:8282")
+        );
+    }
+
+    #[test]
+    fn cookies_flag_overrides_file_settings_and_expands_the_home_component() {
+        let home = tempfile::tempdir().unwrap();
+        let mut file = loaded(home.path());
+        file.values.downloads.cookies_file = Some("~/saved-cookies.txt".into());
+        let args = Args::try_parse_from(["vise"]).unwrap();
+        let settings = resolve(&args, &file, None).unwrap();
+        assert_eq!(
+            settings.engine.cookies_file,
+            Some(home.path().join("saved-cookies.txt"))
+        );
+        let args = Args::try_parse_from(["vise", "--cookies", "~/override.txt"]).unwrap();
+        let settings = resolve(&args, &file, None).unwrap();
+        assert_eq!(
+            settings.engine.cookies_file,
+            Some(home.path().join("override.txt"))
         );
     }
 

@@ -1,7 +1,7 @@
 //! Validated per-transfer proxy routes and a common HTTP client configuration.
-use std::{fmt, str::FromStr, time::Duration};
+use std::{fmt, str::FromStr};
 
-use reqwest::{Client, ClientBuilder, Proxy};
+use reqwest::{ClientBuilder, Proxy};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 use url::Url;
 
@@ -83,20 +83,6 @@ impl<'de> Deserialize<'de> for ProxyUrl {
             .parse()
             .map_err(D::Error::custom)
     }
-}
-
-pub(crate) fn client(read_timeout: Duration, route: Option<&ProxyUrl>) -> Result<Client> {
-    let builder = Client::builder()
-        .user_agent(concat!("Vise/", env!("CARGO_PKG_VERSION")))
-        .connect_timeout(Duration::from_secs(15))
-        .read_timeout(read_timeout)
-        .redirect(reqwest::redirect::Policy::limited(10))
-        .pool_max_idle_per_host(64);
-    let builder = match route {
-        Some(route) => route.apply(builder)?,
-        None => builder,
-    };
-    Ok(builder.build()?)
 }
 
 #[cfg(test)]

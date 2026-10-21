@@ -9,7 +9,7 @@ use crate::{
     error::{Error, Result},
     events::EventKind,
     model::{Download, Record, Status, timestamp_millis},
-    proxy,
+    net,
 };
 use std::sync::{Arc, atomic::Ordering};
 use tokio::fs;
@@ -51,7 +51,15 @@ impl Manager {
         let proxy_url = options
             .proxy_url
             .or_else(|| self.0.config.proxy_url.clone());
-        let client = proxy::client(self.0.config.read_timeout, proxy_url.as_ref())?;
+        let cookies_file = options
+            .cookies_file
+            .or_else(|| self.0.config.cookies_file.clone());
+        let (client, cookies_file) = net::client(
+            self.0.config.read_timeout,
+            proxy_url.as_ref(),
+            cookies_file.as_deref(),
+        )
+        .await?;
         let _admission = self.0.admission.lock().await;
         if self.0.stopping.load(Ordering::Acquire) {
             return Err(Error::Conflict("manager is shutting down".into()));
@@ -89,6 +97,7 @@ impl Manager {
                     url: url.into(),
                     filename: name,
                     proxy_url,
+                    cookies_file,
                     status: Status::Paused,
                     total_bytes: None,
                     ranged: false,

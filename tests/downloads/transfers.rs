@@ -194,6 +194,7 @@ async fn stalled_reads_exhaust_a_bounded_retry_budget() {
         read_timeout: Duration::from_millis(100),
         limit_rate: None,
         proxy_url: None,
+        cookies_file: None,
     })
     .await
     .unwrap();
