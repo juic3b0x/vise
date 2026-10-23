@@ -206,7 +206,7 @@ async fn interrupted_publication_rechecks_hashes_before_recovering_or_retracting
         let target = dir.path().join(&item.filename);
         tokio::fs::hard_link(&target, &part).await.unwrap();
         let connection =
-            rusqlite::Connection::open(dir.path().join(".vise/state.sqlite3")).unwrap();
+            rusqlite::Connection::open(dir.path().join("test-home/.vise/state.sqlite3")).unwrap();
         connection
             .execute(
                 "UPDATE downloads SET status='verifying' WHERE id=?1",

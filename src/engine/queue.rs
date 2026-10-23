@@ -73,13 +73,15 @@ impl Manager {
         };
         let mut jobs = self.0.jobs.write().await;
         let used: Vec<_> = jobs.values().cloned().collect();
-        let mut names = Vec::new();
+        let mut paths = Vec::new();
         for job in used {
-            names.push(job.record.read().await.filename.clone());
+            paths.push(job.output_path.clone());
         }
         let mut name = base.clone();
         let mut suffix = 1;
-        while self.0.config.output_dir.join(&name).exists() || names.contains(&name) {
+        while self.0.config.output_dir.join(&name).exists()
+            || paths.contains(&self.0.config.output_dir.join(&name))
+        {
             if filename.is_some() {
                 return Err(Error::Conflict(format!(
                     "output filename already in use: {name}"
@@ -95,7 +97,14 @@ impl Manager {
                 Record {
                     id,
                     url: url.into(),
+                    output_path: self.0.config.output_dir.join(&name),
                     filename: name,
+                    part_path: self
+                        .0
+                        .config
+                        .output_dir
+                        .join(".vise")
+                        .join(format!("{id}.part")),
                     proxy_url,
                     cookies_file,
                     status: Status::Paused,
@@ -178,6 +187,7 @@ impl Manager {
             return Err(error);
         }
         self.publish_job(action, &job).await;
+        self.0.scheduled.write().await.insert(id);
         let cancel = CancellationToken::new();
         let manager = self.clone();
         let worker_job = job.clone();
@@ -227,7 +237,7 @@ impl Manager {
                     )
                     .await;
             } else if worker_job.record.read().await.status == Status::Completed {
-                if let Err(error) = fs::remove_file(manager.part_path(id)).await {
+                if let Err(error) = fs::remove_file(&worker_job.part_path).await {
                     tracing::warn!(%id, %error, "cannot remove completed partial file");
                     manager
                         .publish_job(
@@ -314,7 +324,7 @@ impl Manager {
                 return Err(error);
             }
         }
-        match fs::remove_file(self.part_path(id)).await {
+        match fs::remove_file(&job.part_path).await {
             Ok(()) => (),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
             Err(error) => self.publish(

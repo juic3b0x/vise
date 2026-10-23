@@ -84,7 +84,7 @@ global_speed_limit_kbps = 8
             assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         }
         child.stop().await;
-        assert!(home.join("Configured/.vise/state.sqlite3").is_file());
+        assert!(home.join(".vise/state.sqlite3").is_file());
         assert!(!root.path().join("downloads").exists());
     }
 }
@@ -284,7 +284,7 @@ async fn concurrent_reader_allows_api_commit(
     base: &str,
     output: &std::path::Path,
 ) {
-    let path = output.join(".vise/state.sqlite3");
+    let path = output.join("test-home/.vise/state.sqlite3");
     let (ready, started) = tokio::sync::oneshot::channel();
     let (release, wait) = std::sync::mpsc::channel();
     let reader = tokio::task::spawn_blocking(move || {

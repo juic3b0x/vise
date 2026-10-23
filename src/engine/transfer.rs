@@ -62,8 +62,7 @@ impl Manager {
 
     async fn prepare_partial(&self, job: &Job, metadata: Metadata) -> Result<(fs::File, PathBuf)> {
         validate_size(metadata.total)?;
-        let id = job.record.read().await.id;
-        let path = self.part_path(id);
+        let path = job.part_path.clone();
         let file = fs::OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -133,7 +132,7 @@ impl Manager {
                 "download length does not match expected length".into(),
             ));
         }
-        let target = self.0.config.output_dir.join(&record.filename);
+        let target = job.output_path.clone();
         drop(record);
         job.record.write().await.total_bytes = Some(downloaded);
         file.set_len(downloaded).await?;
@@ -152,7 +151,7 @@ impl Manager {
                 e.into()
             }
         })?;
-        sync_directory(self.0.config.output_dir.clone()).await?;
+        sync_directory(super::storage::parent(&target)?.to_path_buf()).await?;
         Ok(())
     }
 
@@ -232,10 +231,9 @@ impl Manager {
         index: usize,
         cancel: &CancellationToken,
     ) -> Result<()> {
-        let (id, url, ranged, validator, chunk) = {
+        let (url, ranged, validator, chunk) = {
             let record = job.record.read().await;
             (
-                record.id,
                 record.url.clone(),
                 record.ranged,
                 record.validator.clone(),
@@ -278,20 +276,14 @@ impl Manager {
         }
         validate_validator(&response, validator.as_deref())?;
         if !ranged {
-            self.reset_stream(job, index, &response, id).await?;
+            self.reset_stream(job, index, &response).await?;
         }
         self.learn_checksums(job, &response).await?;
         self.stream_chunk(job, index, response, offset, cancel)
             .await
     }
 
-    async fn reset_stream(
-        &self,
-        job: &Job,
-        index: usize,
-        response: &Response,
-        id: Uuid,
-    ) -> Result<()> {
+    async fn reset_stream(&self, job: &Job, index: usize, response: &Response) -> Result<()> {
         validate_size(response.content_length())?;
         let _checkpoint = self.0.checkpoint.lock().await;
         let mut record = job.record.write().await;
@@ -303,7 +295,7 @@ impl Manager {
         self.checkpoint_locked().await?;
         fs::OpenOptions::new()
             .write(true)
-            .open(self.part_path(id))
+            .open(&job.part_path)
             .await?
             .set_len(0)
             .await?;
@@ -339,16 +331,12 @@ impl Manager {
         offset: u64,
         cancel: &CancellationToken,
     ) -> Result<()> {
-        let (id, expected) = {
-            let record = job.record.read().await;
-            (
-                record.id,
-                chunk_at(&record, index)?.end.map(|end| end - offset),
-            )
-        };
+        let expected = chunk_at(&*job.record.read().await, index)?
+            .end
+            .map(|end| end - offset);
         let mut file = fs::OpenOptions::new()
             .write(true)
-            .open(self.part_path(id))
+            .open(&job.part_path)
             .await?;
         file.seek(std::io::SeekFrom::Start(offset)).await?;
         let mut stream = self
@@ -520,6 +508,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let manager = Manager::open(Config {
             output_dir: dir.path().into(),
+            home_dir: Some(dir.path().join("test-home")),
             ..Config::default()
         })
         .await
@@ -530,6 +519,8 @@ mod tests {
                 id,
                 url: "http://127.0.0.1:1/unused".into(),
                 filename: "payload.bin".into(),
+                output_path: dir.path().join("payload.bin"),
+                part_path: dir.path().join(".vise").join(format!("{id}.part")),
                 proxy_url: None,
                 cookies_file: None,
                 status: Status::Downloading,
@@ -558,11 +549,11 @@ mod tests {
                 matches!(manager.transfer_once(&job, index, &cancel).await, Err(Error::Worker(message)) if message.contains("missing chunk"))
             );
         }
-        assert!(!manager.part_path(id).exists());
+        assert!(!job.part_path.exists());
         let mut file = fs::OpenOptions::new()
             .create_new(true)
             .write(true)
-            .open(manager.part_path(id))
+            .open(&job.part_path)
             .await
             .unwrap();
         let mut pending = BytesMut::from(b"abc".as_slice());

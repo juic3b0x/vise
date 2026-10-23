@@ -138,6 +138,7 @@ pub(super) fn normalize_chunks(record: &mut Record) {
 pub(super) fn validate_record(record: &Record) -> Result<()> {
     validate_url(&record.url)?;
     validate_filename(&record.filename)?;
+    crate::paths::validate(record)?;
     record.checksums.validate()?;
     if record
         .cookies_file

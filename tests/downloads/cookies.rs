@@ -158,6 +158,7 @@ async fn saved_cookie_paths_resume_offsets_and_reload_refreshed_sessions() {
     let output = root.path().join("output");
     let manager = Manager::open(Config {
         output_dir: output.clone(),
+        home_dir: Some(root.path().join("test-home")),
         cookies_file: Some(path.clone()),
         connections_per_download: 1,
         ..Config::default()
@@ -171,7 +172,8 @@ async fn saved_cookie_paths_resume_offsets_and_reload_refreshed_sessions() {
     assert!(saved > 0 && saved < server.origin.state.data.len() as u64);
     manager.shutdown().await.unwrap();
     drop(manager);
-    let database = rusqlite::Connection::open(output.join(".vise/state.sqlite3")).unwrap();
+    let database =
+        rusqlite::Connection::open(root.path().join("test-home/.vise/state.sqlite3")).unwrap();
     let stored: String = database
         .query_row(
             "SELECT cookies_file FROM downloads WHERE id=?1",
@@ -202,6 +204,7 @@ async fn saved_cookie_paths_resume_offsets_and_reload_refreshed_sessions() {
     let other = server.cookies(root.path(), "other.txt", "wrong-secret");
     let manager = Manager::open(Config {
         output_dir: output.clone(),
+        home_dir: Some(root.path().join("test-home")),
         cookies_file: Some(other),
         connections_per_download: 1,
         ..Config::default()
@@ -239,6 +242,7 @@ async fn missing_or_malformed_saved_cookies_fail_without_unauthenticated_request
     let output = root.path().join("output");
     let manager = Manager::open(Config {
         output_dir: output.clone(),
+        home_dir: Some(root.path().join("test-home")),
         cookies_file: Some(path.clone()),
         ..Config::default()
     })
@@ -251,6 +255,7 @@ async fn missing_or_malformed_saved_cookies_fail_without_unauthenticated_request
     tokio::fs::remove_file(&path).await.unwrap();
     let manager = Manager::open(Config {
         output_dir: output,
+        home_dir: Some(root.path().join("test-home")),
         ..Config::default()
     })
     .await
@@ -284,6 +289,7 @@ async fn jars_accept_response_cookies_without_sharing_sessions_between_tasks() {
     server.auth.rotate.store(true, Ordering::SeqCst);
     let manager = Manager::open(Config {
         output_dir: root.path().join("output"),
+        home_dir: Some(root.path().join("test-home")),
         ..Config::default()
     })
     .await
@@ -401,6 +407,7 @@ async fn redirects_observe_cookie_scope_and_do_not_leak_to_another_host() {
     .unwrap();
     let manager = Manager::open(Config {
         output_dir: root.path().join("output"),
+        home_dir: Some(root.path().join("test-home")),
         cookies_file: Some(path),
         ..Config::default()
     })

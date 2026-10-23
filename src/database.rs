@@ -14,10 +14,11 @@ use crate::{
     model::{Chunk, Download, Record, timestamp_millis},
 };
 
+mod migration;
 mod setup;
 
 const APPLICATION_ID: i32 = 0x5649_5345; // VISE
-const SCHEMA_VERSION: i32 = 4;
+const SCHEMA_VERSION: i32 = 5;
 pub const FILE_NAME: &str = "state.sqlite3";
 
 const DOWNLOADS_SCHEMA: &str = r#"
@@ -38,7 +39,9 @@ CREATE TABLE downloads (
     actual_md5 TEXT CHECK (actual_md5 IS NULL OR length(actual_md5)=32),
     verified_at INTEGER CHECK (verified_at IS NULL OR verified_at>=0),
     proxy_url TEXT,
-    cookies_file TEXT
+    cookies_file TEXT,
+    filename TEXT NOT NULL,
+    part_path TEXT NOT NULL UNIQUE
 ) STRICT;
 "#;
 const SCHEMA: &str = r#"
@@ -169,43 +172,6 @@ impl Database {
         }).await
     }
 
-    pub(crate) async fn needs_legacy_import(&self) -> Result<bool> {
-        self.call(|state| Ok(!import_done(&state.connection)?))
-            .await
-    }
-
-    /// Import and the completion marker commit together. An empty import also
-    /// records completion, preventing stale JSON from resurrecting deleted tasks.
-    pub(crate) async fn import_legacy(&self, records: Vec<Record>) -> Result<()> {
-        self.call(move |state| {
-            if import_done(&state.connection)? {
-                return Ok(());
-            }
-            let count: i64 =
-                state
-                    .connection
-                    .query_row("SELECT COUNT(*) FROM downloads", [], |row| row.get(0))?;
-            if count != 0 {
-                return Err(Error::Invalid(
-                    "refusing legacy import into a nonempty SQLite journal".into(),
-                ));
-            }
-            let records = snapshots(records)?;
-            let transaction = state
-                .connection
-                .transaction_with_behavior(TransactionBehavior::Immediate)?;
-            write_rows(&transaction, records.values())?;
-            transaction.execute(
-                "INSERT INTO metadata(key,value) VALUES ('legacy_import_complete','1')",
-                [],
-            )?;
-            transaction.commit()?;
-            state.saved = records;
-            Ok(())
-        })
-        .await
-    }
-
     /// One atomic snapshot transaction covers parent rows, every changed segment,
     /// segment layout resets, and cascading task deletion. The engine synchronizes
     /// partial files before this method and serializes resets with checkpoints.
@@ -233,18 +199,6 @@ impl Database {
         })
         .await
     }
-}
-
-fn import_done(connection: &Connection) -> Result<bool> {
-    Ok(connection
-        .query_row(
-            "SELECT value FROM metadata WHERE key='legacy_import_complete'",
-            [],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()?
-        .as_deref()
-        == Some("1"))
 }
 
 fn snapshots(records: Vec<Record>) -> Result<BTreeMap<Uuid, Record>> {
@@ -277,14 +231,15 @@ fn write_rows<'a>(
     records: impl Iterator<Item = &'a Record>,
 ) -> Result<()> {
     let mut download = transaction.prepare_cached(r#"
-        INSERT INTO downloads(id,url,output_path,total_size,status,created_at,updated_at,ranged,validator,error,expected_sha256,expected_md5,actual_sha256,actual_md5,verified_at,proxy_url,cookies_file)
-        VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)
+        INSERT INTO downloads(id,url,output_path,total_size,status,created_at,updated_at,ranged,validator,error,expected_sha256,expected_md5,actual_sha256,actual_md5,verified_at,proxy_url,cookies_file,filename,part_path)
+        VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)
         ON CONFLICT(id) DO UPDATE SET url=excluded.url, output_path=excluded.output_path,
             total_size=excluded.total_size, status=excluded.status, updated_at=excluded.updated_at,
             ranged=excluded.ranged, validator=excluded.validator, error=excluded.error,
             expected_sha256=excluded.expected_sha256, expected_md5=excluded.expected_md5,
             actual_sha256=excluded.actual_sha256, actual_md5=excluded.actual_md5, verified_at=excluded.verified_at,
-            proxy_url=excluded.proxy_url, cookies_file=excluded.cookies_file
+            proxy_url=excluded.proxy_url, cookies_file=excluded.cookies_file,
+            filename=excluded.filename, part_path=excluded.part_path
     "#)?;
     let mut chunk = transaction.prepare_cached(r#"
         INSERT INTO chunks(download_id,chunk_index,start_byte,end_byte,downloaded_bytes,status)
@@ -293,11 +248,12 @@ fn write_rows<'a>(
             end_byte=excluded.end_byte, downloaded_bytes=excluded.downloaded_bytes, status=excluded.status
     "#)?;
     for record in records {
+        crate::paths::validate(record)?;
         let id = record.id.to_string();
         download.execute(params![
             id,
             record.url,
-            record.filename,
+            crate::paths::text(&record.output_path)?,
             record.total_bytes.map(sql_number).transpose()?,
             record.status.as_str(),
             record.created_at,
@@ -317,10 +273,10 @@ fn write_rows<'a>(
             record
                 .cookies_file
                 .as_ref()
-                .map(|path| path
-                    .to_str()
-                    .ok_or_else(|| Error::Invalid("cookie file path must be UTF-8".into())))
-                .transpose()?
+                .map(|path| crate::paths::text(path))
+                .transpose()?,
+            record.filename,
+            crate::paths::text(&record.part_path)?
         ])?;
         transaction.execute(
             "DELETE FROM chunks WHERE download_id=?1 AND chunk_index>=?2",
@@ -349,11 +305,12 @@ fn read_records(connection: &mut Connection) -> Result<Vec<Record>> {
 }
 
 fn read_downloads(transaction: &Transaction<'_>) -> Result<BTreeMap<Uuid, Record>> {
-    let mut statement = transaction.prepare("SELECT id,url,output_path,total_size,status,created_at,ranged,validator,error,expected_sha256,expected_md5,actual_sha256,actual_md5,verified_at,proxy_url,cookies_file FROM downloads ORDER BY id")?;
+    let mut statement = transaction.prepare("SELECT id,url,filename,total_size,status,created_at,ranged,validator,error,expected_sha256,expected_md5,actual_sha256,actual_md5,verified_at,proxy_url,cookies_file,output_path,part_path FROM downloads ORDER BY id")?;
     let mut rows = statement.query([])?;
     let mut records = BTreeMap::new();
     while let Some(row) = rows.next()? {
         let record = decode_download(row)?;
+        crate::paths::validate(&record)?;
         records.insert(record.id, record);
     }
     Ok(records)
@@ -372,6 +329,8 @@ fn decode_download(row: &Row<'_>) -> Result<Record> {
         id,
         url: row.get(1)?,
         filename: row.get(2)?,
+        output_path: PathBuf::from(row.get::<_, String>(16)?),
+        part_path: PathBuf::from(row.get::<_, String>(17)?),
         cookies_file: row.get::<_, Option<String>>(15)?.map(PathBuf::from),
         proxy_url: row
             .get::<_, Option<String>>(14)?
@@ -447,7 +406,9 @@ mod tests {
             .pragma_update(None, "application_id", APPLICATION_ID)
             .unwrap();
         connection.pragma_update(None, "user_version", 1).unwrap();
-        let original = record();
+        let mut original = record();
+        crate::paths::resolve_legacy(&mut original, &std::fs::canonicalize(dir.path()).unwrap())
+            .unwrap();
         connection
             .execute(
                 "INSERT INTO downloads VALUES(?1,?2,?3,1024,'paused',1234,1234,1,'\"v1\"',NULL)",
@@ -503,8 +464,12 @@ mod tests {
     }
 
     fn record() -> Record {
+        let id = Uuid::new_v4();
+        let output = std::env::temp_dir().join(id.to_string());
         Record {
-            id: Uuid::new_v4(),
+            id,
+            output_path: output.join("file.bin"),
+            part_path: output.join(".vise").join(format!("{id}.part")),
             url: "https://example.com/file.bin".into(),
             filename: "file.bin".into(),
             proxy_url: None,
@@ -530,7 +495,10 @@ mod tests {
     async fn normalized_schema_round_trips_and_cascades() {
         let dir = tempfile::tempdir().unwrap();
         let database = Database::open(dir.path().join(FILE_NAME)).await.unwrap();
-        database.import_legacy(Vec::new()).await.unwrap();
+        database
+            .import_source("unit-test".into(), Vec::new(), None)
+            .await
+            .unwrap();
         let record = record();
         database.persist(vec![record.clone()]).await.unwrap();
         assert_eq!(database.load().await.unwrap(), vec![record.clone()]);
@@ -558,7 +526,58 @@ mod tests {
             })
             .await
             .unwrap();
-        assert!(!database.needs_legacy_import().await.unwrap());
+        assert!(database.source_imported("unit-test".into()).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn legacy_import_conflicts_roll_back_rows_rate_and_source_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let database = Database::open(dir.path().join(FILE_NAME)).await.unwrap();
+        let original = record();
+        database.persist(vec![original.clone()]).await.unwrap();
+        let other = record();
+        let mut conflicting = record();
+        let destination = conflicting.output_path.clone();
+        let staging = conflicting.part_path.clone();
+        conflicting.output_path = original.output_path.clone();
+        conflicting.part_path = crate::paths::parent(&original.output_path)
+            .unwrap()
+            .join(".vise")
+            .join(format!("{}.part", conflicting.id));
+        assert!(
+            database
+                .import_source(
+                    "source".into(),
+                    vec![other.clone(), conflicting.clone()],
+                    Some("2M".parse().unwrap())
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(database.load().await.unwrap(), vec![original.clone()]);
+        assert!(!database.source_imported("source".into()).await.unwrap());
+        assert_eq!(
+            database.load_rate_limit().await.unwrap().bytes_per_second(),
+            None
+        );
+        conflicting.output_path = destination;
+        conflicting.part_path = staging;
+        database
+            .import_source(
+                "source".into(),
+                vec![other, conflicting],
+                Some("2M".parse().unwrap()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(database.list().await.unwrap().len(), 3);
+        assert!(database.source_imported("source".into()).await.unwrap());
+        database.persist(Vec::new()).await.unwrap();
+        database
+            .import_source("source".into(), vec![original], None)
+            .await
+            .unwrap();
+        assert!(database.list().await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -654,6 +673,8 @@ mod tests {
             .unwrap();
         connection.pragma_update(None, "user_version", 2).unwrap();
         let mut original = record();
+        crate::paths::resolve_legacy(&mut original, &std::fs::canonicalize(dir.path()).unwrap())
+            .unwrap();
         original.checksums.expected_sha256 = Some("0".repeat(64));
         connection.execute("INSERT INTO downloads VALUES(?1,?2,?3,1024,'paused',1234,1234,1,'\"v1\"',NULL,?4,NULL,NULL,NULL,NULL)", params![original.id.to_string(), original.url, original.filename, original.checksums.expected_sha256]).unwrap();
         connection
@@ -704,7 +725,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(FILE_NAME);
         let connection = Connection::open(&path).unwrap();
-        connection.execute_batch(DOWNLOADS_SCHEMA).unwrap();
+        connection
+            .execute_batch(&DOWNLOADS_SCHEMA.replace(
+                ",\n    filename TEXT NOT NULL,\n    part_path TEXT NOT NULL UNIQUE",
+                "",
+            ))
+            .unwrap();
         connection
             .execute_batch("ALTER TABLE downloads DROP COLUMN cookies_file")
             .unwrap();
@@ -714,6 +740,8 @@ mod tests {
             .unwrap();
         connection.pragma_update(None, "user_version", 3).unwrap();
         let mut original = record();
+        crate::paths::resolve_legacy(&mut original, &std::fs::canonicalize(dir.path()).unwrap())
+            .unwrap();
         connection.execute("INSERT INTO downloads(id,url,output_path,total_size,status,created_at,updated_at,ranged,validator) VALUES(?1,?2,?3,1024,'paused',1234,1234,1,'\"v1\"')", params![original.id.to_string(), original.url, original.filename]).unwrap();
         connection
             .execute(

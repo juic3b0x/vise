@@ -52,7 +52,7 @@ systemctl --user daemon-reload
 systemctl --user enable --now vise.service
 ```
 
-The example loads `~/.vise/config.toml`, creating it on first startup, and resumes saved transfers. Edit the file's host, port, output path, or token and restart the service to apply changes. An optional `~/.config/vise/daemon.env` file can override `VISE_API_TOKEN`. User services that must survive logout also need user lingering enabled by the system administrator. See [docs/vise.service](docs/vise.service).
+The example loads `~/.vise/config.toml`, creating it on first startup, and resumes saved transfers. Edit the file's host, port, default destination for new tasks, or token and restart the service to apply changes. All modes share `~/.vise/state.sqlite3`; changing the default destination does not move existing tasks. Run one engine per home directory and use the daemon API/WebUI while the service is active. An optional `~/.config/vise/daemon.env` file can override `VISE_API_TOKEN`. User services that must survive logout also need user lingering enabled by the system administrator. See [docs/vise.service](docs/vise.service).
 
 ## Browser extension
 
@@ -73,3 +73,7 @@ The source includes a dependency-free Manifest V3 extension in [extension/](exte
 Temporary Firefox add-ons are removed when Firefox closes. Persistent distribution requires a signed package; this repository does not claim a published Chrome Web Store or Mozilla Add-ons listing.
 
 If your browser requests host/site access, allow it for the configured `127.0.0.1` or `localhost` address. Copy the token from `daemon.VISE_API_TOKEN` in `~/.vise/config.toml`, or use the `VISE_API_TOKEN` environment override used to launch the daemon. Right-click an HTTP(S) link and select **Send to Vise**. See the [extension guide](extension/README.md) for permissions, privacy, and troubleshooting.
+
+## Upgrading from per-directory journals
+
+Vise 0.4.0 stores its database at `~/.vise/state.sqlite3`. For each older output directory, stop older Vise processes and start the new version once with `vise -o /absolute/path/to/downloads --interactive`. Its local SQLite or JSON journal is imported automatically; staging data stays in place. Afterwards, `vise --resume-all` and the daemon/WebUI recover every imported destination without repeating `-o`. Old SQLite journals remain unchanged as backups, and imports are recorded transactionally to prevent replay after task deletion. See [recovery and migration](README.md#interactive-mode).

@@ -10,7 +10,7 @@ use crate::{
 };
 use reqwest::Client;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::PathBuf,
     sync::{Arc, atomic::AtomicBool},
     time::Duration,
@@ -25,13 +25,17 @@ use uuid::Uuid;
 mod http;
 mod journal;
 mod layout;
+mod migration;
 mod queue;
 mod recovery;
 mod state;
+mod storage;
 mod transfer;
 
 #[derive(Debug, Clone)]
 pub struct Config {
+    /// Embedded callers may inject an isolated home; None resolves the OS home.
+    pub home_dir: Option<PathBuf>,
     pub output_dir: PathBuf,
     pub concurrent_downloads: usize,
     pub connections_per_download: usize,
@@ -48,6 +52,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            home_dir: None,
             output_dir: "downloads".into(),
             concurrent_downloads: 3,
             connections_per_download: 8,
@@ -65,6 +70,8 @@ struct Run {
     handle: JoinHandle<()>,
 }
 struct Job {
+    output_path: PathBuf,
+    part_path: PathBuf,
     record: RwLock<Record>,
     client: RwLock<Client>,
     control: Mutex<()>,
@@ -74,6 +81,8 @@ struct Job {
 impl Job {
     fn new(record: Record, client: Client) -> Self {
         Self {
+            output_path: record.output_path.clone(),
+            part_path: record.part_path.clone(),
             record: RwLock::new(record),
             client: RwLock::new(client),
             control: Mutex::new(()),
@@ -89,13 +98,15 @@ struct Inner {
     rate_limiter: RateLimiter,
     settings: Mutex<()>,
     jobs: RwLock<BTreeMap<Uuid, Arc<Job>>>,
+    scheduled: RwLock<BTreeSet<Uuid>>,
     pool: Semaphore,
     checkpoint: Mutex<()>,
     admission: Mutex<()>,
     events: watch::Sender<u64>,
     activity: broadcast::Sender<Event>,
     stopping: AtomicBool,
-    _directory_lock: std::fs::File,
+    _global_lock: std::fs::File,
+    _output_locks: Vec<std::fs::File>,
 }
 
 /// Cloneable controller shared by CLI, REST handlers, and WebSocket subscribers.

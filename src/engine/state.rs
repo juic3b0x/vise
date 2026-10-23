@@ -5,10 +5,7 @@ use crate::{
     model::{Download, Status},
     rate_limiter::{RateConfiguration, RateLimit},
 };
-use std::{
-    path::PathBuf,
-    sync::{Arc, atomic::Ordering},
-};
+use std::sync::{Arc, atomic::Ordering};
 use tokio::sync::{broadcast, watch};
 use uuid::Uuid;
 
@@ -93,12 +90,8 @@ impl Manager {
         self.0.events.send_modify(|v| *v = v.wrapping_add(1));
     }
 
-    pub(super) fn part_path(&self, id: Uuid) -> PathBuf {
-        self.0
-            .config
-            .output_dir
-            .join(".vise")
-            .join(format!("{id}.part"))
+    pub fn database_path(&self) -> &std::path::Path {
+        self.0.database.path()
     }
 
     pub async fn list(&self) -> Vec<Download> {
@@ -108,6 +101,16 @@ impl Manager {
             result.push(job.record.read().await.snapshot());
         }
         result
+    }
+
+    /// Batch exit status concerns tasks scheduled by this process, not history.
+    pub(crate) async fn session_downloads(&self) -> Vec<Download> {
+        let scheduled = self.0.scheduled.read().await.clone();
+        self.list()
+            .await
+            .into_iter()
+            .filter(|task| scheduled.contains(&task.id))
+            .collect()
     }
 
     pub(super) async fn job(&self, id: Uuid) -> Result<Arc<Job>> {

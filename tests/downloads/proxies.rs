@@ -91,6 +91,7 @@ async fn proxy_route_and_credentials_survive_restart_and_override_a_new_default(
     let dir = tempfile::tempdir().unwrap();
     let original = Manager::open(Config {
         output_dir: dir.path().into(),
+        home_dir: Some(dir.path().join("test-home")),
         connections_per_download: 2,
         proxy_url: Some(proxy.url.parse().unwrap()),
         ..Config::default()
@@ -102,7 +103,8 @@ async fn proxy_route_and_credentials_survive_restart_and_override_a_new_default(
     original.pause(item.id).await.unwrap();
     original.shutdown().await.unwrap();
     drop(original);
-    let connection = rusqlite::Connection::open(dir.path().join(".vise/state.sqlite3")).unwrap();
+    let connection =
+        rusqlite::Connection::open(dir.path().join("test-home/.vise/state.sqlite3")).unwrap();
     let saved: String = connection
         .query_row(
             "SELECT proxy_url FROM downloads WHERE id=?1",
@@ -114,6 +116,7 @@ async fn proxy_route_and_credentials_survive_restart_and_override_a_new_default(
     drop(connection);
     let restored = Manager::open(Config {
         output_dir: dir.path().into(),
+        home_dir: Some(dir.path().join("test-home")),
         connections_per_download: 2,
         proxy_url: Some("http://127.0.0.1:1".parse().unwrap()),
         ..Config::default()
@@ -140,6 +143,7 @@ async fn explicit_proxy_failure_never_falls_back_to_a_reachable_origin() {
     let dir = tempfile::tempdir().unwrap();
     let manager = Manager::open(Config {
         output_dir: dir.path().into(),
+        home_dir: Some(dir.path().join("test-home")),
         retries: 0,
         ..Config::default()
     })
@@ -238,6 +242,7 @@ async fn concurrent_transfers_keep_default_and_override_proxy_clients_isolated()
     let dir = tempfile::tempdir().unwrap();
     let manager = Manager::open(Config {
         output_dir: dir.path().into(),
+        home_dir: Some(dir.path().join("test-home")),
         proxy_url: Some(http.url.parse().unwrap()),
         connections_per_download: 2,
         ..Config::default()

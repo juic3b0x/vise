@@ -50,23 +50,38 @@ impl Manager {
     pub(super) async fn checkpoint_locked(&self) -> Result<()> {
         let jobs: Vec<_> = self.0.jobs.read().await.values().cloned().collect();
         let mut downloads = Vec::with_capacity(jobs.len());
-        for job in jobs {
+        for job in &jobs {
             downloads.push(job.record.read().await.clone());
         }
         // Capture offsets BEFORE syncing files: every saved offset refers to durable bytes.
+        let mut directories = std::collections::BTreeSet::new();
         for record in &downloads {
+            if record.status == Status::Completed {
+                continue;
+            }
             match fs::OpenOptions::new()
                 .write(true)
-                .open(self.part_path(record.id))
+                .open(&record.part_path)
                 .await
             {
-                Ok(file) => file.sync_data().await?,
+                Ok(file) => {
+                    file.sync_data().await?;
+                    directories.insert(super::storage::parent(&record.part_path)?.to_path_buf());
+                }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
                 Err(e) => return Err(e.into()),
             }
         }
+        for directory in directories {
+            // Missing removable output volumes must not block unrelated tasks.
+            match sync_directory(directory).await {
+                Err(crate::error::Error::Io(error))
+                    if error.kind() == std::io::ErrorKind::NotFound => {}
+                result => result?,
+            }
+        }
         self.0.database.persist(downloads).await?;
-        sync_directory(self.0.config.output_dir.join(".vise")).await?;
+        sync_directory(super::storage::parent(self.0.database.path())?.to_path_buf()).await?;
         Ok(())
     }
 }

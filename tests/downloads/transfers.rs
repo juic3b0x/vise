@@ -159,6 +159,7 @@ async fn refuses_existing_outputs_and_concurrent_managers() {
     assert!(
         Manager::open(Config {
             output_dir: dir.path().into(),
+            home_dir: Some(dir.path().join("test-home")),
             ..Default::default()
         })
         .await
@@ -188,6 +189,7 @@ async fn stalled_reads_exhaust_a_bounded_retry_budget() {
     let dir = tempfile::tempdir().unwrap();
     let manager = Manager::open(Config {
         output_dir: dir.path().into(),
+        home_dir: Some(dir.path().join("test-home")),
         concurrent_downloads: 1,
         connections_per_download: 1,
         retries: 1,

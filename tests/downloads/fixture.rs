@@ -319,6 +319,7 @@ async fn next_frame(
 pub(super) async fn manager(dir: &tempfile::TempDir, connections: usize) -> Manager {
     Manager::open(Config {
         output_dir: dir.path().into(),
+        home_dir: Some(dir.path().join("test-home")),
         concurrent_downloads: 1,
         connections_per_download: connections,
         retries: 2,

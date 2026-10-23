@@ -2,6 +2,20 @@
 
 All notable changes to Vise are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.4.0] - 2026-10-22
+
+### Added
+
+- **Global state journal:** All modes share `~/.vise/state.sqlite3`, alongside configuration. New Unix state directories use `0700`; database and lock files use `0600`. WAL, full synchronization, serialized blocking-pool transactions, and global engine ownership protect concurrent workers and API readers.
+- **Cross-directory recovery:** Schema 5 stores absolute destination and staging paths with each task. History, chunk offsets, authentication metadata, and rate limits survive changes to the default output directory. Identical filenames in separate destinations no longer conflict.
+- **Legacy journal imports:** Selecting an old output directory imports its SQLite or JSON history once. SQLite backup snapshots include committed WAL data without modifying the source. Task rows, initial rate, and source markers commit atomically; conflicts abort without replacing global history. JSON backups remain available.
+
+### Changed
+
+- `--output` sets the default destination for new tasks; `--resume-all`, interactive controls, daemon, and WebUI operate on the global queue at saved paths. Partial files remain beside their destinations for atomic publication on the same filesystem.
+- Saved rate limits survive the initial zero configuration default; explicit CLI limits and nonzero configuration limits retain precedence.
+- CLI batch success reflects tasks scheduled in that invocation, so unrelated paused or failed history does not cause false failures.
+
 ## [0.3.0] - 2026-10-20
 
 ### Added
@@ -79,6 +93,7 @@ Initial release.
 - **Local WebUI safeguards:** Loopback-only binding, host and browser-origin validation, JSON-only mutations, and a Content Security Policy constrain browser access.
 - **Safe publication:** Existing output files are never overwritten, and configured checksum verification must succeed before final publication. SHA-256 from a trusted source is preferred for security-sensitive verification; MD5 supports legacy compatibility and accidental-corruption detection.
 
+[0.4.0]: https://github.com/juic3b0x/vise/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/juic3b0x/vise/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/juic3b0x/vise/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/juic3b0x/vise/compare/v0.1.0...v0.1.1
