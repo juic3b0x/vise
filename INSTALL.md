@@ -4,7 +4,7 @@ Return to the [README](README.md) for features and usage, or continue to the [qu
 
 ## System requirements
 
-Install a Rust toolchain with Cargo. Vise declares Rust **1.85 or newer** as its minimum version. Git is also required to clone the repository. A working C build toolchain is needed for bundled SQLite; no separate SQLite installation or database server is required.
+Install a Rust toolchain with Cargo. Vise declares Rust **1.88 or newer** as its minimum version. Git is also required to clone the repository. A working C build toolchain is needed for bundled SQLite; no separate SQLite installation or database server is required.
 
 ## Cargo installation
 

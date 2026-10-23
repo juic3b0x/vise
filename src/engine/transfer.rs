@@ -101,11 +101,11 @@ impl Manager {
         let mut failure = None;
         while let Some(result) = workers.join_next().await {
             let result = result.unwrap_or_else(|e| Err(Error::Worker(e.to_string())));
-            if let Err(error) = result {
-                if failure.is_none() {
-                    failure = Some(error);
-                    worker_cancel.cancel();
-                }
+            if let Err(error) = result
+                && failure.is_none()
+            {
+                failure = Some(error);
+                worker_cancel.cancel();
             }
         }
         // Do not abort tasks: cancellation waits for file writes and offset updates.
@@ -488,12 +488,12 @@ fn validate_range(
 }
 
 fn validate_validator(response: &Response, expected: Option<&str>) -> Result<()> {
-    if let (Some(expected), Some(actual)) = (expected, super::http::validator(response)) {
-        if expected != actual {
-            return Err(Error::Protocol(
-                "remote file validator changed; resume to reprobe".into(),
-            ));
-        }
+    if let (Some(expected), Some(actual)) = (expected, super::http::validator(response))
+        && expected != actual
+    {
+        return Err(Error::Protocol(
+            "remote file validator changed; resume to reprobe".into(),
+        ));
     }
     Ok(())
 }

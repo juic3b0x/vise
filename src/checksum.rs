@@ -80,16 +80,15 @@ impl Checksums {
             ("SHA-256", &self.expected_sha256, &self.actual_sha256),
             ("MD5", &self.expected_md5, &self.actual_md5),
         ] {
-            if let Some(expected) = expected {
-                if actual
+            if let Some(expected) = expected
+                && actual
                     .as_ref()
                     .is_none_or(|actual| !actual.eq_ignore_ascii_case(expected))
-                {
-                    errors.push(format!(
-                        "{name} expected {expected}, actual {}",
-                        actual.as_deref().unwrap_or("not computed")
-                    ));
-                }
+            {
+                errors.push(format!(
+                    "{name} expected {expected}, actual {}",
+                    actual.as_deref().unwrap_or("not computed")
+                ));
             }
         }
         (!errors.is_empty()).then(|| errors.join("; "))

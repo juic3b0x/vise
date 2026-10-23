@@ -235,8 +235,8 @@ fn validate_domain(domain: &str) -> std::result::Result<(), &'static str> {
         return Err("invalid cookie domain");
     }
     let host = url::Host::parse(domain).map_err(|_| "invalid cookie domain")?;
-    if let url::Host::Domain(name) = host {
-        if name.len() > 253
+    if let url::Host::Domain(name) = host
+        && (name.len() > 253
             || name.split('.').any(|label| {
                 label.is_empty()
                     || label.len() > 63
@@ -245,10 +245,9 @@ fn validate_domain(domain: &str) -> std::result::Result<(), &'static str> {
                     || !label
                         .bytes()
                         .all(|b| b.is_ascii_alphanumeric() || b == b'-')
-            })
-        {
-            return Err("invalid cookie domain");
-        }
+            }))
+    {
+        return Err("invalid cookie domain");
     }
     Ok(())
 }

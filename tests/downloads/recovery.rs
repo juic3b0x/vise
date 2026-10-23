@@ -85,8 +85,9 @@ async fn abrupt_process_death_restores_durable_offsets_and_finishes_exactly() {
                     Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
                 }).ok().and_then(|(id, bytes)| id.parse().ok().and_then(|id| u64::try_from(bytes).ok().map(|bytes| (id, bytes))))
             }).await.unwrap();
-            if let Some((id, written)) = saved {
-                if written > 0 && written < fixture.state.data.len() as u64 { return (id, written); }
+            if let Some((id, written)) = saved
+                && written > 0 && written < fixture.state.data.len() as u64 {
+                return (id, written);
             }
             if process.try_wait().unwrap().is_some() {
                 panic!("child exited before a progress checkpoint");
