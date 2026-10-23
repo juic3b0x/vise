@@ -525,8 +525,13 @@ mod tests {
                 id,
                 url: "http://127.0.0.1:1/unused".into(),
                 filename: "payload.bin".into(),
-                output_path: dir.path().join("payload.bin"),
-                part_path: dir.path().join(".vise").join(format!("{id}.part")),
+                output_path: manager.0.config.output_dir.join("payload.bin"),
+                part_path: manager
+                    .0
+                    .config
+                    .output_dir
+                    .join(".vise")
+                    .join(format!("{id}.part")),
                 proxy_url: None,
                 cookies_file: None,
                 status: Status::Downloading,

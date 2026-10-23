@@ -14,6 +14,21 @@ use std::{
 
 pub(super) use crate::paths::parent;
 
+pub(super) async fn admission_directories(output: PathBuf) -> Result<(PathBuf, PathBuf)> {
+    tokio::task::spawn_blocking(move || {
+        let output = paths::directory(&output)?;
+        let staging = paths::directory(&paths::bounded_file(&output, ".vise")?)?;
+        if !staging.starts_with(&output) || staging.parent() != Some(output.as_path()) {
+            return Err(Error::Invalid(
+                "staging directory escapes the output directory".into(),
+            ));
+        }
+        Ok((output, staging))
+    })
+    .await
+    .map_err(|error| Error::Worker(error.to_string()))?
+}
+
 pub(super) async fn prepare(config: &mut Config) -> Result<(PathBuf, File)> {
     let home = match config.home_dir.take() {
         Some(home) => home,

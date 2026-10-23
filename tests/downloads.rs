@@ -15,6 +15,8 @@ mod cookies;
 mod daemon;
 #[path = "downloads/global_state.rs"]
 mod global_state;
+#[path = "downloads/path_security.rs"]
+mod path_security;
 #[path = "downloads/proxies.rs"]
 mod proxies;
 #[path = "downloads/rate_limits.rs"]
