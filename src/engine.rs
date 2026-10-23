@@ -22,6 +22,7 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+mod completion;
 mod http;
 mod journal;
 mod layout;
