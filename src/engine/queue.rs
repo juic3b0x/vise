@@ -236,18 +236,18 @@ impl Manager {
                         &worker_job,
                     )
                     .await;
-            } else if worker_job.record.read().await.status == Status::Completed {
-                if let Err(error) = fs::remove_file(&worker_job.part_path).await {
-                    tracing::warn!(%id, %error, "cannot remove completed partial file");
-                    manager
-                        .publish_job(
-                            EventKind::Warning {
-                                message: format!("cannot remove completed partial file: {error}"),
-                            },
-                            &worker_job,
-                        )
-                        .await;
-                }
+            } else if worker_job.record.read().await.status == Status::Completed
+                && let Err(error) = fs::remove_file(&worker_job.part_path).await
+            {
+                tracing::warn!(%id, %error, "cannot remove completed partial file");
+                manager
+                    .publish_job(
+                        EventKind::Warning {
+                            message: format!("cannot remove completed partial file: {error}"),
+                        },
+                        &worker_job,
+                    )
+                    .await;
             }
             manager.publish(event.0, Some(event.1));
             manager.notify();

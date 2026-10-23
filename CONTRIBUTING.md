@@ -10,7 +10,7 @@ For a substantial feature, dependency addition, or behavioral change, open an is
 
 ## Development setup
 
-Use the latest stable Rust toolchain with Rustfmt and Clippy. The package uses Rust edition 2024 and declares Rust 1.85 as its minimum version; changes to that minimum must be explicit. A C build toolchain is required for bundled SQLite. No external database service or frontend build system is needed.
+Use the latest stable Rust toolchain with Rustfmt and Clippy. The package uses Rust edition 2024 and declares Rust 1.88 as its minimum version; changes to that minimum must be explicit. A C build toolchain is required for bundled SQLite. No external database service or frontend build system is needed.
 
 ```sh
 git clone https://github.com/juic3b0x/vise.git

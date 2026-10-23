@@ -12,6 +12,9 @@ All notable changes to Vise are documented here. The format follows [Keep a Chan
 
 ### Changed
 
+- Raised the minimum supported Rust version from 1.85 to 1.88 and aligned installation and contribution requirements.
+- Refreshed the Cargo lockfile against Rust 1.88, including compatible cookie-store, time, ICU, and Tokio updates.
+- Adopted Rust 1.88 let-chain conditions where required to keep current stable Clippy warning-free.
 - `--output` sets the default destination for new tasks; `--resume-all`, interactive controls, daemon, and WebUI operate on the global queue at saved paths. Partial files remain beside their destinations for atomic publication on the same filesystem.
 - Saved rate limits survive the initial zero configuration default; explicit CLI limits and nonzero configuration limits retain precedence.
 - CLI batch success reflects tasks scheduled in that invocation, so unrelated paused or failed history does not cause false failures.
