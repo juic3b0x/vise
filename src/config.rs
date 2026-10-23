@@ -26,7 +26,7 @@ VISE_API_TOKEN = "{token}"
 [downloads]
 default_dir = "~/Downloads/Vise"
 max_concurrent = 5
-global_speed_limit_kbps = 0 # 0 for unlimited
+global_speed_limit_kbps = 0 # restore saved cap; initially unlimited
 # cookies_file = "~/cookies.txt" # optional Netscape cookie file
 
 [proxy]
@@ -68,7 +68,7 @@ impl Default for Daemon {
 pub struct Downloads {
     pub default_dir: PathBuf,
     pub max_concurrent: u16,
-    /// KiB per second: one unit is 1024 bytes; zero disables throttling.
+    /// KiB per second; zero restores the journal cap (initially unlimited).
     pub global_speed_limit_kbps: u64,
     pub cookies_file: Option<PathBuf>,
 }
@@ -123,7 +123,7 @@ pub fn expand_home(path: &Path, home: &Path) -> Result<PathBuf> {
     })
 }
 
-fn home_directory() -> Result<PathBuf> {
+pub fn home_directory() -> Result<PathBuf> {
     #[cfg(windows)]
     let home = std::env::var_os("USERPROFILE")
         .filter(|v| !v.is_empty())

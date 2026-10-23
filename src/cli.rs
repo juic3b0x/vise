@@ -76,7 +76,7 @@ pub async fn run(manager: Manager, interactive: bool, stop: CancellationToken) -
             bar.finish_and_clear();
         }
     }
-    let downloads = manager.list().await;
+    let downloads = manager.session_downloads().await;
     for item in &downloads {
         if matches!(item.status, Status::Failed | Status::Corrupt) {
             progress.println(format!(
@@ -261,6 +261,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let manager = Manager::open(crate::engine::Config {
             output_dir: dir.path().into(),
+            home_dir: Some(dir.path().join("test-home")),
             ..Default::default()
         })
         .await

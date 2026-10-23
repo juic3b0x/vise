@@ -40,7 +40,7 @@ On the first normal startup, Vise creates `~/.vise/config.toml`. On Unix it reso
 | `daemon.VISE_API_TOKEN` | Random 64-character token generated once and preserved |
 | `downloads.default_dir` | `"~/Downloads/Vise"`; `~` expands to the resolved home |
 | `downloads.max_concurrent` | `5`; accepted range 1–64 |
-| `downloads.global_speed_limit_kbps` | `0` for unlimited; positive values are KiB/s (1024 bytes per unit) |
+| `downloads.global_speed_limit_kbps` | `0` restores the saved cap (initially unlimited); positive values are KiB/s |
 | `proxy.url` | `""` for no explicit proxy |
 | `downloads.cookies_file` | Unset; optional Netscape cookie-file path |
 
@@ -55,7 +55,7 @@ The environment variable `VISE_API_TOKEN` overrides `daemon.VISE_API_TOKEN`. The
 
 Creation runs on the blocking pool, serializes concurrent startup, and publishes a complete file atomically. Existing files and comments are preserved. Newly created Unix directories use mode `0700` and files use `0600`; on Windows, protect the home directory with its account ACLs. Malformed TOML, unknown keys, or incorrect field types produce an error without echoing credential values. Missing sections/fields use defaults; an omitted token in an existing file is left empty rather than generating a new credential on every restart.
 
-These are startup preferences. Transfer state, chunk offsets, and live settings still belong to SQLite. On CLI startup, the file's bandwidth cap (including `0` for unlimited) or an explicit `--limit-rate` takes precedence over the journal's previous cap. Runtime controls persist in the journal without rewriting `config.toml`; edit the file to choose the cap for future starts.
+These are startup preferences. Transfer state, chunk offsets, and live settings still belong to SQLite. On CLI startup, an explicit `--limit-rate` or a positive file bandwidth cap overrides the saved global cap; the initial zero file default restores it. Runtime controls persist in the journal without rewriting `config.toml`; edit the file to choose the cap for future starts.
 
 ## Quick start
 
@@ -104,7 +104,7 @@ vise --webui --limit-rate 5M
 
 The limit is **global**: every active file and chunk shares the same byte budget. `K`, `M`, `G`, and `T` use powers of 1,024; `KB/s`, `MB/s`, `GB/s`, and `TB/s` use powers of 1,000. Explicit binary units such as `KiB/s` and `MiB/s` also work. Fractions are accepted (`1.5M`); fractional bytes are rounded down. Use `off`, `unlimited`, or `0` to remove the cap.
 
-Live limits are saved in the output directory's SQLite journal. The next CLI launch applies `downloads.global_speed_limit_kbps` from the configuration file unless `--limit-rate` explicitly overrides it; use `--limit-rate off` for an unlimited session. New configuration files start unlimited.
+Live limits are saved in `~/.vise/state.sqlite3` and restored across output directories and restarts. An explicit `--limit-rate` or a nonzero `downloads.global_speed_limit_kbps` overrides the saved cap. The initial zero configuration default leaves a saved cap intact; use `--limit-rate off` to clear it. A new journal starts unlimited.
 
 The cap applies to streamed response body bytes, including retries. HTTP headers and range probes are excluded. A bounded token bucket permits short bursts, and network/client buffering can briefly receive data ahead of the stream; the limit controls sustained application throughput.
 
@@ -201,15 +201,21 @@ Task IDs accept a unique prefix of at least four characters. Use `list` to find 
 
 `limit-rate RATE` changes the shared cap immediately while transfers remain connected. `limit-rate` displays the current cap; `limit-rate off` removes it.
 
-`quit`, Ctrl+C, and SIGTERM stop active transfers and save partial progress. Resume saved paused or failed tasks using the same output directory:
+`quit`, Ctrl+C, and SIGTERM stop active transfers and save partial progress. Resume saved paused or failed tasks from every destination:
 
 ```sh
-vise -o ./downloads --resume-all
+vise --resume-all
 ```
 
-Download state is stored in `<output>/.vise/state.sqlite3`. Vise saves download metadata and individual chunk offsets in SQLite transactions, flushing progress at one-second intervals and saving lifecycle transitions immediately. Unfinished tasks are restored as paused on startup; use `--resume-all` or the interactive/WebUI resume controls to continue from durable offsets. A crash can lose work since the last checkpoint, which is downloaded again.
+Download state is stored globally in `~/.vise/state.sqlite3`, alongside `config.toml`. SQLite WAL transactions preserve task history, individual chunk offsets, status transitions, and the shared rate limit. Progress checkpoints run once a second and lifecycle transitions commit immediately. Unfinished tasks recover as paused; a crash can lose work since the last checkpoint, which is downloaded again.
 
-Existing `.vise/state.json` journals are imported automatically once and preserved as `state.json.migrated`. Keep the entire `.vise` directory with your downloads, including any SQLite `-wal` and `-shm` files, and use the same output directory when resuming.
+Every task stores absolute final and staging paths. `-o` selects the destination for **new** tasks; it does not relocate existing downloads. Staging stays at `<destination-dir>/.vise/<task-id>.part` on the same filesystem as the final file. The CLI, interactive queue, daemon, WebUI, and `--resume-all` see the same history, regardless of the current output directory. Batch exit status reflects tasks scheduled by that invocation rather than unrelated paused history.
+
+One Vise engine may run per home directory. Stop a running daemon before starting a separate CLI engine, or control it through its API/WebUI. The global process lock protects the engine's live cache and workers; WAL still allows concurrent SQLite readers. New Unix state directories use `0700`, and new database/lock files use `0600`.
+
+On first use of an old output directory, Vise imports its `<output>/.vise/state.sqlite3` automatically. Select each old directory once with `vise -o /path/to/old/downloads --interactive`; then resume its tasks from any mode. Imports preserve absolute file placement, offsets, timestamps, checksums, proxies, and cookie-file paths. SQLite sources and their WAL files are read without modification; JSON journals are backed up as `state.json.migrated`. Source markers commit with the imported tasks to prevent duplicate imports or resurrection after deletion. Conflicting task IDs or destinations fail without replacing existing history. The first imported rate fills an unset global rate; subsequent imports do not overwrite it.
+
+Keep `~/.vise/` and destination staging files available for recovery. Stop Vise cleanly before copying its SQLite database, or use a SQLite-aware backup that includes committed WAL data. Old output journals remain backups; older Vise versions do not share the new global state.
 
 Parallel range downloads require server range support and a strong ETag or Last-Modified validator. If either is unavailable, Vise uses a single streaming request and restarts that transfer when resumed. Unknown-length streams are supported.
 
@@ -295,7 +301,7 @@ WebUI mode uses the same download engine and worker pool as the CLI, and replace
 | --- | --- | --- |
 | `-c, --connections` | Maximum connections per download, 1–64 | `8` |
 | `-j, --jobs` | Simultaneous downloads, 1–64 | Configured; initially `5` |
-| `-o, --output` | Output directory | Configured; initially `~/Downloads/Vise` |
+| `-o, --output` | Default destination for new tasks; history stays global | Configured; initially `~/Downloads/Vise` |
 | `-n, --name` | Filename for one URL | Derived from URL |
 | `--retries` | Retries per segment, 0–20 | `5` |
 | `--timeout` | Idle read timeout in seconds | `30` |
@@ -306,7 +312,7 @@ WebUI mode uses the same download engine and worker pool as the CLI, and replace
 | `--cookies FILE` | Netscape cookie file for new tasks; its path is journaled for resume | Configured; initially none |
 | `-i, --interactive` | Keep the terminal queue open | Off with URL arguments |
 | `--batch` | Never read terminal input | Off |
-| `--resume-all` | Resume saved paused and failed tasks | Off |
+| `--resume-all` | Resume global paused/failed tasks at their saved paths | Off |
 | `--webui` | Start the embedded dashboard | Off |
 | `-d, --daemon` | Run the API/dashboard quietly for a service manager | Off |
 | `--bind` | Override the complete server address | Configured; initially `127.0.0.1:8080` |

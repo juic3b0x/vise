@@ -352,6 +352,8 @@ mod tests {
             id: Uuid::nil(),
             url: String::new(),
             filename: "test\n\x1b[31m.bin".into(),
+            output_path: Default::default(),
+            part_path: Default::default(),
             proxy_url: None,
             proxy_authenticated: false,
             status: Status::Completed,
@@ -382,6 +384,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let manager = Manager::open(crate::engine::Config {
             output_dir: dir.path().into(),
+            home_dir: Some(dir.path().join("test-home")),
             ..Default::default()
         })
         .await

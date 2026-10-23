@@ -31,7 +31,7 @@ struct Args {
     /// Override daemon.port from ~/.vise/config.toml
     #[arg(long, requires = "server")]
     port: Option<u16>,
-    /// Directory for downloaded files and the .vise journal
+    /// Default destination for new downloads; global state stays in ~/.vise
     #[arg(short, long)]
     output: Option<PathBuf>,
     /// Number of downloads running at once
@@ -46,7 +46,7 @@ struct Args {
     /// Idle read timeout, in seconds (not a total transfer limit)
     #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u64).range(1..))]
     timeout: u64,
-    /// Resume unfinished downloads saved in the output directory
+    /// Resume unfinished global tasks at their saved destination paths
     #[arg(long)]
     resume_all: bool,
     /// Keep the interactive command queue open even with URL arguments

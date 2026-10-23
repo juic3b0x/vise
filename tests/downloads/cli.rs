@@ -54,7 +54,7 @@ async fn interactive_sigterm_exits_without_waiting_for_stdin() {
         .spawn()
         .unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
-        while !dir.path().join(".vise/state.sqlite3").exists() {
+        while !dir.path().join("test-home/.vise/state.sqlite3").exists() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })

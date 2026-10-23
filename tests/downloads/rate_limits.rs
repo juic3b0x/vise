@@ -13,6 +13,7 @@ async fn global_rate_budget_is_shared_by_parallel_files_and_chunks() {
     let dir = tempfile::tempdir().unwrap();
     let manager = Manager::open(Config {
         output_dir: dir.path().into(),
+        home_dir: Some(dir.path().join("test-home")),
         concurrent_downloads: 2,
         connections_per_download: 2,
         limit_rate: Some("4M".parse().unwrap()),
@@ -48,6 +49,7 @@ async fn live_limits_preserve_the_open_response_and_do_not_trigger_idle_timeout(
     let dir = tempfile::tempdir().unwrap();
     let manager = Manager::open(Config {
         output_dir: dir.path().into(),
+        home_dir: Some(dir.path().join("test-home")),
         connections_per_download: 1,
         retries: 0,
         read_timeout: Duration::from_millis(200),
@@ -95,7 +97,8 @@ async fn rate_changes_are_durable_and_failed_commits_preserve_the_live_limit() {
     let original = manager(&dir, 1).await;
     let rate: RateLimit = "2M".parse().unwrap();
     original.set_rate_limit(rate).await.unwrap();
-    let connection = rusqlite::Connection::open(dir.path().join(".vise/state.sqlite3")).unwrap();
+    let connection =
+        rusqlite::Connection::open(dir.path().join("test-home/.vise/state.sqlite3")).unwrap();
     connection.execute_batch("CREATE TRIGGER reject_rate BEFORE UPDATE ON metadata WHEN NEW.key = 'limit_rate' BEGIN SELECT RAISE(ABORT, 'intentional failure'); END;").unwrap();
     assert!(
         original
@@ -116,6 +119,7 @@ async fn rate_changes_are_durable_and_failed_commits_preserve_the_live_limit() {
     drop(restored);
     let cleared = Manager::open(Config {
         output_dir: dir.path().into(),
+        home_dir: Some(dir.path().join("test-home")),
         limit_rate: Some(RateLimit::UNLIMITED),
         ..Config::default()
     })

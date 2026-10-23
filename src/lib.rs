@@ -7,6 +7,7 @@ pub mod error;
 pub mod events;
 pub mod model;
 pub mod net;
+mod paths;
 pub mod proxy;
 pub mod rate_limiter;
 pub mod telemetry;

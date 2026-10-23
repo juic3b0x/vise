@@ -21,7 +21,7 @@ async fn pause_resume_survives_process_restart() {
         first_manager.get(item.id).await.unwrap().downloaded_bytes,
         paused.downloaded_bytes
     );
-    let database = vise::database::Database::open(dir.path().join(".vise/state.sqlite3"))
+    let database = vise::database::Database::open(dir.path().join("test-home/.vise/state.sqlite3"))
         .await
         .unwrap();
     let durable = database.list().await.unwrap();
@@ -29,7 +29,8 @@ async fn pause_resume_survives_process_restart() {
     assert_eq!(durable[0].created_at, paused.created_at);
     assert_eq!(durable[0].status, Status::Paused);
     drop(database);
-    let connection = rusqlite::Connection::open(dir.path().join(".vise/state.sqlite3")).unwrap();
+    let connection =
+        rusqlite::Connection::open(dir.path().join("test-home/.vise/state.sqlite3")).unwrap();
     let expected: Vec<(usize, usize)> = connection.prepare("SELECT start_byte+downloaded_bytes,end_byte-1 FROM chunks WHERE downloaded_bytes < end_byte-start_byte ORDER BY chunk_index").unwrap()
         .query_map([], |row| Ok((row.get::<_, i64>(0)? as usize, row.get::<_, i64>(1)? as usize))).unwrap().collect::<Result<_, _>>().unwrap();
     drop(connection);
@@ -76,7 +77,7 @@ async fn abrupt_process_death_restores_durable_offsets_and_finishes_exactly() {
         .unwrap();
     let saved = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            let path = dir.path().join(".vise/state.sqlite3");
+            let path = dir.path().join("test-home/.vise/state.sqlite3");
             let saved = tokio::task::spawn_blocking(move || -> Option<(Uuid, u64)> {
                 let connection = rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
                 connection.busy_timeout(Duration::from_millis(100)).ok()?;
@@ -185,7 +186,8 @@ async fn shutdown_waits_for_all_workers_even_when_checkpointing_fails() {
     let queued = manager.add(&fixture.url, None).await.unwrap();
     progress(&manager, active.id).await;
     // Abort real SQLite updates to exercise transaction failure during shutdown.
-    let connection = rusqlite::Connection::open(dir.path().join(".vise/state.sqlite3")).unwrap();
+    let connection =
+        rusqlite::Connection::open(dir.path().join("test-home/.vise/state.sqlite3")).unwrap();
     connection.execute_batch("CREATE TRIGGER reject_updates BEFORE UPDATE ON downloads BEGIN SELECT RAISE(ABORT, 'test checkpoint failure'); END;").unwrap();
     assert!(manager.shutdown().await.is_err());
     let snapshot = manager.get(active.id).await.unwrap();
@@ -282,6 +284,7 @@ async fn invalid_legacy_json_is_preserved_and_can_be_repaired() {
     assert!(
         Manager::open(Config {
             output_dir: dir.path().into(),
+            home_dir: Some(dir.path().join("test-home")),
             ..Default::default()
         })
         .await
@@ -317,7 +320,8 @@ async fn recovers_a_published_file_before_sql_completion_without_any_http_transf
     tokio::fs::hard_link(dir.path().join(&item.filename), &part)
         .await
         .unwrap();
-    let connection = rusqlite::Connection::open(dir.path().join(".vise/state.sqlite3")).unwrap();
+    let connection =
+        rusqlite::Connection::open(dir.path().join("test-home/.vise/state.sqlite3")).unwrap();
     connection
         .execute(
             "UPDATE downloads SET status='downloading' WHERE id=?1",
@@ -332,7 +336,7 @@ async fn recovers_a_published_file_before_sql_completion_without_any_http_transf
         Status::Completed
     );
     assert!(!part.exists());
-    let database = vise::database::Database::open(dir.path().join(".vise/state.sqlite3"))
+    let database = vise::database::Database::open(dir.path().join("test-home/.vise/state.sqlite3"))
         .await
         .unwrap();
     assert_eq!(database.list().await.unwrap()[0].status, Status::Completed);

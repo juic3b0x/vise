@@ -413,6 +413,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let manager = Manager::open(crate::engine::Config {
             output_dir: dir.path().into(),
+            home_dir: Some(dir.path().join("test-home")),
             ..Default::default()
         })
         .await
@@ -475,6 +476,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let manager = Manager::open(crate::engine::Config {
             output_dir: dir.path().into(),
+            home_dir: Some(dir.path().join("test-home")),
             ..Default::default()
         })
         .await

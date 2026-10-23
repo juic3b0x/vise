@@ -116,6 +116,10 @@ pub(crate) struct Record {
     pub url: String,
     pub filename: String,
     #[serde(default)]
+    pub output_path: std::path::PathBuf,
+    #[serde(default)]
+    pub part_path: std::path::PathBuf,
+    #[serde(default)]
     pub proxy_url: Option<crate::proxy::ProxyUrl>,
     /// Local source path only; cookie values never enter journal snapshots.
     #[serde(default)]
@@ -144,6 +148,8 @@ impl Record {
             id: self.id,
             url: self.url.clone(),
             filename: self.filename.clone(),
+            output_path: self.output_path.clone(),
+            part_path: self.part_path.clone(),
             proxy_url: self
                 .proxy_url
                 .as_ref()
@@ -188,6 +194,10 @@ pub struct Download {
     pub id: Uuid,
     pub url: String,
     pub filename: String,
+    #[serde(default)]
+    pub output_path: std::path::PathBuf,
+    #[serde(default)]
+    pub part_path: std::path::PathBuf,
     /// Configured route with user information removed. Credentials stay local.
     #[serde(default)]
     pub proxy_url: Option<String>,

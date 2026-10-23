@@ -5,11 +5,19 @@ use rusqlite::{Connection, TransactionBehavior};
 use std::{path::PathBuf, time::Duration};
 
 pub(super) fn open(path: PathBuf) -> Result<State> {
-    let mut connection = Connection::open(path)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(&path)?;
+    let mut connection = Connection::open(&path)?;
     connection.busy_timeout(Duration::from_secs(5))?;
     let version = validate_identity(&connection)?;
     configure(&connection)?;
-    migrate(&mut connection, version)?;
+    migrate(&mut connection, version, &path)?;
     check_integrity(&connection)?;
     let saved = read_records(&mut connection)?
         .into_iter()
@@ -18,7 +26,7 @@ pub(super) fn open(path: PathBuf) -> Result<State> {
     Ok(State { connection, saved })
 }
 
-fn validate_identity(connection: &Connection) -> Result<i32> {
+pub(super) fn validate_identity(connection: &Connection) -> Result<i32> {
     let application: i32 =
         connection.pragma_query_value(None, "application_id", |row| row.get(0))?;
     let version: i32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
@@ -51,7 +59,7 @@ fn configure(connection: &Connection) -> Result<()> {
     let mode: String = connection.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
     if !mode.eq_ignore_ascii_case("wal") {
         return Err(Error::Invalid(
-            "SQLite journal requires WAL support on the output filesystem".into(),
+            "SQLite journal requires WAL support on the home filesystem".into(),
         ));
     }
     connection.pragma_update(None, "synchronous", "FULL")?;
@@ -59,11 +67,14 @@ fn configure(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn migrate(connection: &mut Connection, version: i32) -> Result<()> {
+pub(super) fn migrate(
+    connection: &mut Connection,
+    version: i32,
+    path: &std::path::Path,
+) -> Result<()> {
     match version {
         0 => initialize(connection),
-        1 => migrate_v1(connection),
-        2 | 3 => migrate_metadata(connection, version),
+        1..=4 => super::migration::upgrade_paths(connection, version, path),
         _ => Ok(()),
     }
 }
@@ -78,44 +89,7 @@ fn initialize(connection: &mut Connection) -> Result<()> {
     Ok(())
 }
 
-fn migrate_v1(connection: &mut Connection) -> Result<()> {
-    // Rebuild the parent to extend its CHECK constraint. Foreign keys
-    // are disabled only outside the migration transaction; chunk rows
-    // and their references keep their original table name throughout.
-    connection.pragma_update(None, "foreign_keys", "OFF")?;
-    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    transaction.execute_batch(
-        &DOWNLOADS_SCHEMA.replace("CREATE TABLE downloads (", "CREATE TABLE downloads_new ("),
-    )?;
-    transaction.execute_batch("INSERT INTO downloads_new(id,url,output_path,total_size,status,created_at,updated_at,ranged,validator,error) SELECT id,url,output_path,total_size,status,created_at,updated_at,ranged,validator,error FROM downloads;
-        DROP TABLE downloads; ALTER TABLE downloads_new RENAME TO downloads;
-        CREATE INDEX downloads_status ON downloads(status);")?;
-    let violation = transaction
-        .prepare("PRAGMA foreign_key_check")?
-        .exists([])?;
-    if violation {
-        return Err(Error::Invalid(
-            "foreign-key violation during journal migration".into(),
-        ));
-    }
-    transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-    transaction.commit()?;
-    connection.pragma_update(None, "foreign_keys", "ON")?;
-    Ok(())
-}
-
-fn migrate_metadata(connection: &mut Connection, version: i32) -> Result<()> {
-    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    if version == 2 {
-        transaction.execute_batch("ALTER TABLE downloads ADD COLUMN proxy_url TEXT")?;
-    }
-    transaction.execute_batch("ALTER TABLE downloads ADD COLUMN cookies_file TEXT")?;
-    transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-    transaction.commit()?;
-    Ok(())
-}
-
-fn check_integrity(connection: &Connection) -> Result<()> {
+pub(super) fn check_integrity(connection: &Connection) -> Result<()> {
     let check: String = connection.query_row("PRAGMA quick_check(1)", [], |row| row.get(0))?;
     if check != "ok" {
         return Err(Error::Invalid(format!(

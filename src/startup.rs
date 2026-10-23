@@ -58,6 +58,7 @@ fn resolve(
         None => configured_rate(file.downloads.global_speed_limit_kbps)?,
     };
     let engine = Config {
+        home_dir: Some(loaded.home.clone()),
         output_dir: config::expand_home(
             args.output
                 .as_deref()
@@ -68,7 +69,8 @@ fn resolve(
         connections_per_download: args.connections as usize,
         retries: args.retries,
         read_timeout: Duration::from_secs(args.timeout),
-        limit_rate: Some(limit_rate),
+        limit_rate: (args.limit_rate.is_some() || file.downloads.global_speed_limit_kbps != 0)
+            .then_some(limit_rate),
         proxy_url,
         cookies_file: args
             .cookies
