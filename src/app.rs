@@ -1,5 +1,6 @@
 //! Controller supervision and ordered shutdown for CLI, WebUI, and daemon sessions.
 use super::Args;
+use anyhow::Context;
 use std::{error::Error, future::Future, net::SocketAddr};
 use tokio::task::{JoinError, JoinHandle};
 use tokio_util::sync::CancellationToken;
@@ -18,7 +19,7 @@ pub(super) async fn run_session(
     expected: ExpectedChecksums,
     controller: Controller,
 ) -> anyhow::Result<u8> {
-    let mut background = Background::start(&manager, args.webui);
+    let mut background = Background::start(&manager, args.webui)?;
     let result = async {
         seed_queue(&manager, args, expected).await?;
         let controller = run_controller(&manager, interactive, background.stop.clone(), controller);
@@ -84,7 +85,11 @@ struct Background {
 }
 
 impl Background {
-    fn start(manager: &Manager, webui: bool) -> Self {
+    fn start(manager: &Manager, webui: bool) -> anyhow::Result<Self> {
+        // Register OS listeners before a controller can accept commands. Merely
+        // spawning an async registration task leaves a startup window in which
+        // SIGTERM still invokes the operating system's default termination.
+        let shutdown = shutdown_signal().context("cannot install shutdown signal handlers")?;
         let stop = CancellationToken::new();
         let telemetry_stop = CancellationToken::new();
         // Subscribe before seeding so even an immediately completed task is logged.
@@ -105,12 +110,10 @@ impl Background {
         let monitor = tokio::spawn(async move { monitor_manager.monitor(token).await });
         let signal_stop = stop.clone();
         let signal = tokio::spawn(async move {
-            if let Err(error) = shutdown_signal().await {
-                tracing::error!(%error, "cannot install shutdown signal handler");
-            }
+            shutdown.await;
             signal_stop.cancel();
         });
-        Self {
+        Ok(Self {
             stop,
             monitor_stop,
             telemetry_stop,
@@ -119,7 +122,7 @@ impl Background {
             signal,
             monitor_consumed: false,
             terminal_consumed: false,
-        }
+        })
     }
 
     async fn supervise(
@@ -201,13 +204,20 @@ fn publish_shutdown(manager: &Manager, result: &vise::error::Result<()>) {
     }
 }
 
-async fn shutdown_signal() -> std::io::Result<()> {
-    #[cfg(unix)]
-    {
-        let mut terminate =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-        tokio::select! { result = tokio::signal::ctrl_c() => result, _ = terminate.recv() => Ok(()) }
-    }
-    #[cfg(not(unix))]
-    tokio::signal::ctrl_c().await
+#[cfg(unix)]
+fn shutdown_signal() -> std::io::Result<impl Future<Output = ()>> {
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut interrupt = signal(SignalKind::interrupt())?;
+    let mut terminate = signal(SignalKind::terminate())?;
+    Ok(async move {
+        tokio::select! { _ = interrupt.recv() => (), _ = terminate.recv() => () }
+    })
+}
+
+#[cfg(windows)]
+fn shutdown_signal() -> std::io::Result<impl Future<Output = ()>> {
+    let mut interrupt = tokio::signal::windows::ctrl_c()?;
+    Ok(async move {
+        interrupt.recv().await;
+    })
 }

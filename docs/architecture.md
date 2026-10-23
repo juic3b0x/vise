@@ -2,6 +2,8 @@
 
 Vise uses one shared download manager for its CLI, WebUI, and daemon.
 
+Shutdown signal listeners are registered synchronously after manager initialization and before queue seeding or controller startup. SIGINT and SIGTERM cancel Unix sessions; the Windows listener handles Ctrl+C. Registration failures stop startup before background tasks begin. Controllers cannot accept commands before their listeners are installed, so graceful shutdown does not depend on the signal-waiting task being scheduled first.
+
 ## Execution modes
 
 Default CLI sessions use Indicatif and optional interactive input. `--webui` runs a loopback-only Axum server with a terminal telemetry bridge. `-d` / `--daemon` runs the same Axum routes and shared manager quietly in the foreground for a service manager, without the stdin thread, progress bars, or terminal telemetry task. All modes use the existing Tokio runtime, SQLite WAL initialization, ordered shutdown, and crash recovery; WAL permits external readers while Vise serializes its own transactional writes. A global home-directory lock admits one engine cache/worker pool per user; staging locks also exclude older per-directory engines.
