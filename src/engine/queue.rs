@@ -9,7 +9,7 @@ use crate::{
     error::{Error, Result},
     events::EventKind,
     model::{Download, Record, Status, timestamp_millis},
-    net,
+    net, paths,
 };
 use std::sync::{Arc, atomic::Ordering};
 use tokio::fs;
@@ -71,25 +71,15 @@ impl Manager {
             }
             None => default_filename(&url),
         };
+        let (output, staging) =
+            super::storage::admission_directories(self.0.config.output_dir.clone()).await?;
         let mut jobs = self.0.jobs.write().await;
         let used: Vec<_> = jobs.values().cloned().collect();
         let mut paths = Vec::new();
         for job in used {
             paths.push(job.output_path.clone());
         }
-        let mut name = base.clone();
-        let mut suffix = 1;
-        while self.0.config.output_dir.join(&name).exists()
-            || paths.contains(&self.0.config.output_dir.join(&name))
-        {
-            if filename.is_some() {
-                return Err(Error::Conflict(format!(
-                    "output filename already in use: {name}"
-                )));
-            }
-            name = numbered_filename(&base, suffix);
-            suffix += 1;
-        }
+        let (name, target) = destination(&output, &base, filename.is_some(), &paths).await?;
         let id = Uuid::new_v4();
         jobs.insert(
             id,
@@ -97,14 +87,9 @@ impl Manager {
                 Record {
                     id,
                     url: url.into(),
-                    output_path: self.0.config.output_dir.join(&name),
+                    output_path: target,
                     filename: name,
-                    part_path: self
-                        .0
-                        .config
-                        .output_dir
-                        .join(".vise")
-                        .join(format!("{id}.part")),
+                    part_path: paths::bounded_file(&staging, &format!("{id}.part"))?,
                     proxy_url,
                     cookies_file,
                     status: Status::Paused,
@@ -259,6 +244,10 @@ impl Manager {
             run.handle.await.map_err(|e| Error::Worker(e.to_string()))?;
         }
         let snapshot = job.record.read().await.snapshot();
+        let record = job.record.read().await.clone();
+        let staging = tokio::task::spawn_blocking(move || paths::staging_files(&record))
+            .await
+            .map_err(|error| Error::Worker(error.to_string()))??;
         {
             // Serialize removal with checkpoints and destructive file resets.
             let _checkpoint = self.0.checkpoint.lock().await;
@@ -270,10 +259,7 @@ impl Manager {
                 return Err(error);
             }
         }
-        for path in [
-            job.part_path.clone(),
-            super::journal::publication_path(&job.part_path),
-        ] {
+        for path in staging.into_iter().flatten() {
             match fs::remove_file(path).await {
                 Ok(()) => (),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
@@ -343,6 +329,38 @@ impl Manager {
                 .await
                 .is_ok_and(|item| matches!(item.status, Status::Completed | Status::Corrupt));
         if settled { Ok(()) } else { Err(error) }
+    }
+}
+
+async fn destination(
+    root: &std::path::Path,
+    base: &str,
+    explicit: bool,
+    used: &[std::path::PathBuf],
+) -> Result<(String, std::path::PathBuf)> {
+    let mut name = base.to_owned();
+    let mut suffix = 1;
+    loop {
+        validate_filename(&name)?;
+        let target = paths::bounded_file(root, &name)?;
+        if !occupied(&target).await? && !used.contains(&target) {
+            return Ok((name, target));
+        }
+        if explicit {
+            return Err(Error::Conflict(format!(
+                "output filename already in use: {name}"
+            )));
+        }
+        name = numbered_filename(base, suffix);
+        suffix += 1;
+    }
+}
+
+async fn occupied(path: &std::path::Path) -> Result<bool> {
+    match fs::symlink_metadata(path).await {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
     }
 }
 

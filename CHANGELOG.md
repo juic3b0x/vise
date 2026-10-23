@@ -2,6 +2,18 @@
 
 All notable changes to Vise are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.4.2] - 2026-10-22
+
+### Security
+
+- Validate absolute canonical directory identities, existence, and directory type before journal synchronization. Reject traversal and substituted symlinks before filesystem operations.
+- Bound queue filenames and UUID-derived staging paths to their expected directories. Validate stored layouts and existing staging files before checkpoints or deletion; reject symlinks without removing task history or unrelated files.
+
+### Fixed
+
+- Treat dangling output symlinks as occupied filenames and preserve actionable I/O errors during collision checks. Keep filesystem validation on the blocking pool and tolerate staging paths disappearing during awaited publication.
+- Add regression coverage for traversal, absolute-path injection, directory/file type mismatches, symlink substitution, missing destinations, and queue/journal preservation after rejected operations.
+
 ## [0.4.1] - 2026-10-22
 
 ### Fixed
@@ -104,6 +116,7 @@ Initial release.
 - **Local WebUI safeguards:** Loopback-only binding, host and browser-origin validation, JSON-only mutations, and a Content Security Policy constrain browser access.
 - **Safe publication:** Existing output files are never overwritten, and configured checksum verification must succeed before final publication. SHA-256 from a trusted source is preferred for security-sensitive verification; MD5 supports legacy compatibility and accidental-corruption detection.
 
+[0.4.2]: https://github.com/juic3b0x/vise/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/juic3b0x/vise/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/juic3b0x/vise/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/juic3b0x/vise/compare/v0.2.0...v0.3.0

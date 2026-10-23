@@ -8,6 +8,11 @@ use std::{
     path::{Component, Path},
 };
 
+mod checked;
+pub(crate) use checked::{bounded_file, directory, staging_files};
+#[cfg(test)]
+mod tests;
+
 pub(crate) fn private_directory(path: &Path) -> std::io::Result<()> {
     let mut builder = fs::DirBuilder::new();
     builder.recursive(true);
