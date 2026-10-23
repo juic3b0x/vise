@@ -144,6 +144,8 @@ impl Manager {
         if cancel.is_cancelled() {
             return Err(Error::Cancelled);
         }
+        // Close the staging handle before changing its name (notably on Windows).
+        drop(file);
         fs::hard_link(&path, &target).await.map_err(|e| {
             if e.kind() == std::io::ErrorKind::AlreadyExists {
                 Error::Conflict(format!("output already exists: {}", target.display()))
@@ -152,6 +154,11 @@ impl Manager {
             }
         })?;
         sync_directory(super::storage::parent(&target)?.to_path_buf()).await?;
+        // Await the staging rename before execute succeeds and the queue can
+        // expose Completed. Retain the same-inode evidence under a private name
+        // until SQLite commits, so a crash here is recoverable without HTTP.
+        fs::rename(&path, super::journal::publication_path(&path)).await?;
+        sync_directory(super::storage::parent(&path)?.to_path_buf()).await?;
         Ok(())
     }
 
@@ -503,8 +510,7 @@ mod tests {
     use super::*;
     use crate::engine::Config;
 
-    #[tokio::test]
-    async fn missing_chunks_fail_workers_and_do_not_commit_progress() {
+    async fn staged_job() -> (tempfile::TempDir, Manager, Arc<Job>) {
         let dir = tempfile::tempdir().unwrap();
         let manager = Manager::open(Config {
             output_dir: dir.path().into(),
@@ -540,6 +546,12 @@ mod tests {
             },
             reqwest::Client::new(),
         ));
+        (dir, manager, job)
+    }
+
+    #[tokio::test]
+    async fn missing_chunks_fail_workers_and_do_not_commit_progress() {
+        let (_dir, manager, job) = staged_job().await;
         let cancel = CancellationToken::new();
         for index in [1, usize::MAX] {
             assert!(
@@ -563,6 +575,50 @@ mod tests {
         ));
         assert_eq!(pending.as_ref(), b"abc");
         assert_eq!(chunk_at(&*job.record.read().await, 0).unwrap().written, 0);
+        manager.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn publication_finishes_staging_rename_before_returning() {
+        let (_dir, manager, job) = staged_job().await;
+        manager
+            .0
+            .jobs
+            .write()
+            .await
+            .insert(job.record.read().await.id, job.clone());
+        chunk_at_mut(&mut *job.record.write().await, 0)
+            .unwrap()
+            .written = 3;
+        let mut file = fs::File::create(&job.part_path).await.unwrap();
+        file.write_all(b"abc").await.unwrap();
+        manager
+            .publish_file(&job, file, job.part_path.clone(), &CancellationToken::new())
+            .await
+            .unwrap();
+        // No polling here: publish_file must await this rename, independently of
+        // queue scheduling, SQL completion, or any later cleanup task.
+        assert!(!job.part_path.try_exists().unwrap());
+        assert_eq!(fs::read(&job.output_path).await.unwrap(), b"abc");
+        assert!(
+            same_file::is_same_file(
+                &job.output_path,
+                super::super::journal::publication_path(&job.part_path)
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            manager
+                .0
+                .database
+                .list()
+                .await
+                .unwrap()
+                .first()
+                .unwrap()
+                .status,
+            Status::Downloading
+        );
         manager.shutdown().await.unwrap();
     }
 }

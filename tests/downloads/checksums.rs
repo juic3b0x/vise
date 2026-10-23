@@ -191,7 +191,7 @@ async fn explicit_hashes_override_metadata_and_md5_mismatch_alone_blocks_publica
 
 #[tokio::test]
 async fn interrupted_publication_rechecks_hashes_before_recovering_or_retracting_the_target() {
-    for tamper in [false, true] {
+    for (tamper, renamed) in [(false, false), (true, false), (false, true), (true, true)] {
         let fixture = Fixture::start(Mode::Ranges).await;
         let dir = tempfile::tempdir().unwrap();
         let original = manager(&dir, 2).await;
@@ -205,6 +205,13 @@ async fn interrupted_publication_rechecks_hashes_before_recovering_or_retracting
         let part = dir.path().join(format!(".vise/{}.part", item.id));
         let target = dir.path().join(&item.filename);
         tokio::fs::hard_link(&target, &part).await.unwrap();
+        let evidence = part.with_extension("published");
+        let staging = if renamed {
+            tokio::fs::rename(&part, &evidence).await.unwrap();
+            &evidence
+        } else {
+            &part
+        };
         let connection =
             rusqlite::Connection::open(dir.path().join("test-home/.vise/state.sqlite3")).unwrap();
         connection
@@ -218,7 +225,7 @@ async fn interrupted_publication_rechecks_hashes_before_recovering_or_retracting
             use tokio::io::AsyncWriteExt;
             let mut file = tokio::fs::OpenOptions::new()
                 .write(true)
-                .open(&part)
+                .open(staging)
                 .await
                 .unwrap();
             file.write_all(b"corrupt bytes").await.unwrap();
@@ -236,6 +243,7 @@ async fn interrupted_publication_rechecks_hashes_before_recovering_or_retracting
             }
         );
         assert_eq!(part.exists(), tamper);
+        assert!(!evidence.exists());
         assert_eq!(target.exists(), !tamper);
         assert_eq!(requests, fixture.state.ranges.lock().unwrap().len());
         assert_eq!(saved.checksums.verified_at.is_some(), !tamper);

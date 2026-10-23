@@ -196,61 +196,7 @@ impl Manager {
             let result = manager
                 .execute(worker_job.clone(), worker_cancel.clone())
                 .await;
-            let event = {
-                let mut record = worker_job.record.write().await;
-                let kind = match result {
-                    Ok(()) => {
-                        record.status = Status::Completed;
-                        EventKind::Completed
-                    }
-                    Err(Error::Cancelled) => {
-                        record.status = Status::Paused;
-                        EventKind::Paused
-                    }
-                    Err(error @ Error::ChecksumMismatch(_)) => {
-                        record.status = Status::Corrupt;
-                        record.error = Some(error.to_string());
-                        tracing::error!(%id, %error, "download checksum verification failed; staging file retained");
-                        EventKind::Corrupt
-                    }
-                    Err(error) => {
-                        record.status = Status::Failed;
-                        record.error = Some(error.to_string());
-                        EventKind::Failed
-                    }
-                };
-                record.speed = 0.0;
-                normalize_chunks(&mut record);
-                (kind, record.snapshot())
-            };
-            manager.notify();
-            if let Err(error) = manager.checkpoint().await {
-                tracing::error!(%id, %error, "cannot persist download state");
-                worker_job.record.write().await.error =
-                    Some(format!("cannot persist state: {error}"));
-                manager
-                    .publish_job(
-                        EventKind::Warning {
-                            message: format!("cannot persist state: {error}"),
-                        },
-                        &worker_job,
-                    )
-                    .await;
-            } else if worker_job.record.read().await.status == Status::Completed
-                && let Err(error) = fs::remove_file(&worker_job.part_path).await
-            {
-                tracing::warn!(%id, %error, "cannot remove completed partial file");
-                manager
-                    .publish_job(
-                        EventKind::Warning {
-                            message: format!("cannot remove completed partial file: {error}"),
-                        },
-                        &worker_job,
-                    )
-                    .await;
-            }
-            manager.publish(event.0, Some(event.1));
-            manager.notify();
+            manager.finish(&worker_job, result).await;
         });
         *job.run.lock().await = Some(Run { cancel, handle });
         self.notify();
@@ -324,17 +270,22 @@ impl Manager {
                 return Err(error);
             }
         }
-        match fs::remove_file(&job.part_path).await {
-            Ok(()) => (),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
-            Err(error) => self.publish(
-                EventKind::Warning {
-                    message: format!(
-                        "queue entry removed but partial-file cleanup failed: {error}"
-                    ),
-                },
-                Some(snapshot.clone()),
-            ),
+        for path in [
+            job.part_path.clone(),
+            super::journal::publication_path(&job.part_path),
+        ] {
+            match fs::remove_file(path).await {
+                Ok(()) => (),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+                Err(error) => self.publish(
+                    EventKind::Warning {
+                        message: format!(
+                            "queue entry removed but partial-file cleanup failed: {error}"
+                        ),
+                    },
+                    Some(snapshot.clone()),
+                ),
+            }
         }
         self.publish(EventKind::Deleted, Some(snapshot));
         self.notify();

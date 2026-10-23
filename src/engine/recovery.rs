@@ -98,6 +98,7 @@ async fn recover_record(
         }
         return Ok(record);
     }
+    restore_publication_evidence(&part, completed_parts).await?;
     recover_publication(&mut record, &part, &target, corrupt_targets).await?;
     if record.status == Status::Completed {
         recover_completed(&mut record, &part, &target, completed_parts);
@@ -106,6 +107,30 @@ async fn recover_record(
     }
     normalize_chunks(&mut record);
     Ok(record)
+}
+
+async fn restore_publication_evidence(part: &Path, cleanup: &mut Vec<PathBuf>) -> Result<()> {
+    let evidence = super::journal::publication_path(part);
+    // Restore the original staging name for the existing same-file and checksum
+    // recovery checks. Keep evidence until the recovered state commits to SQLite.
+    match fs::hard_link(&evidence, part).await {
+        Ok(()) => (),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            if !evidence.try_exists()? {
+                return Ok(());
+            }
+            if !same_file::is_same_file(&evidence, part)? {
+                return Err(Error::Conflict(format!(
+                    "publication recovery link differs from staging file: {}",
+                    part.display()
+                )));
+            }
+        }
+        Err(error) => return Err(error.into()),
+    }
+    cleanup.push(evidence);
+    Ok(())
 }
 
 async fn recover_publication(
@@ -248,7 +273,8 @@ async fn cleanup_recovered(
     corrupt_targets: Vec<PathBuf>,
 ) -> Result<()> {
     for part in completed_parts {
-        fs::remove_file(part).await?;
+        fs::remove_file(&part).await?;
+        sync_directory(super::storage::parent(&part)?.to_path_buf()).await?;
     }
     if !corrupt_targets.is_empty() {
         for target in corrupt_targets {

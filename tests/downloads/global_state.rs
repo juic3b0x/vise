@@ -1,6 +1,6 @@
 //! Cross-directory history, legacy imports, and global engine ownership.
 use super::fixture::{self, Fixture, Mode, progress, terminal};
-use std::path::Path;
+use std::{path::Path, time::Duration};
 use uuid::Uuid;
 use vise::{
     engine::{Config, Manager},
@@ -15,6 +15,25 @@ fn config(home: &Path, output: &Path) -> Config {
         connections_per_download: 1,
         ..Config::default()
     }
+}
+
+async fn assert_part_removed(path: &Path) {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match tokio::fs::symlink_metadata(path).await {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+                Err(error) => panic!("cannot inspect staging path {}: {error}", path.display()),
+                Ok(_) => tokio::time::sleep(Duration::from_millis(20)).await,
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "staging path still exists after completion: {}",
+            path.display()
+        )
+    });
 }
 
 #[tokio::test]
@@ -58,12 +77,167 @@ async fn changing_output_preserves_destinations_offsets_history_and_the_global_l
             tokio::fs::read(&done.output_path).await.unwrap(),
             fixture.state.data
         );
-        assert!(!done.part_path.exists());
+        assert_part_removed(&done.part_path).await;
     }
     assert_eq!(second.list().await.len(), 2);
     assert!(!first_dir.join(".vise/state.sqlite3").exists());
     assert!(!second_dir.join(".vise/state.sqlite3").exists());
     second.shutdown().await.unwrap();
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn completion_event_observes_committed_output_and_no_staging_file() {
+    let fixture = Fixture::start(Mode::Ranges).await;
+    let root = tempfile::tempdir().unwrap();
+    let manager = Manager::open(config(
+        &root.path().join("home"),
+        &root.path().join("output"),
+    ))
+    .await
+    .unwrap();
+    let mut events = manager.subscribe_events();
+    let task = manager.add(&fixture.url, None).await.unwrap();
+    let done = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let event = events.recv().await.unwrap();
+            if event.kind == vise::events::EventKind::Completed {
+                let done = event.download.unwrap();
+                if done.id == task.id {
+                    break done;
+                }
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(done.status, Status::Completed);
+    assert_eq!(
+        tokio::fs::read(&done.output_path).await.unwrap(),
+        fixture.state.data
+    );
+    assert_part_removed(&done.part_path).await;
+    assert_part_removed(&done.part_path.with_extension("published")).await;
+    let database = vise::database::Database::open(manager.database_path())
+        .await
+        .unwrap();
+    let saved = database
+        .list()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|item| item.id == done.id)
+        .unwrap();
+    assert_eq!(saved.status, Status::Completed);
+    manager.shutdown().await.unwrap();
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn failed_completion_commit_emits_no_success_and_recovers_the_published_file() {
+    let fixture = Fixture::start(Mode::SlowRanges).await;
+    let root = tempfile::tempdir().unwrap();
+    let settings = config(&root.path().join("home"), &root.path().join("output"));
+    let first = Manager::open(settings.clone()).await.unwrap();
+    let task = first.add(&fixture.url, None).await.unwrap();
+    progress(&first, task.id).await;
+    first.pause(task.id).await.unwrap();
+    let connection = rusqlite::Connection::open(first.database_path()).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER reject_completion BEFORE UPDATE OF status ON downloads
+        WHEN NEW.status='completed' BEGIN SELECT RAISE(ABORT, 'injected completion failure'); END;",
+        )
+        .unwrap();
+    let mut events = first.subscribe_events();
+    first.resume(task.id).await.unwrap();
+    let failed = terminal(&first, task.id).await;
+    assert_eq!(failed.status, Status::Failed);
+    assert!(
+        failed
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("injected completion failure")
+    );
+    first.shutdown().await.unwrap();
+    while let Ok(event) = events.try_recv() {
+        assert_ne!(event.kind, vise::events::EventKind::Completed);
+    }
+    assert_part_removed(&failed.part_path).await;
+    let evidence = failed.part_path.with_extension("published");
+    assert!(same_file::is_same_file(&failed.output_path, &evidence).unwrap());
+    connection
+        .execute_batch("DROP TRIGGER reject_completion;")
+        .unwrap();
+    drop(connection);
+    drop(first);
+    let requests = fixture.state.ranges.lock().unwrap().len();
+    let recovered = Manager::open(settings).await.unwrap();
+    assert_eq!(
+        recovered.get(task.id).await.unwrap().status,
+        Status::Completed
+    );
+    assert_part_removed(&failed.part_path).await;
+    assert_part_removed(&evidence).await;
+    assert_eq!(
+        tokio::fs::read(&failed.output_path).await.unwrap(),
+        fixture.state.data
+    );
+    assert_eq!(requests, fixture.state.ranges.lock().unwrap().len());
+    recovered.shutdown().await.unwrap();
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn renamed_publication_recovers_on_either_side_of_the_sql_commit() {
+    let fixture = Fixture::start(Mode::Ranges).await;
+    for (status, restore_started) in [
+        ("downloading", false),
+        ("downloading", true),
+        ("completed", false),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let settings = config(&root.path().join("home"), &root.path().join("output"));
+        let first = Manager::open(settings.clone()).await.unwrap();
+        let task = first.add(&fixture.url, None).await.unwrap();
+        let done = terminal(&first, task.id).await;
+        assert_eq!(done.status, Status::Completed, "{:?}", done.error);
+        first.shutdown().await.unwrap();
+        let database_path = first.database_path().to_path_buf();
+        drop(first);
+        let evidence = done.part_path.with_extension("published");
+        tokio::fs::hard_link(&done.output_path, &evidence)
+            .await
+            .unwrap();
+        if restore_started {
+            tokio::fs::hard_link(&evidence, &done.part_path)
+                .await
+                .unwrap();
+        }
+        let connection = rusqlite::Connection::open(database_path).unwrap();
+        connection
+            .execute(
+                "UPDATE downloads SET status=?1 WHERE id=?2",
+                [status, &task.id.to_string()],
+            )
+            .unwrap();
+        drop(connection);
+        let requests = fixture.state.ranges.lock().unwrap().len();
+        let manager = Manager::open(settings).await.unwrap();
+        assert_eq!(
+            manager.get(task.id).await.unwrap().status,
+            Status::Completed
+        );
+        assert_part_removed(&done.part_path).await;
+        assert_part_removed(&evidence).await;
+        assert_eq!(
+            tokio::fs::read(&done.output_path).await.unwrap(),
+            fixture.state.data
+        );
+        assert_eq!(requests, fixture.state.ranges.lock().unwrap().len());
+        manager.shutdown().await.unwrap();
+    }
     fixture.close().await;
 }
 

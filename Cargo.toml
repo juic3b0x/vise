@@ -1,6 +1,6 @@
 [package]
 name = "vise"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 rust-version = "1.88"
 description = "A resumable concurrent download manager with a CLI and optional local WebUI"

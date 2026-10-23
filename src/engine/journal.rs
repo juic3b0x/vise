@@ -2,7 +2,7 @@ use super::Manager;
 use crate::{error::Result, model::Status};
 use std::{
     collections::BTreeMap,
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 use tokio::fs;
@@ -84,6 +84,11 @@ impl Manager {
         sync_directory(super::storage::parent(self.0.database.path())?.to_path_buf()).await?;
         Ok(())
     }
+}
+
+/// Recovery evidence between the awaited staging rename and the SQL commit.
+pub(super) fn publication_path(part: &Path) -> PathBuf {
+    part.with_extension("published")
 }
 
 pub(super) async fn sync_directory(path: PathBuf) -> Result<()> {
