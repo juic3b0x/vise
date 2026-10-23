@@ -2,6 +2,17 @@
 
 All notable changes to Vise are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.4.3] - 2026-10-22
+
+### Security
+
+- Compare fixed-size daemon token SHA-256 fingerprints with `subtle::ConstantTimeEq` for both Bearer and browser Basic authentication, replacing the hand-written byte comparison. Reuse the existing `subtle` version already resolved by TLS dependencies.
+- Document that `VISE_API_TOKEN` is a randomly generated bearer credential rather than a user password. Custom tokens must come from a cryptographically secure generator; format validation alone does not establish entropy.
+
+### Fixed
+
+- Add authentication regressions for every digest-byte mismatch, minimum and maximum token lengths, prefixes, appended bytes, empty values, and case differences.
+
 ## [0.4.2] - 2026-10-22
 
 ### Security
@@ -117,6 +128,7 @@ Initial release.
 - **Local WebUI safeguards:** Loopback-only binding, host and browser-origin validation, JSON-only mutations, and a Content Security Policy constrain browser access.
 - **Safe publication:** Existing output files are never overwritten, and configured checksum verification must succeed before final publication. SHA-256 from a trusted source is preferred for security-sensitive verification; MD5 supports legacy compatibility and accidental-corruption detection.
 
+[0.4.3]: https://github.com/juic3b0x/vise/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/juic3b0x/vise/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/juic3b0x/vise/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/juic3b0x/vise/compare/v0.3.0...v0.4.0

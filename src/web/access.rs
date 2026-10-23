@@ -8,7 +8,10 @@ use axum::{
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 
+/// A fixed-size fingerprint of a high-entropy bearer credential. Do not derive
+/// Debug or serialize this authentication state.
 #[derive(Clone)]
 pub(super) struct Token([u8; 32]);
 
@@ -21,16 +24,21 @@ impl Token {
                     .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'),
             "VISE_API_TOKEN must contain 32–256 ASCII letters, digits, '-' or '_'"
         );
+        // VISE_API_TOKEN is a random bearer credential, not a human password;
+        // HTTP Basic only transports the same token for browser authentication.
+        // Generated configuration uses CSPRNG-backed UUIDs. Custom tokens must
+        // also be randomly generated: the format check above cannot prove entropy.
+        // SHA-256 gives fixed-size fingerprints for constant-time verification.
+        // CodeQL rust/weak-sensitive-data-hashing can misclassify the api_token
+        // configuration field as a password; this is not password storage.
         Ok(Self(Sha256::digest(value.as_bytes()).into()))
     }
 
     fn matches(&self, value: &[u8]) -> bool {
-        let actual = Sha256::digest(value);
-        self.0
-            .iter()
-            .zip(actual)
-            .fold(0u8, |difference, (a, b)| difference | (a ^ b))
-            == 0
+        let actual: [u8; 32] = Sha256::digest(value).into();
+        // Both inputs are always 32 bytes, so ct_eq cannot take its unequal-length
+        // shortcut. Convert Choice to bool only after comparing the entire digest.
+        bool::from(self.0.as_slice().ct_eq(actual.as_slice()))
     }
 
     fn authorized(&self, headers: &HeaderMap) -> bool {
@@ -178,6 +186,37 @@ mod tests {
     use super::*;
 
     const SECRET: &str = "synthetic-test-token-0123456789abcdef";
+
+    #[test]
+    fn token_fingerprints_reject_differences_at_every_digest_position() {
+        let token = Token::new(SECRET.into()).unwrap();
+        assert!(token.matches(SECRET.as_bytes()));
+        for index in 0..32 {
+            let mut different = token.clone();
+            *different.0.get_mut(index).unwrap() ^= 1;
+            assert!(
+                !different.matches(SECRET.as_bytes()),
+                "accepted digest mismatch at {index}"
+            );
+        }
+    }
+
+    #[test]
+    fn token_verification_handles_length_boundaries_and_rejects_prefixes() {
+        // Synthetic credentials exercise validation boundaries, not entropy.
+        for length in [32, 64, 256] {
+            let value = "a".repeat(length);
+            let token = Token::new(value.clone()).unwrap();
+            assert!(token.matches(value.as_bytes()));
+            assert!(!token.matches(value.as_bytes().get(..length - 1).unwrap()));
+            assert!(!token.matches(format!("{value}a").as_bytes()));
+            assert!(!token.matches(b""));
+            assert!(!token.matches(value.to_ascii_uppercase().as_bytes()));
+        }
+        for length in [31, 257] {
+            assert!(Token::new("a".repeat(length)).is_err());
+        }
+    }
 
     #[test]
     fn extension_requests_require_explicit_bearer_authentication() {
