@@ -1,0 +1,126 @@
+:root {
+  --md-text-font: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --md-code-font: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+}
+
+[data-md-color-scheme="slate"] {
+  --md-default-bg-color: #111517;
+  --md-default-fg-color: #e5e9e8;
+  --md-default-fg-color--light: #b6bfbc;
+  --md-primary-fg-color: #171d20;
+  --md-primary-bg-color: #edf3ef;
+  --md-accent-fg-color: #c6f36b;
+  --md-typeset-a-color: #c6f36b;
+  --md-code-bg-color: #191f22;
+  --md-code-fg-color: #e5e9e8;
+}
+
+.md-header,
+.md-tabs {
+  border-bottom: 1px solid #2b3436;
+}
+
+.md-header__button.md-logo img {
+  height: 1.8rem;
+  width: 1.8rem;
+  object-fit: contain;
+}
+
+.md-typeset h1,
+.md-typeset h2,
+.md-typeset h3 {
+  color: #f0f4f1;
+  font-weight: 650;
+}
+
+.md-typeset .vise-hero {
+  margin: .5rem 0 2rem;
+  padding: clamp(1.4rem, 5vw, 3.2rem);
+  border: 1px solid #3d4b42;
+  border-top: 3px solid #c6f36b;
+  background: radial-gradient(ellipse at top right, #283425 0, #171e20 65%);
+}
+
+.vise-hero > p:first-child {
+  margin-top: 0;
+}
+
+.vise-hero img {
+  display: block;
+  width: 96px;
+  height: 96px;
+  object-fit: contain;
+  margin-bottom: 1.5rem;
+}
+
+.md-typeset .vise-hero h1 {
+  margin: .5rem 0;
+  font-size: clamp(2.3rem, 7vw, 4.2rem);
+  letter-spacing: -.05em;
+  line-height: 1.05;
+}
+
+.md-typeset .vise-hero .vise-tagline {
+  margin: .6rem 0 1rem;
+  color: #c6f36b;
+  font-size: clamp(1.1rem, 3vw, 1.55rem);
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.vise-eyebrow {
+  color: #b6bfbc;
+  font-family: var(--md-code-font);
+  font-size: .68rem;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+}
+
+.md-typeset .vise-hero .md-button {
+  margin: .4rem .4rem 0 0;
+}
+
+.md-typeset .md-button {
+  border-radius: 2px;
+  border-color: #c6f36b;
+  color: #c6f36b;
+}
+
+.md-typeset .md-button--primary {
+  background-color: #c6f36b;
+  border-color: #c6f36b;
+  color: #111517;
+}
+
+.md-typeset .md-button:focus,
+.md-typeset .md-button:hover {
+  background-color: #ddff9d;
+  border-color: #ddff9d;
+  color: #111517;
+}
+
+.md-typeset .grid.cards > ul > li {
+  border-color: #34403a;
+  background: #171d20;
+  border-radius: 2px;
+}
+
+.md-typeset img:not(.twemoji) {
+  max-width: 100%;
+}
+
+.md-typeset p > img:not(.twemoji) {
+  height: auto;
+}
+
+.md-typeset table:not([class]) {
+  border-color: #34403a;
+}
+
+@media (max-width: 600px) {
+  .md-typeset .vise-hero .md-button {
+    display: block;
+    margin-right: 0;
+    text-align: center;
+  }
+}

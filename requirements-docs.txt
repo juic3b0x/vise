@@ -1,0 +1,3 @@
+# Documentation tooling only; these packages are not needed to build or run Vise.
+mkdocs==1.6.1
+mkdocs-material==9.7.7
