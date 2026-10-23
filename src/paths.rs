@@ -34,18 +34,24 @@ pub(crate) fn text(path: &Path) -> Result<&str> {
         .ok_or_else(|| Error::Invalid("journal paths must be valid UTF-8".into()))
 }
 
+/// Reject lexical escapes before canonicalization can erase their components.
+pub(crate) fn validate_absolute(path: &Path) -> Result<()> {
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|part| matches!(part, Component::ParentDir | Component::CurDir))
+    {
+        return Err(Error::Invalid(
+            "paths must be full absolute paths without traversal".into(),
+        ));
+    }
+    text(path)?;
+    Ok(())
+}
+
 pub(crate) fn validate(record: &Record) -> Result<()> {
     for path in [&record.output_path, &record.part_path] {
-        if !path.is_absolute()
-            || path
-                .components()
-                .any(|c| matches!(c, Component::ParentDir | Component::CurDir))
-        {
-            return Err(Error::Invalid(
-                "journal task paths must be full absolute paths without traversal".into(),
-            ));
-        }
-        text(path)?;
+        validate_absolute(path)?;
     }
     if record
         .output_path
@@ -62,6 +68,16 @@ pub(crate) fn validate(record: &Record) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+pub(crate) fn unvalidated_path(root: &Path, suffix: &str) -> std::path::PathBuf {
+    // PathBuf::join normalizes dot components for Windows verbatim paths. Raw
+    // concatenation keeps attack input intact so the validator sees it first.
+    let mut raw = root.as_os_str().to_os_string();
+    raw.push(std::path::MAIN_SEPARATOR_STR);
+    raw.push(suffix);
+    raw.into()
 }
 
 pub(crate) fn resolve_legacy(record: &mut Record, output: &Path) -> Result<()> {

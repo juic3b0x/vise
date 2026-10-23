@@ -136,7 +136,16 @@ mod tests {
         std::fs::write(root.join("file"), b"keep").unwrap();
         assert!(matches!(sync_directory(root.join("file")).await,
             Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotADirectory));
-        assert!(sync_directory(root.join("..")).await.is_err());
+        let traversal = paths::unvalidated_path(&root, "..");
+        assert!(
+            traversal
+                .components()
+                .any(|part| part == std::path::Component::ParentDir)
+        );
+        assert!(matches!(
+            sync_directory(traversal).await,
+            Err(Error::Invalid(_))
+        ));
         assert!(sync_directory(PathBuf::from("relative")).await.is_err());
     }
 }

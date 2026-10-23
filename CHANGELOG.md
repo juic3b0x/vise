@@ -11,6 +11,7 @@ All notable changes to Vise are documented here. The format follows [Keep a Chan
 
 ### Fixed
 
+- Preserve raw parent-directory components in traversal regression fixtures on Windows, where joining onto canonical verbatim paths otherwise removes `..` before validation. Share the pre-I/O lexical guard across directory, child-path, and journal-record validation; cover drive, UNC, and extended-length inputs.
 - Treat dangling output symlinks as occupied filenames and preserve actionable I/O errors during collision checks. Keep filesystem validation on the blocking pool and tolerate staging paths disappearing during awaited publication.
 - Add regression coverage for traversal, absolute-path injection, directory/file type mismatches, symlink substitution, missing destinations, and queue/journal preservation after rejected operations.
 

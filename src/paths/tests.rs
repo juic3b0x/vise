@@ -44,7 +44,14 @@ fn directory_checks_existence_type_absolute_path_and_traversal() {
         matches!(directory(&root.join("file")), Err(Error::Io(error)) if error.kind() == ErrorKind::NotADirectory)
     );
     assert!(directory(Path::new("relative")).is_err());
-    assert!(directory(&root.join("..")).is_err());
+    let traversal = unvalidated_path(&root, "..");
+    assert!(
+        traversal
+            .components()
+            .any(|part| part == Component::ParentDir)
+    );
+    assert!(matches!(directory(&traversal), Err(Error::Invalid(_))));
+    assert!(directory(root.parent().unwrap()).is_ok());
     let dotted = root.join("valid..name 雪");
     fs::create_dir(&dotted).unwrap();
     assert_eq!(directory(&dotted).unwrap(), dotted);
@@ -75,7 +82,60 @@ fn child_paths_cannot_replace_the_root_or_add_components() {
         assert_eq!(path.parent(), Some(root.as_path()));
     }
     assert!(bounded_file(Path::new("relative"), "file").is_err());
-    assert!(bounded_file(&root.join(".."), "file").is_err());
+    let traversal = unvalidated_path(&root, "..");
+    assert!(
+        traversal
+            .components()
+            .any(|part| part == Component::ParentDir)
+    );
+    assert!(matches!(
+        bounded_file(&traversal, "file"),
+        Err(Error::Invalid(_))
+    ));
+}
+
+#[test]
+fn lexical_traversal_is_rejected_before_inspecting_missing_directories() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = fs::canonicalize(temp.path()).unwrap();
+    for suffix in [
+        "..",
+        "../escape",
+        "missing/../escape",
+        "missing/../../escape",
+    ] {
+        let suffix = suffix.replace('/', std::path::MAIN_SEPARATOR_STR);
+        let traversal = unvalidated_path(&root, &suffix);
+        assert!(
+            traversal
+                .components()
+                .any(|part| part == Component::ParentDir)
+        );
+        assert!(matches!(directory(&traversal), Err(Error::Invalid(_))));
+        assert!(matches!(
+            bounded_file(&traversal, "file"),
+            Err(Error::Invalid(_))
+        ));
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_drive_unc_and_verbatim_traversal_is_rejected_before_io() {
+    for root in [
+        r"C:\vise\downloads",
+        r"\\server\share\downloads",
+        r"\\?\C:\vise\downloads",
+        r"\\?\UNC\server\share\downloads",
+    ] {
+        let path = unvalidated_path(Path::new(root), r"..\escape");
+        assert!(path.components().any(|part| part == Component::ParentDir));
+        assert!(matches!(directory(&path), Err(Error::Invalid(_))));
+        assert!(matches!(
+            bounded_file(&path, "file"),
+            Err(Error::Invalid(_))
+        ));
+    }
 }
 
 #[test]

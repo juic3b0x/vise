@@ -1,6 +1,6 @@
 //! Filesystem checks run on the blocking pool by engine callers. Stored paths
 //! must keep their canonical identity; a substituted symlink is not a new root.
-use super::{parent, validate};
+use super::{parent, validate, validate_absolute};
 use crate::{
     error::{Error, Result},
     model::Record,
@@ -11,15 +11,7 @@ use std::{
 };
 
 pub(crate) fn directory(path: &Path) -> Result<PathBuf> {
-    if !path.is_absolute()
-        || path
-            .components()
-            .any(|part| matches!(part, Component::ParentDir | Component::CurDir))
-    {
-        return Err(Error::Invalid(
-            "directory must be an absolute path without traversal".into(),
-        ));
-    }
+    validate_absolute(path)?;
     let canonical = fs::canonicalize(path)?;
     if !canonical.starts_with(path) || canonical != path {
         return Err(Error::Invalid(
@@ -39,12 +31,9 @@ pub(crate) fn directory(path: &Path) -> Result<PathBuf> {
 
 /// Construct one immediate child, never accepting an absolute path or traversal.
 pub(crate) fn bounded_file(root: &Path, name: &str) -> Result<PathBuf> {
+    validate_absolute(root)?;
     let mut parts = Path::new(name).components();
-    if !root.is_absolute()
-        || root
-            .components()
-            .any(|part| matches!(part, Component::ParentDir | Component::CurDir))
-        || !matches!(parts.next(), Some(Component::Normal(_)))
+    if !matches!(parts.next(), Some(Component::Normal(_)))
         || parts.next().is_some()
         || name.contains(['/', '\\', ':', '\0'])
     {
