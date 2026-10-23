@@ -5,6 +5,18 @@ use axum::http::{StatusCode, header};
 #[cfg(unix)]
 use std::time::Duration;
 
+// Reap child processes even when readiness or shutdown assertions fail.
+#[cfg(unix)]
+struct ChildGuard(std::process::Child);
+
+#[cfg(unix)]
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
 #[tokio::test]
 async fn cli_batch_download_is_successful_and_failure_exits_nonzero() {
     for (mode, expected) in [(Mode::Ranges, 0), (Mode::NotFound, 1)] {
@@ -43,43 +55,73 @@ async fn cli_batch_download_is_successful_and_failure_exits_nonzero() {
 #[cfg(unix)]
 #[tokio::test]
 async fn interactive_sigterm_exits_without_waiting_for_stdin() {
+    use std::io::Write;
+
     let dir = tempfile::tempdir().unwrap();
-    let mut process = super::fixture::command(dir.path())
-        .arg("--interactive")
-        .arg("--output")
-        .arg(dir.path())
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .unwrap();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while !dir.path().join("test-home/.vise/state.sqlite3").exists() {
+    let mut process = ChildGuard(
+        super::fixture::command(dir.path())
+            .arg("--interactive")
+            .arg("--output")
+            .arg(dir.path())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    // A database file can exist while startup is still initializing it. Wait
+    // for a committed interactive command instead, keeping stdin open so this
+    // test still detects shutdowns that wait for EOF on the input thread.
+    writeln!(process.0.stdin.as_mut().unwrap(), "limit-rate 1K").unwrap();
+    let journal = dir.path().join("test-home/.vise/state.sqlite3");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            assert!(
+                process.0.try_wait().unwrap().is_none(),
+                "interactive process exited before handling the readiness command"
+            );
+            let path = journal.clone();
+            let limit = tokio::task::spawn_blocking(move || {
+                let connection = rusqlite::Connection::open_with_flags(
+                    path,
+                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+                )
+                .ok()?;
+                connection.busy_timeout(Duration::ZERO).ok()?;
+                connection
+                    .query_row(
+                        "SELECT value FROM metadata WHERE key='limit_rate'",
+                        [],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .ok()
+            })
+            .await
+            .unwrap();
+            if limit.as_deref() == Some("1024") {
+                break;
+            }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
-    .unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    .expect("interactive queue never committed the readiness command");
     let status = std::process::Command::new("kill")
-        .args(["-TERM", &process.id().to_string()])
+        .args(["-TERM", &process.0.id().to_string()])
         .status()
         .unwrap();
     assert!(status.success());
-    let exited = tokio::time::timeout(Duration::from_secs(3), async {
+    let exited = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            if let Some(status) = process.try_wait().unwrap() {
+            if let Some(status) = process.0.try_wait().unwrap() {
                 return status;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
-    .await;
-    if exited.is_err() {
-        process.kill().unwrap();
-        process.wait().unwrap();
-    }
-    assert_eq!(exited.unwrap().code(), Some(130));
+    .await
+    .expect("SIGTERM did not stop the interactive queue while stdin remained open");
+    assert_eq!(exited.code(), Some(130), "unexpected exit status: {exited}");
 }
 
 #[cfg(unix)]
@@ -129,14 +171,6 @@ async fn webui_binary_logs_actions_progress_and_shutdown_to_stdout() {
         })
         .await
         .unwrap_or_else(|_| panic!("missing {label}: {captured:?}"));
-    }
-    // Keep a kill guard so a failing assertion cannot leave a test server running.
-    struct ChildGuard(std::process::Child);
-    impl Drop for ChildGuard {
-        fn drop(&mut self) {
-            let _ = self.0.kill();
-            let _ = self.0.wait();
-        }
     }
     let mut child = ChildGuard(process);
     wait_for(&mut logs, &mut captured, "READY").await;

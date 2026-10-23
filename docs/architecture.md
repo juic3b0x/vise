@@ -1,6 +1,8 @@
-# Architecture and API
+# Architecture and recovery
 
 Vise uses one shared download manager for its CLI, WebUI, and daemon.
+
+Shutdown signal listeners are registered synchronously after manager initialization and before queue seeding or controller startup. SIGINT and SIGTERM cancel Unix sessions; the Windows listener handles Ctrl+C. Registration failures stop startup before background tasks begin. Controllers cannot accept commands before their listeners are installed, so graceful shutdown does not depend on the signal-waiting task being scheduled first.
 
 ## Execution modes
 
@@ -8,7 +10,7 @@ Default CLI sessions use Indicatif and optional interactive input. `--webui` run
 
 Daemon mode uses configured host/port values or `--bind` / `--host` / `--port` overrides for IPv4/IPv6 listeners. Non-loopback binds require a valid token from configuration or the environment. Bearer authentication and HTTP Basic authentication (`vise` / token) protect REST, assets, and WebSocket upgrades. Basic authentication lets the embedded dashboard use the browser's normal HTTP authentication cache. Invalid authentication returns HTTP 401. Browser origins must match the request Host; only authenticated daemon requests may use arbitrary valid hostnames, including names preserved by an HTTPS reverse proxy. The local unauthenticated WebUI retains its exact loopback Host check.
 
-The optional Manifest V3 browser extension uses its own loopback host permissions to POST chosen links to `/api/downloads`. A serialized Chrome-extension ID or Firefox-extension UUID origin receives an exception to same-origin/cross-site checks only when an explicit Bearer token authenticates it. Cached Basic authentication and unauthenticated servers do not qualify, and no website CORS headers are added. The extension revalidates local endpoint settings per request, refuses redirects, omits cookies/referrers, and does not retry ambiguous queue submissions. See [extension/README.md](../extension/README.md).
+The optional Manifest V3 browser extension uses its own loopback host permissions to POST chosen links to `/api/downloads`. A serialized Chrome-extension ID or Firefox-extension UUID origin receives an exception to same-origin/cross-site checks only when an explicit Bearer token authenticates it. Cached Basic authentication and unauthenticated servers do not qualify, and no website CORS headers are added. The extension revalidates local endpoint settings per request, refuses redirects, omits cookies/referrers, and does not retry ambiguous queue submissions. See the [browser extension guide](extension.md).
 
 ## User configuration
 
@@ -16,46 +18,11 @@ The optional Manifest V3 browser extension uses its own loopback host permission
 
 `src/startup.rs` resolves CLI options over file settings before opening the manager. Optional CLI fields distinguish absence from an explicit value equal to an older default. `--bind` overrides the whole socket address; `--host` and `--port` independently override file fields. `VISE_API_TOKEN` overrides `daemon.VISE_API_TOKEN` (`auth_token` is an alias). Output paths beginning with a standalone `~` component expand to the resolved home. `downloads.global_speed_limit_kbps` uses 1024 bytes per unit and checked multiplication; the initial zero default restores the saved global cap (or unlimited for a new journal). An explicit CLI limit or nonzero file limit overrides the global cap. With the initial zero file default, startup restores the saved global cap instead. Live controls still persist in SQLite and do not rewrite user configuration.
 
-## HTTP and WebSocket API
+## Controllers and API boundaries
 
+The CLI, daemon, and WebUI call the same manager rather than maintaining independent transfer pools. REST controls mutate shared jobs; WebSocket and HTTP telemetry endpoints expose owned snapshots. SQLite supplies durable recovery state while the manager keeps the live worker view in memory.
 
-| Method | Endpoint | Result |
-| --- | --- | --- |
-| GET | `/api/downloads` | Array of all saved and active downloads |
-| GET | `/api/telemetry` | Timestamped download snapshots and global configuration for HTTP fallback |
-| GET | `/api/config` | Global bandwidth configuration |
-| POST | `/api/config` | Apply and persist `{"limit_rate":"5M"}`; use `off` to clear |
-| POST | `/api/downloads` | Add URL, optional filename, `proxy_url`, `expected_sha256`, and/or `expected_md5`; HTTP 201 |
-| GET | `/api/downloads/{uuid}` | One download |
-| DELETE | `/api/downloads/{uuid}` | Stop the task and remove its queue entry/partial data; HTTP 204; completed outputs are kept |
-| POST | `/api/downloads/{uuid}/pause` | Pause and wait for workers to stop |
-| POST | `/api/downloads/{uuid}/resume` | Queue a paused/failed download |
-| POST | `/api/downloads/{uuid}/retry` | Resume a failed/paused task; reset every chunk when corrupt |
-| WS | `/ws` | Full JSON download snapshots on change and at least every 500 ms |
-| WS | `/ws/telemetry` | `{timestamp, downloads, configuration}` on change and at least every 500 ms |
-| GET | `/assets/dashboard.css` | Embedded stylesheet, `text/css` |
-| GET | `/assets/dashboard.js` | Embedded controller, `text/javascript` |
-
-Mutation requests require `Content-Type: application/json`; send `{}` for pause/resume/retry/delete. URLs must be HTTP(S), without embedded credentials. Explicit filenames must be plain filenames, never paths. Requests are limited to 16 KiB.
-
-```sh
-curl -H 'Content-Type: application/json' \
-  -d '{"url":"https://example.com/file.zip"}' \
-  http://127.0.0.1:8080/api/downloads
-curl http://127.0.0.1:8080/api/downloads
-curl -X POST -H 'Content-Type: application/json' -d '{}' \
-  http://127.0.0.1:8080/api/downloads/REPLACE_WITH_RETURNED_UUID/pause
-```
-
-Download snapshots contain `id`, `url`, `filename`, `status`, `total_bytes` (nullable), `downloaded_bytes`, `bytes_per_second`, `eta_seconds` (nullable), `error` (nullable), `created_at` (UTC Unix epoch milliseconds), and `chunks`. Each chunk exposes `index` (zero-based), `start_byte`, `end_byte` (exclusive, nullable for unknown-length streams), `downloaded_bytes`, and `status`. These come directly from the worker record under its read lock; the frontend never estimates individual segment progress from the aggregate percentage. Download states are `queued`, `probing`, `downloading`, `verifying`, `paused`, `completed`, `failed`, and `corrupt`; chunk states omit `probing`, `verifying`, and `corrupt`. Older serialized download snapshots without `chunks` deserialize to an empty array. Engine errors use an `error` JSON field and HTTP 400, 404, 409, or 500.
-
-Both configuration endpoints return `{"limit_rate":"5 MiB/s","limit_bytes_per_second":5242880}` for a `5M` cap. Unlimited is represented by `{"limit_rate":"unlimited","limit_bytes_per_second":null}`. The POST body requires a string and rejects unknown fields. Invalid rates return HTTP 400 without changing the previous setting; failed journal commits return HTTP 500 and preserve the live setting. The dashboard uses `/ws/telemetry` to receive downloads and configuration together. `/ws` retains its download-array format for existing clients; its snapshots gain the additive `chunks` field.
-
-```sh
-curl -H 'Content-Type: application/json' -d '{"limit_rate":"1.5M"}' \
-  http://127.0.0.1:8080/api/config
-curl http://127.0.0.1:8080/api/config
-```
+See the [CLI and interactive reference](usage.md), [daemon REST and WebSocket reference](daemon.md#rest-api), and [WebUI guide](webui.md) for controller commands, authentication, endpoint schemas, and runnable examples.
 
 ## Transfers and recovery
 
@@ -139,7 +106,7 @@ The database module uses bundled SQLite through `rusqlite`. An `Arc<Mutex<Connec
 | `chunks` | `download_id`, zero-based `chunk_index`, `start_byte`, nullable `end_byte`, `downloaded_bytes`, `status` |
 | `metadata` | Per-source legacy-import completion markers and global `limit_rate` setting |
 
-`filename` is a plain display name. `output_path` and `part_path` are absolute UTF-8 paths; staging is validated as `<destination-dir>/.vise/<uuid>.part`. Paths are validated before filesystem access and snapshots expose both absolute paths. Changing `Config.output_dir` affects new admissions only. End offsets are exclusive; a null end denotes an unknown-length stream. Download states are queued, probing, downloading, paused, completed, or failed; chunk states are queued, downloading, paused, completed, or failed. Timestamps are UTC Unix epoch milliseconds. Byte counts use nonnegative SQLite signed 64-bit integers, and larger representations are rejected explicitly.
+`filename` is a plain display name. `output_path` and `part_path` are absolute UTF-8 paths; staging is validated as `<destination-dir>/.vise/<uuid>.part`. Paths are validated before filesystem access and snapshots expose both absolute paths. Changing `Config.output_dir` affects new admissions only. End offsets are exclusive; a null end denotes an unknown-length stream. Download states are queued, probing, downloading, verifying, paused, completed, failed, or corrupt; chunk states are queued, downloading, paused, completed, or failed. Timestamps are UTC Unix epoch milliseconds. Byte counts use nonnegative SQLite signed 64-bit integers, and larger representations are rejected explicitly.
 
 Transactions update each changed parent and its chunks together; replacing a segment layout removes obsolete rows, and deleting a parent cascades to its children. Constraints reject invalid counts/statuses and duplicate output paths. A cache of durable snapshots avoids rewriting unchanged rows or issuing idle WAL transactions. Runtime speed samples are never stored in SQL. Live CLI, REST, WebSocket, and terminal-telemetry views use the manager's owned in-memory snapshots; startup always reconstructs jobs from SQL. `Database::list()` provides an asynchronous, transaction-consistent durable view.
 
@@ -218,3 +185,9 @@ Legacy SQLite files are opened read-only and copied through SQLite's backup API,
 Every recovered job uses immutable destination/staging paths copied from its SQL record. Checkpoints capture offsets, synchronize partial files and staging directories, and then commit global rows. Publication validates checksums, hard-links the file within its destination filesystem, and synchronizes the destination directory. Deletion and recovery also use saved paths, never the current process's default output directory. Missing destination directories retain saved offsets; no background startup scan relocates a task.
 
 The API and interactive queue show the entire global history. The CLI separately tracks tasks scheduled by the current process for batch exit status, so old paused history does not make an unrelated successful batch fail. A running daemon owns the global engine; other processes can inspect SQLite via WAL readers or control the daemon through its authenticated API instead of starting a second engine.
+
+## Documentation and contribution workflow
+
+The site is built from `mkdocs.yml` and these Markdown sources using Material for MkDocs. Python dependencies are isolated from the Rust executable. See the [documentation development instructions](https://github.com/juic3b0x/vise/blob/main/CONTRIBUTING.md#documentation-site) for local preview, strict validation, and GitHub Pages setup.
+
+Engine changes must follow [AGENTS.md](https://github.com/juic3b0x/vise/blob/main/AGENTS.md) and the [contribution standards](https://github.com/juic3b0x/vise/blob/main/CONTRIBUTING.md). Report security issues privately using the [security policy](https://github.com/juic3b0x/vise/security/policy).

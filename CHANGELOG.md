@@ -2,6 +2,17 @@
 
 All notable changes to Vise are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.4.4] - 2026-10-23
+
+### Added
+
+- Material for MkDocs documentation site with a landing page, installation and CLI guides, daemon/API reference, WebUI and extension guides, and engine architecture. Strict link checks run on pull requests, with GitHub Pages deployment from `main`.
+
+### Fixed
+
+- Register shutdown signal listeners before queue seeding or controller startup, removing the scheduling window in which an active interactive session could terminate directly on SIGTERM. Propagate listener registration errors before starting background tasks.
+- Make the interactive SIGTERM regression wait for a durably committed runtime command instead of database-file creation and a fixed sleep. Keep stdin open during shutdown and always reap child processes on failure.
+
 ## [0.4.3] - 2026-10-22
 
 ### Security
@@ -128,6 +139,7 @@ Initial release.
 - **Local WebUI safeguards:** Loopback-only binding, host and browser-origin validation, JSON-only mutations, and a Content Security Policy constrain browser access.
 - **Safe publication:** Existing output files are never overwritten, and configured checksum verification must succeed before final publication. SHA-256 from a trusted source is preferred for security-sensitive verification; MD5 supports legacy compatibility and accidental-corruption detection.
 
+[0.4.4]: https://github.com/juic3b0x/vise/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/juic3b0x/vise/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/juic3b0x/vise/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/juic3b0x/vise/compare/v0.4.0...v0.4.1

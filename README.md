@@ -29,6 +29,10 @@ Vise is a high-performance HTTP(S) download manager built in Rust. Multi-threade
 
 See [INSTALL.md](INSTALL.md) for system requirements, Cargo installation, verification, and systemd service setup.
 
+## Documentation
+
+Browse the [documentation site](https://juic3b0x.github.io/vise/) for installation, CLI usage, daemon/API configuration, WebUI controls, browser extension setup, and engine architecture. The [source guides](docs/index.md) are also readable in this repository.
+
 ## Persistent configuration
 
 On the first normal startup, Vise creates `~/.vise/config.toml`. On Unix it resolves `~` from `HOME`; on Windows it uses `USERPROFILE`, falling back to `HOMEDRIVE` plus `HOMEPATH`. `--help` and `--version` exit without creating files. Edit the file and restart Vise to apply preferences.
@@ -343,6 +347,17 @@ cargo test --all-targets --locked
 ```
 
 The test suite exercises parallel transfers, connection limits, shared bandwidth budgets, live rate changes without reconnecting, settings persistence, retries, pause/resume, abrupt process recovery, safe output handling, CLI behavior, and REST/WebSocket controls using local HTTP fixtures. Token-bucket timing is also checked with Tokio's virtual clock.
+
+The documentation site uses MkDocs with the Material theme. To preview it locally, install the pinned tools in a virtual environment:
+
+```sh
+python3 -m venv /tmp/vise-docs-venv
+/tmp/vise-docs-venv/bin/python -m pip install -r requirements-docs.txt
+/tmp/vise-docs-venv/bin/python -m mkdocs build --strict
+/tmp/vise-docs-venv/bin/python -m mkdocs serve
+```
+
+Open `http://127.0.0.1:8000/vise/`. Run the strict build before submitting documentation changes. See [documentation contribution and publishing instructions](CONTRIBUTING.md#documentation-site) for Windows commands and GitHub Pages setup.
 
 ## License
 

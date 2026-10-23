@@ -59,6 +59,36 @@ On Windows, use the installed `vise.exe` executable. Do not silence a warning or
 
 Add meaningful regression tests for fixes and behavior changes. Use deterministic local servers and temporary directories instead of public download hosts. Cover relevant failure paths: interrupted transfers, pause/resume, SQLite migration and recovery, range validation, checksum mismatch, rate changes, proxy failure, or sensitive-data redaction. Documentation-only changes do not require artificial tests.
 
+## Documentation site
+
+The public site uses MkDocs and Material, configured in [mkdocs.yml](mkdocs.yml). Edit the seven source guides under [docs/](docs/); preserve working links, runnable examples, and accurate API/CLI behavior. Root [README.md](README.md) and [INSTALL.md](INSTALL.md) remain useful for repository and release-archive readers. Update both the site and root guides when shared behavior changes.
+
+Use Python 3.13 or newer and an isolated virtual environment. On Unix:
+
+```sh
+python3 -m venv /tmp/vise-docs-venv
+/tmp/vise-docs-venv/bin/python -m pip install -r requirements-docs.txt
+/tmp/vise-docs-venv/bin/python -m mkdocs build --strict
+/tmp/vise-docs-venv/bin/python -m mkdocs serve
+```
+
+On Windows PowerShell:
+
+```powershell
+py -3 -m venv "$env:TEMP\vise-docs-venv"
+& "$env:TEMP\vise-docs-venv\Scripts\python.exe" -m pip install -r requirements-docs.txt
+& "$env:TEMP\vise-docs-venv\Scripts\python.exe" -m mkdocs build --strict
+& "$env:TEMP\vise-docs-venv\Scripts\python.exe" -m mkdocs serve
+```
+
+Open `http://127.0.0.1:8000/vise/` for the local preview. Build output goes to ignored `site/`; never commit generated HTML. Strict builds reject missing pages, invalid internal links/anchors, and navigation omissions. Use relative `.md` links within the site and absolute GitHub links for files outside `docs/`. Keep screenshots descriptive and real; avoid unfilled examples and broken image references. Documentation tools are not runtime or Cargo dependencies.
+
+### GitHub Pages deployment
+
+An administrator must select **Settings → Pages → Build and deployment → Source: GitHub Actions** once. The configured public URL is `https://juic3b0x.github.io/vise/`; update `site_url` in `mkdocs.yml` if the repository or hosting location changes.
+
+The [documentation workflow](.github/workflows/docs.yml) builds every pull request without deployment permissions. Every push to `main` builds a Pages artifact, then deploys it through the `github-pages` environment. A manual workflow dispatch on `main` also deploys; other branches only build. Stale PR builds can be cancelled; an active main deployment is allowed to finish. Respect the environment's branch protections and approval requirements. No personal access token or `gh-pages` branch is required; the deploy job alone receives `pages: write` and `id-token: write`.
+
 ## Commit messages
 
 Use conventional commits with a type, scope, and concise imperative description:
