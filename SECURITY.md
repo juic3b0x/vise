@@ -64,6 +64,8 @@ Use SHA-256 obtained through a trusted publisher channel for security-sensitive 
 
 ## WebUI and daemon trust boundaries
 
+The explicit `vise remote` client uses Bearer authentication against the daemon and never opens a local engine or journal. Its API connection does not inherit download cookie jars, configured download proxies, or environment proxies. Redirects and automatic request retries are disabled so credentials cannot follow a redirect and ambiguous submissions are not replayed. Non-loopback origins require HTTPS with normal certificate validation; use a loopback SSH tunnel for an HTTP-only remote server. Credentials come from protected existing configuration or `VISE_API_TOKEN`, not a token command-line option. Error diagnostics omit response bodies and raw endpoint/token values. Successful JSON output includes normal API task metadata, so source URLs and daemon paths can still be sensitive. Human-readable snapshot text is escaped before terminal display.
+
 The interactive WebUI runs with `--webui`, defaults to `127.0.0.1:8080`, and accepts loopback binds only. Use the exact numeric loopback URL printed at startup. Host, Origin, and cross-site checks, JSON-only mutations, and the Content Security Policy must remain enabled.
 
 The `--webui` API and a loopback daemon without a configured file or environment token have no user authentication. Other local processes capable of reaching them can control downloads and access transfer metadata. Run these configurations only in a trusted local environment. Use an authenticated SSH tunnel for remote access to the local WebUI, preserving its expected host and origin.

@@ -18,6 +18,7 @@ Vise is a high-performance HTTP(S) download manager built in Rust. Multi-threade
 - **Live bandwidth control:** Share one token-bucket speed limit across all downloads and change it from the interactive CLI or WebUI without reconnecting.
 - **CLI first:** Download from arguments or manage an interactive queue. The web server starts only with `--webui` or `--daemon`.
 - **Quiet daemon:** Run the same engine and API under a service manager, with authenticated remote control and no terminal loop.
+- **Daemon-aware CLI:** Use `vise remote` to queue and control tasks, monitor live progress, emit JSON, or wait for verified publication without starting a second engine.
 - **Embedded WebUI:** An industrial dark console with live speed graphs, actual chunk-progress grids, queue filters, and controls that update without reloading.
 - **Live terminal monitor:** In WebUI mode, follow timestamped events and one-second transfer summaries on stdout while the browser controls downloads.
 - **Careful file handling:** Validate range responses, save durable checkpoints, and refuse to overwrite existing output files.
@@ -32,6 +33,19 @@ See [INSTALL.md](INSTALL.md) for system requirements, Cargo installation, verifi
 ## Documentation
 
 Browse the [documentation site](https://juic3b0x.github.io/vise/) for installation, CLI usage, daemon/API configuration, WebUI controls, browser extension setup, and engine architecture. The [source guides](docs/index.md) are also readable in this repository.
+
+## Control a running daemon
+
+Keep `vise --daemon --resume-all` running in a service or another terminal, then use:
+
+```sh
+vise remote add https://www.rust-lang.org/static/images/rust-logo-blk.svg
+vise remote list --json
+vise remote limit-rate 5M
+vise remote watch
+```
+
+Add `--wait` to `remote add` to return success only after verification and publication. The client reads the existing daemon address/token from configuration; `--endpoint` and `VISE_API_TOKEN` supply overrides. It never opens the local journal or silently starts an engine. Direct `vise URL` usage stays intact. See the [remote CLI guide](docs/remote.md) for authentication, task controls, and exit codes.
 
 ## Persistent configuration
 

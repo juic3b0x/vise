@@ -85,6 +85,8 @@ Open [http://127.0.0.1:8080](http://127.0.0.1:8080) for the dashboard. Stop the 
 
 For unattended use, run `vise --daemon --resume-all` under a service manager. The daemon stays in the foreground, uses a persistent authentication token, and shares the same global journal. See the [daemon guide](daemon.md).
 
+Control it from another terminal with `vise remote add`, `vise remote list --json`, or `vise remote watch`. The [remote CLI](remote.md) keeps daemon downloads running when you disconnect and supports waiting for verified publication in scripts.
+
 ## See your transfers
 
 ### Terminal precision

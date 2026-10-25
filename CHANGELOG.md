@@ -2,6 +2,26 @@
 
 All notable changes to Vise are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.5.0] - 2026-10-25
+
+### Added
+
+- **Daemon-aware CLI:** `vise remote` controls an existing authenticated daemon with add/list/get/pause/resume/retry/delete commands, live global bandwidth changes, JSON results, and terminal or newline-delimited JSON telemetry monitoring. Full UUIDs and unique prefixes are supported.
+- **Scriptable completion:** `remote add --wait` succeeds only after configured verification and final publication; failed, corrupt, or paused tasks return exit code 2. Interrupting a client leaves daemon transfers running.
+- **Read-only client startup:** Existing daemon configuration supplies address/token defaults; `--endpoint` and `VISE_API_TOKEN` override them. Fully specified clients need no local home, configuration, journal, staging data, or engine locks. Wildcard local listener addresses resolve to loopback.
+- Remote CLI documentation and regressions for daemon ownership, authenticated controls, credential redaction, mutation replay prevention, bounded responses, checksum success/failure, machine output, and signal-driven detachment.
+- A Linux CI check for the declared Rust 1.88 MSRV, alongside the existing stable OS matrix.
+
+### Changed
+
+- Share the snapshot-only Indicatif renderer between local and remote controllers, including cleanup for removed tasks and escaped terminal filenames. Direct `vise URL` downloads retain their original behavior.
+- Refresh compatible dependencies for this minor release: `cc` 1.10.0, `smallvec` 1.16.4, and `webpki-roots` 1.0.11, retaining Rust 1.88 support. Require the already-resolved Reqwest 0.12.28 API to explicitly disable control-request retries.
+- Document compatible `cargo update` and MSRV validation before every major and minor release; skip automatic refreshes for patch releases.
+
+### Security
+
+- Isolate daemon credentials from transfer proxies/cookies, reject redirects and automatic request replay, preserve TLS verification, require HTTPS for non-loopback origins, bound API response sizes, and escape human-readable snapshot text. Failed client connections never fall back to a local engine.
+
 ## [0.4.4] - 2026-10-23
 
 ### Added
@@ -139,6 +159,7 @@ Initial release.
 - **Local WebUI safeguards:** Loopback-only binding, host and browser-origin validation, JSON-only mutations, and a Content Security Policy constrain browser access.
 - **Safe publication:** Existing output files are never overwritten, and configured checksum verification must succeed before final publication. SHA-256 from a trusted source is preferred for security-sensitive verification; MD5 supports legacy compatibility and accidental-corruption detection.
 
+[0.5.0]: https://github.com/juic3b0x/vise/compare/v0.4.4...v0.5.0
 [0.4.4]: https://github.com/juic3b0x/vise/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/juic3b0x/vise/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/juic3b0x/vise/compare/v0.4.1...v0.4.2

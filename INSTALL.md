@@ -54,6 +54,10 @@ systemctl --user enable --now vise.service
 
 The example loads `~/.vise/config.toml`, creating it on first startup, and resumes saved transfers. Edit the file's host, port, default destination for new tasks, or token and restart the service to apply changes. All modes share `~/.vise/state.sqlite3`; changing the default destination does not move existing tasks. Run one engine per home directory and use the daemon API/WebUI while the service is active. An optional `~/.config/vise/daemon.env` file can override `VISE_API_TOKEN`. User services that must survive logout also need user lingering enabled by the system administrator. See [docs/vise.service](docs/vise.service).
 
+## Terminal control of a running daemon
+
+While the daemon is active, `vise remote list`, `vise remote add URL`, and `vise remote watch` provide native terminal control without opening another engine. See the [remote CLI guide](docs/remote.md).
+
 ## Browser extension
 
 The source includes a dependency-free Manifest V3 extension in [extension/](extension/). Start an updated daemon built from this checkout; older binaries may not support authenticated extension origins.

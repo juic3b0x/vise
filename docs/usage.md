@@ -35,6 +35,7 @@ vise -o ./downloads -n rust-logo.svg \
 | Interactive queue | `vise --interactive` | Terminal commands and progress bars |
 | Local WebUI | `vise --webui` | Browser dashboard with terminal telemetry |
 | Foreground daemon | `vise --daemon` | Authenticated API/dashboard; suitable for systemd |
+| Daemon client | `vise remote list` | Control a running daemon without opening another engine |
 | Resume saved work | `vise --resume-all` | Queue unfinished global tasks at their saved destinations |
 
 `URL` in the mode table denotes a URL argument; the runnable examples above use public Rust project resources. With no arguments and terminal stdin, `vise` opens the interactive queue. Use `--interactive` explicitly when starting from another program. Server modes are mutually exclusive with each other, `--interactive`, and `--batch`.
@@ -163,4 +164,4 @@ vise --resume-all
 
 The journal is always `~/.vise/state.sqlite3`; `-o` does not create a separate task history. Previously saved absolute destinations and staging paths remain unchanged. A crash may require downloading bytes since the last durable checkpoint again. Missing disks, changed remote content, or expired cookie files fail explicitly rather than silently relocating or authenticating a task incorrectly.
 
-Use [daemon API clients](daemon.md#rest-api) or the [dashboard](webui.md) to inspect the same history while the daemon owns the engine.
+Use the [native remote CLI](remote.md), [daemon API clients](daemon.md#rest-api), or the [dashboard](webui.md) to inspect the same history while the daemon owns the engine.

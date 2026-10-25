@@ -1,10 +1,12 @@
 use std::{
-    collections::BTreeMap,
     io::{BufRead, IsTerminal},
     time::Duration,
 };
 
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use indicatif::MultiProgress;
+
+mod progress;
+pub use progress::ProgressDisplay;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -12,12 +14,12 @@ use uuid::Uuid;
 use crate::{
     engine::Manager,
     error::{Error, Result},
-    model::{Download, Status},
+    model::Status,
 };
 
 pub async fn run(manager: Manager, interactive: bool, stop: CancellationToken) -> Result<bool> {
-    let progress = MultiProgress::new();
-    let mut bars = BTreeMap::<Uuid, ProgressBar>::new();
+    let mut display = ProgressDisplay::default();
+    let progress = display.messages();
     let mut events = manager.subscribe();
     let (sender, mut input) = mpsc::channel(64);
     if interactive {
@@ -46,7 +48,7 @@ pub async fn run(manager: Manager, interactive: bool, stop: CancellationToken) -
     let mut cancelled = false;
     loop {
         let downloads = manager.list().await;
-        render(&progress, &mut bars, &downloads)?;
+        display.render(&downloads)?;
         if !input_open && downloads.iter().all(|d| !d.status.active()) {
             break;
         }
@@ -71,11 +73,7 @@ pub async fn run(manager: Manager, interactive: bool, stop: CancellationToken) -
             }
         }
     }
-    for bar in bars.values() {
-        if !bar.is_finished() {
-            bar.finish_and_clear();
-        }
-    }
+    display.finish();
     let downloads = manager.session_downloads().await;
     for item in &downloads {
         if matches!(item.status, Status::Failed | Status::Corrupt) {
@@ -87,71 +85,6 @@ pub async fn run(manager: Manager, interactive: bool, stop: CancellationToken) -
         }
     }
     Ok(cancelled || downloads.iter().all(|d| d.status == Status::Completed))
-}
-
-fn render(
-    progress: &MultiProgress,
-    bars: &mut BTreeMap<Uuid, ProgressBar>,
-    downloads: &[Download],
-) -> Result<()> {
-    for item in downloads {
-        let bar = bars.entry(item.id).or_insert_with(|| {
-            let bar = match item.total_bytes {
-                Some(total) => ProgressBar::new(total),
-                None => ProgressBar::new_spinner(),
-            };
-            progress.add(bar)
-        });
-        let template = if item.total_bytes.is_some() {
-            "{prefix:.cyan} {msg} [{bar:28.cyan/blue}] {percent:>3}% {bytes}/{total_bytes}"
-        } else {
-            "{prefix:.cyan} {msg} {spinner:.cyan} {bytes}"
-        };
-        bar.set_style(
-            ProgressStyle::with_template(template)
-                .map_err(|e| Error::Invalid(e.to_string()))?
-                .progress_chars("=>-"),
-        );
-        let id = item.id.to_string();
-        bar.set_prefix(format!("{} {}", id.get(..8).unwrap_or(&id), item.filename));
-        if let Some(total) = item.total_bytes {
-            bar.set_length(total);
-        }
-        bar.set_position(item.downloaded_bytes);
-        let eta = item
-            .eta_seconds
-            .map(|s| format!("{}s", s.ceil() as u64))
-            .unwrap_or_else(|| "—".into());
-        bar.set_message(format!(
-            "{:?} · {}/s · ETA {}",
-            item.status,
-            bytes(item.bytes_per_second),
-            eta
-        ));
-        bar.tick();
-        if matches!(
-            item.status,
-            Status::Completed | Status::Failed | Status::Paused | Status::Corrupt
-        ) {
-            if !bar.is_finished() {
-                bar.finish();
-            }
-        } else if bar.is_finished() {
-            bar.reset();
-            bar.set_position(item.downloaded_bytes);
-        }
-    }
-    Ok(())
-}
-
-fn bytes(value: f64) -> String {
-    if value >= 1024.0 * 1024.0 {
-        format!("{:.1} MiB", value / (1024.0 * 1024.0))
-    } else if value >= 1024.0 {
-        format!("{:.1} KiB", value / 1024.0)
-    } else {
-        format!("{value:.0} B")
-    }
 }
 
 async fn command(manager: &Manager, progress: &MultiProgress, input: &str) -> Result<bool> {

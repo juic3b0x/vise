@@ -4,16 +4,20 @@ use std::{
     process::ExitCode,
 };
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use vise::{checksum::ExpectedChecksums, cli, engine::Manager, rate_limiter::RateLimit};
 
 mod app;
+mod client;
 mod startup;
 
 #[derive(Parser)]
 #[command(version, about = "Vise — concurrent, resumable downloads", long_about = None)]
 #[command(group(clap::ArgGroup::new("server").args(["webui", "daemon"])))]
+#[command(args_conflicts_with_subcommands = true)]
 struct Args {
+    #[command(subcommand)]
+    command: Option<Command>,
     /// HTTP(S) URLs to enqueue
     urls: Vec<String>,
     /// Launch the local dashboard instead of the terminal controller
@@ -75,6 +79,12 @@ struct Args {
     cookies: Option<PathBuf>,
 }
 
+#[derive(Subcommand)]
+enum Command {
+    /// Control an existing daemon without starting a local download engine
+    Remote(client::Args),
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
     tracing_subscriber::fmt()
@@ -98,6 +108,13 @@ fn report_error(writer: &mut impl std::io::Write, error: &anyhow::Error) -> std:
 }
 
 async fn run(args: Args) -> anyhow::Result<u8> {
+    if let Some(Command::Remote(remote)) = args.command {
+        return client::run(remote).await;
+    }
+    anyhow::ensure!(
+        !args.urls.iter().any(|url| url == "remote"),
+        "put remote immediately after vise; local-engine options cannot be mixed with daemon client commands"
+    );
     let expected = ExpectedChecksums::new(
         args.expected_sha256.as_deref(),
         args.expected_md5.as_deref(),
@@ -154,6 +171,52 @@ mod tests {
             .is_err()
         );
         assert!(Args::try_parse_from(["vise", "--port", "8080"]).is_err());
+    }
+
+    #[test]
+    fn remote_commands_are_explicit_and_preserve_direct_url_mode() {
+        let direct = Args::try_parse_from(["vise", "https://example.org/file", "-c", "4"]).unwrap();
+        assert!(direct.command.is_none());
+        assert_eq!(direct.urls, ["https://example.org/file"]);
+        assert_eq!(direct.connections, 4);
+        for command in [
+            vec!["vise", "remote", "list", "--json"],
+            vec![
+                "vise",
+                "remote",
+                "--endpoint",
+                "http://127.0.0.1:8080",
+                "add",
+                "https://example.org/file",
+                "--wait",
+            ],
+            vec!["vise", "remote", "limit-rate", "off"],
+        ] {
+            assert!(matches!(
+                Args::try_parse_from(command).unwrap().command,
+                Some(Command::Remote(_))
+            ));
+        }
+        // Leading local arguments retain the positional-URL grammar and must
+        // never silently become a remote client invocation.
+        for command in [
+            vec!["vise", "--daemon", "remote", "list"],
+            vec!["vise", "--output", "downloads", "remote", "list"],
+            vec!["vise", "https://example.org/file", "remote", "list"],
+        ] {
+            assert!(Args::try_parse_from(command).unwrap().command.is_none());
+        }
+        assert!(
+            Args::try_parse_from([
+                "vise",
+                "remote",
+                "add",
+                "https://example.org/file",
+                "--cookies",
+                "cookies.txt"
+            ])
+            .is_err()
+        );
     }
 
     #[test]

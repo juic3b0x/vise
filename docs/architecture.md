@@ -2,6 +2,8 @@
 
 Vise uses one shared download manager for its CLI, WebUI, and daemon.
 
+The explicit `vise remote` command is a controller client rather than another engine mode. It dispatches before local startup and manager creation, reads existing configuration without creating files, and uses the authenticated REST API. A separate Reqwest client disables environment proxies, cookies, redirects, and automatic retries, preserving download-route isolation. It never opens SQLite or acquires engine/staging locks. Monitoring polls owned telemetry snapshots once per second; waiting for success requires the server's `completed` state after verification/publication. A bounded dedicated stdout thread keeps blocked pipes out of Tokio and allows interruption without stopping the daemon. See the [remote client guide](remote.md).
+
 Shutdown signal listeners are registered synchronously after manager initialization and before queue seeding or controller startup. SIGINT and SIGTERM cancel Unix sessions; the Windows listener handles Ctrl+C. Registration failures stop startup before background tasks begin. Controllers cannot accept commands before their listeners are installed, so graceful shutdown does not depend on the signal-waiting task being scheduled first.
 
 ## Execution modes
@@ -43,6 +45,12 @@ Local journal and partial files are trusted application data; do not modify them
 ```text
 Cargo.toml / Cargo.lock    Dependencies and reproducible resolution
 src/main.rs               Arguments, configuration, mode selection
+src/client.rs             Explicit remote subcommands, client interruption handling
+src/client/settings.rs    Read-only endpoint/token defaults and transport validation
+src/client/api.rs         Authenticated, bounded REST requests without replay/fallback
+src/client/commands.rs    Task controls, verified completion waiting, telemetry polling
+src/client/output.rs      Bounded stdout writer, JSON and terminal-safe summaries
+src/cli/progress.rs       Shared snapshot-only Indicatif renderer
 src/app.rs                Controller supervision, signals, ordered shutdown
 src/startup.rs            CLI/config precedence and validated startup settings
 src/lib.rs                Public library modules
