@@ -14,6 +14,18 @@ vise -d --bind 127.0.0.1:9090 --resume-all
 
 Stop any other Vise engine before starting the daemon. An empty queue does not stop the service. Graceful shutdown waits for workers and durable checkpoints.
 
+## Native terminal control
+
+Once the daemon is running, use the [remote CLI](remote.md) from another terminal:
+
+```sh
+vise remote list
+vise remote add --wait https://www.rust-lang.org/static/images/rust-logo-blk.svg
+vise remote watch
+```
+
+This client reads the existing daemon configuration, authenticates through the API, and never opens a second engine or SQLite connection. `--endpoint` overrides the address; `VISE_API_TOKEN` overrides the token. A remote origin must use HTTPS, or be reached through a loopback tunnel. Closing the client leaves daemon transfers running.
+
 ## Configuration and precedence
 
 First startup creates `~/.vise/config.toml`, including a random persistent 64-character `VISE_API_TOKEN`. Edit that generated file instead of replacing it with a sample token. Existing files are preserved; malformed or unknown fields fail with an error.

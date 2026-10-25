@@ -112,6 +112,18 @@ pub async fn load_from_home(home: PathBuf) -> Result<LoadedConfig> {
         .context("configuration loader task failed")?
 }
 
+/// Read client defaults without creating configuration, locks, or journal files.
+pub async fn read_existing() -> Result<Option<LoadedConfig>> {
+    let home = home_directory()?;
+    anyhow::ensure!(
+        home.is_absolute(),
+        "home directory must be an absolute path"
+    );
+    tokio::task::spawn_blocking(move || storage::read_existing(home))
+        .await
+        .context("configuration reader task failed")?
+}
+
 pub fn expand_home(path: &Path, home: &Path) -> Result<PathBuf> {
     anyhow::ensure!(
         !path.as_os_str().is_empty(),

@@ -27,6 +27,13 @@ Use conventional commit prefixes enclosed in parentheses:
 - `refactor(scope): description`
 - `test(scope): description`
 
+## Release Preparation
+
+- Follow Semantic Versioning 2.0.0 when deciding Vise version changes.
+- Before every major or minor release, run a compatible `cargo update` without widening dependency requirements. Preserve the declared MSRV, review the lockfile, and validate with the minimum Rust toolchain and current stable, including full tests, Clippy, builds, and installation checks.
+- Skip automatic dependency refreshes for patch releases.
+- For commit-worthy changes, update relevant documentation/changelog and provide a conventional commit message and pull-request commands. Use branch names without a `codex/` prefix.
+
 ## Rust Doctor Audits
 
 Always pass `--rule rust_doctor::cargo::duplicate_major_versions=off` when running Rust Doctor. Use this command from the repository root:

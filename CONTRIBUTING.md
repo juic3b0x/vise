@@ -59,9 +59,15 @@ On Windows, use the installed `vise.exe` executable. Do not silence a warning or
 
 Add meaningful regression tests for fixes and behavior changes. Use deterministic local servers and temporary directories instead of public download hosts. Cover relevant failure paths: interrupted transfers, pause/resume, SQLite migration and recovery, range validation, checksum mismatch, rate changes, proxy failure, or sensitive-data redaction. Documentation-only changes do not require artificial tests.
 
+## Release dependency updates
+
+Before every major or minor release, run `cargo update` to refresh `Cargo.lock` within the existing compatible dependency requirements. Skip this automatic dependency refresh for patch releases. Do not widen version requirements or run a breaking/major dependency upgrade as part of the routine refresh. Review the lockfile diff, licenses, enabled features, security notes, and MSRV compatibility. Keep the declared Rust minimum supported; use Cargo's incompatible-Rust-version fallback resolution when selecting updates, and validate with the declared minimum toolchain as well as current stable.
+
+After the refresh, rerun the required formatting, Clippy, full tests, release builds, and installation checks, including the supported OS matrix. Review any intentional breaking dependency change separately. Use Semantic Versioning 2.0.0 for Vise's own public behavior; an additive feature normally increments the minor version.
+
 ## Documentation site
 
-The public site uses MkDocs and Material, configured in [mkdocs.yml](mkdocs.yml). Edit the seven source guides under [docs/](docs/); preserve working links, runnable examples, and accurate API/CLI behavior. Root [README.md](README.md) and [INSTALL.md](INSTALL.md) remain useful for repository and release-archive readers. Update both the site and root guides when shared behavior changes.
+The public site uses MkDocs and Material, configured in [mkdocs.yml](mkdocs.yml). Edit the source guides under [docs/](docs/); preserve working links, runnable examples, and accurate API/CLI behavior. Root [README.md](README.md) and [INSTALL.md](INSTALL.md) remain useful for repository and release-archive readers. Update both the site and root guides when shared behavior changes.
 
 Use Python 3.13 or newer and an isolated virtual environment. On Unix:
 

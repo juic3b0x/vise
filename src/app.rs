@@ -205,7 +205,7 @@ fn publish_shutdown(manager: &Manager, result: &vise::error::Result<()>) {
 }
 
 #[cfg(unix)]
-fn shutdown_signal() -> std::io::Result<impl Future<Output = ()>> {
+pub(super) fn shutdown_signal() -> std::io::Result<impl Future<Output = ()>> {
     use tokio::signal::unix::{SignalKind, signal};
     let mut interrupt = signal(SignalKind::interrupt())?;
     let mut terminate = signal(SignalKind::terminate())?;
@@ -215,7 +215,7 @@ fn shutdown_signal() -> std::io::Result<impl Future<Output = ()>> {
 }
 
 #[cfg(windows)]
-fn shutdown_signal() -> std::io::Result<impl Future<Output = ()>> {
+pub(super) fn shutdown_signal() -> std::io::Result<impl Future<Output = ()>> {
     let mut interrupt = tokio::signal::windows::ctrl_c()?;
     Ok(async move {
         interrupt.recv().await;

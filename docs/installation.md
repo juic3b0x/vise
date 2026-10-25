@@ -75,7 +75,7 @@ On Unix, newly created private configuration directories use `0700` permissions 
 The initial destination is `~/Downloads/Vise`. Override it for new tasks with `-o`; saved transfers retain their original absolute destinations. Type `quit` to checkpoint the queue and exit. See [configuration precedence](daemon.md#configuration-and-precedence) before changing server settings.
 
 !!! important "One engine per home directory"
-    Stop an interactive, batch, or WebUI session before launching the daemon. While a daemon is running, control it through the dashboard, extension, or API.
+    Stop an interactive, batch, or WebUI session before launching the daemon. While a daemon is running, control it through [vise remote](remote.md), the dashboard, extension, or API.
 
 ## Run as a service
 

@@ -9,6 +9,8 @@ mod proxy_support;
 mod checksums;
 #[path = "downloads/cli.rs"]
 mod cli;
+#[path = "downloads/client/mod.rs"]
+mod client;
 #[path = "downloads/cookies.rs"]
 mod cookies;
 #[path = "downloads/daemon.rs"]

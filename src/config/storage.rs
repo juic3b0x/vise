@@ -33,8 +33,22 @@ pub(super) fn load(home: PathBuf) -> Result<LoadedConfig> {
         }
         Err(error) => return Err(error).with_context(|| format!("cannot read {}", path.display())),
     };
+    parse(home, path, &source)
+}
+
+pub(super) fn read_existing(home: PathBuf) -> Result<Option<LoadedConfig>> {
+    let path = home.join(".vise/config.toml");
+    let source = match fs::read_to_string(&path) {
+        Ok(source) => source,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).with_context(|| format!("cannot read {}", path.display())),
+    };
+    parse(home, path, &source).map(Some)
+}
+
+fn parse(home: PathBuf, path: PathBuf, source: &str) -> Result<LoadedConfig> {
     // TOML's normal Display can quote values and whole source lines, including secrets.
-    let values: FileConfig = toml::from_str(&source).map_err(|error: toml::de::Error| {
+    let values: FileConfig = toml::from_str(source).map_err(|error: toml::de::Error| {
         let location = error.span().map(|range| format!(" at bytes {}..{}", range.start, range.end)).unwrap_or_default();
         anyhow::anyhow!("invalid TOML or configuration fields in {}{location}; check section names, field types, and syntax", path.display())
     })?;
