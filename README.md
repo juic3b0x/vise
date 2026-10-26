@@ -19,7 +19,7 @@ Vise is a high-performance HTTP(S) download manager built in Rust. Multi-threade
 - **CLI first:** Download from arguments or manage an interactive queue. The web server starts only with `--webui` or `--daemon`.
 - **Quiet daemon:** Run the same engine and API under a service manager, with authenticated remote control and no terminal loop.
 - **Daemon-aware CLI:** Use `vise remote` to queue and control tasks, monitor live progress, emit JSON, or wait for verified publication without starting a second engine.
-- **Embedded WebUI:** An industrial dark console with live speed graphs, actual chunk-progress grids, queue filters, and controls that update without reloading.
+- **Embedded WebUI:** A clean dark dashboard with live speed graphs, actual chunk-progress grids, queue filters, and controls that update without reloading.
 - **Live terminal monitor:** In WebUI mode, follow timestamped events and one-second transfer summaries on stdout while the browser controls downloads.
 - **Careful file handling:** Validate range responses, save durable checkpoints, and refuse to overwrite existing output files.
 - **Checksum verification:** Verify SHA-256 and MD5 before publishing a file; preserve corrupt downloads for inspection or an explicit retry.
