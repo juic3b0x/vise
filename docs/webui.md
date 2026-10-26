@@ -1,6 +1,6 @@
 # WebUI
 
-Vise's embedded dashboard presents live transfer telemetry and queue controls in a responsive industrial dark interface. HTML, CSS, and vanilla JavaScript ship inside the executable; no frontend server, npm install, or asset CDN is needed.
+Vise's embedded dashboard presents live transfer telemetry and queue controls in a responsive dark interface with a queue-first layout, subtle surfaces, and readable typography. HTML, CSS, and vanilla JavaScript ship inside the executable; no frontend server, npm install, or asset CDN is needed.
 
 ## Launch the dashboard
 
@@ -18,13 +18,15 @@ Open [http://127.0.0.1:8080](http://127.0.0.1:8080) in a browser. Use the exact 
 
 For a persistent service or the browser extension, use the [authenticated daemon](daemon.md) instead. It serves the same dashboard, prompts for HTTP Basic credentials (`vise` and your generated token), and omits the terminal monitor. Do not start a second engine if a daemon already owns your global journal.
 
-![Industrial Vise dashboard with transfer speed graph, queue, and bandwidth controls](webui-industrial.jpg){ loading=lazy }
+![Vise dashboard with a sample transfer queue, throughput graph, and bandwidth controls](webui-industrial.jpg){ loading=lazy }
+
+The preview above uses sample transfers to illustrate active, paused, completed, and failed states.
 
 ## Live telemetry
 
 - **Aggregate speed:** A rolling 60-second graph shows the combined download rate, with current and peak values.
-- **Per-download telemetry:** Cards display real byte counts, percentages when total size is known, speed, ETA, and individual sparklines.
-- **Chunk grids:** Every cell represents an actual engine chunk and its progress. Active, completed, and pending segments have distinct visual states.
+- **Per-download telemetry:** Queue rows display real byte counts, percentages when total size is known, speed, ETA, and individual sparklines.
+- **Chunk grids:** Expand a row's **Chunks** disclosure to inspect its grid. Every cell represents an actual engine chunk and its progress. Active, completed, and pending segments have distinct visual states.
 - **Connection and queue counters:** Follow active workers and transfer categories without estimating progress from a page timer.
 - **Connection health:** A status indicator reports streaming or fallback/reconnection behavior.
 
@@ -34,7 +36,7 @@ Range-ineligible downloads can legitimately show a single chunk. Unknown-length 
 
 ## Queue and task controls
 
-Add an HTTP(S) URL using the queue form. Expand the advanced fields for a filename, expected SHA-256/MD5, or per-task proxy. Cookie-backed authentication inherits the engine's configured cookie file; the dashboard does not upload cookie files.
+Add an HTTP(S) URL and optional filename using the queue form. Expand **Checksum verification** for expected SHA-256/MD5 values. Per-task proxy overrides are available through the [API](daemon.md#queue-and-control-a-task); otherwise dashboard additions inherit the engine's configured default proxy. Cookie-backed authentication inherits the engine's configured cookie file; the dashboard does not upload cookie files.
 
 Use search and the All, Active, Paused, Done, and Failed filters to focus the queue. Per-task controls send API requests without a page reload:
 

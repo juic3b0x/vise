@@ -2,6 +2,14 @@
 
 All notable changes to Vise are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.5.1] - 2026-10-25
+
+### Changed
+
+- Refine the embedded WebUI with a calm dark palette, fine structural borders, readable typography, and a queue-first layout. Remove decorative identifiers, neon glows, and nested card surfaces.
+- Present throughput and bandwidth in a compact monitoring column. Use restrained state indicators, neutral metadata, and monospace numeric telemetry; expand a transfer's chunk details on demand.
+- Keep existing REST/WebSocket contracts, checksum controls, bandwidth presets, search, filters, and connection fallback. Retain keyboard navigation and reduced-motion support, with descriptive task-action labels and responsive layouts.
+
 ## [0.5.0] - 2026-10-25
 
 ### Added
@@ -159,6 +167,7 @@ Initial release.
 - **Local WebUI safeguards:** Loopback-only binding, host and browser-origin validation, JSON-only mutations, and a Content Security Policy constrain browser access.
 - **Safe publication:** Existing output files are never overwritten, and configured checksum verification must succeed before final publication. SHA-256 from a trusted source is preferred for security-sensitive verification; MD5 supports legacy compatibility and accidental-corruption detection.
 
+[0.5.1]: https://github.com/juic3b0x/vise/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/juic3b0x/vise/compare/v0.4.4...v0.5.0
 [0.4.4]: https://github.com/juic3b0x/vise/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/juic3b0x/vise/compare/v0.4.2...v0.4.3

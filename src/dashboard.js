@@ -127,7 +127,7 @@
     configuration = data.configuration;
     lastSnapshot = performance.now();
     lastTransport = transport;
-    text($('update-time'), 'UPDATED ' + new Date(data.timestamp).toLocaleTimeString([], { hour12: false }));
+    text($('update-time'), 'Updated ' + new Date(data.timestamp).toLocaleTimeString([], { hour12: false }));
     renderConfiguration();
     scheduleRender();
   }
@@ -147,14 +147,14 @@
     const running = downloads.filter(d => active(d.status));
     const totalSpeed = downloads.reduce((sum, d) => sum + Math.max(0, d.bytes_per_second), 0);
     text($('total-speed'), fresh ? speed(totalSpeed) : '—');
-    text($('speed-note'), fresh ? (running.length ? 'Live across the worker pool' : 'Engine idle / ready for work') : initialized ? 'Connection interrupted / data stale' : 'Awaiting engine telemetry');
-    text($('active-count'), initialized ? String(running.length).padStart(2, '0') : '—');
+    text($('speed-note'), fresh ? (running.length ? 'Live across the worker pool' : 'Ready for new transfers') : initialized ? 'Connection interrupted · data stale' : 'Awaiting engine telemetry');
+    text($('active-count'), initialized ? String(running.length) : '—');
     text($('connection-count'), downloads.reduce((sum, d) => sum + d.chunks.filter(c => c.status === 'downloading' && active(d.status)).length, 0) + ' active chunks');
     text($('received-total'), initialized ? bytes(downloads.reduce((sum, d) => sum + d.downloaded_bytes, 0)) : '—');
-    text($('completed-count'), initialized ? String(downloads.filter(d => d.status === 'completed').length).padStart(2, '0') : '—');
+    text($('completed-count'), initialized ? String(downloads.filter(d => d.status === 'completed').length) : '—');
     text($('queue-count'), `${downloads.length} transfer${downloads.length === 1 ? '' : 's'} in queue`);
     $('connection').className = 'connection' + (fresh ? lastTransport === 'websocket' ? ' live' : ' polling' : '');
-    text($('connection-text'), fresh ? lastTransport === 'websocket' ? 'ENGINE LIVE' : 'HTTP FALLBACK' : initialized ? 'RECONNECTING' : 'CONNECTING');
+    text($('connection-text'), fresh ? lastTransport === 'websocket' ? 'Connected' : 'Connected · polling' : initialized ? 'Reconnecting' : 'Connecting');
     for (const count of document.querySelectorAll('[data-count]')) {
       const category = count.dataset.count;
       text(count, downloads.filter(d => inCategory(d, category)).length);
@@ -176,7 +176,7 @@
       updateCard(card, d, fresh);
       if (!card.root.hidden) visible++;
     }
-    text($('visible-count'), String(visible).padStart(2, '0'));
+    text($('visible-count'), String(visible));
     $('empty-state').hidden = visible > 0;
     if (initialized) {
       text($('empty-title'), downloads.length ? 'No matching transfers' : 'Ready for your next transfer.');
@@ -191,7 +191,7 @@
     const card = { root, download: null, filename: select('.filename'), source: select('.source'), badge: select('.badge'),
       size: select('.download-size'), rate: select('.download-speed'), percent: select('.download-percent'),
       track: select('.progress-track'), fill: select('.progress-fill'), summary: select('.chunk-summary'),
-      grid: select('.chunk-grid'), eta: select('.download-eta'), identity: select('.download-id'),
+      grid: select('.chunk-grid'), eta: select('.download-eta'),
       toggle: select('.toggle'), cancel: select('.cancel'), error: select('.download-error'), checksum: select('.checksum-status'), spark: select('.sparkline path'), tiles: [] };
     card.toggle.addEventListener('click', () => action(id, active(card.download.status) ? 'pause' : ['corrupt','failed'].includes(card.download.status) ? 'retry' : 'resume'));
     card.cancel.addEventListener('click', () => action(id, 'delete'));
@@ -204,7 +204,7 @@
     attr(c.root, 'aria-busy', !!inFlight);
     text(c.filename, d.filename); attr(c.filename, 'title', d.filename);
     text(c.source, d.url); attr(c.source, 'title', d.url);
-    text(c.badge, inFlight ? { pause: 'Pausing…', resume: 'Resuming…', retry: 'Restarting…', delete: 'Removing…' }[inFlight] : d.status);
+    text(c.badge, inFlight ? { pause: 'Pausing…', resume: 'Resuming…', retry: 'Restarting…', delete: 'Removing…' }[inFlight] : d.status[0].toUpperCase() + d.status.slice(1));
     text(c.size, bytes(d.downloaded_bytes) + ' / ' + (d.total_bytes == null ? 'unknown' : bytes(d.total_bytes)));
     text(c.rate, fresh ? speed(d.bytes_per_second) : '— /s');
     const percent = percentage(d.downloaded_bytes, d.total_bytes, d.status === 'completed');
@@ -214,23 +214,24 @@
     else attr(c.track, 'aria-valuenow', percent.toFixed(1));
     attr(c.track, 'aria-valuetext', `${bytes(d.downloaded_bytes)} of ${d.total_bytes == null ? 'unknown size' : bytes(d.total_bytes)}`);
     c.fill.style.width = percent == null ? '' : `${percent}%`;
-    text(c.eta, d.status === 'completed' ? 'TRANSFER COMPLETE' : fresh ? eta(d.eta_seconds) : 'TELEMETRY STALE');
-    text(c.identity, d.id.slice(0, 8).toUpperCase() + (d.chunks.length === 1 ? ' / SINGLE STREAM' : ` / ${d.chunks.length} CHUNKS`));
+    text(c.eta, d.status === 'completed' ? 'Complete' : d.status === 'paused' ? 'Paused' : ['failed', 'corrupt'].includes(d.status) ? 'Needs attention' : fresh ? eta(d.eta_seconds) : 'Telemetry unavailable');
     c.error.hidden = !d.error; text(c.error, d.error || '');
     const algorithms = [d.expected_sha256 && 'SHA-256', d.expected_md5 && 'MD5'].filter(Boolean).join(' + ');
     c.checksum.hidden = !algorithms;
-    text(c.checksum, d.status === 'corrupt' ? `${algorithms} MISMATCH / File retained. Re-download retries every chunk.` : d.status === 'verifying' ? `VERIFYING ${algorithms} / Publication pending` : d.verified_at != null ? `${algorithms} VERIFIED / ${new Date(d.verified_at).toLocaleString()}` : `${algorithms} / Verification required before publication`);
+    text(c.checksum, d.status === 'corrupt' ? `${algorithms} mismatch. File retained; re-download retries every chunk.` : d.status === 'verifying' ? `Verifying ${algorithms} before publication…` : d.verified_at != null ? `${algorithms} verified · ${new Date(d.verified_at).toLocaleString()}` : `${algorithms} · Verification required before publication`);
     attr(c.checksum, 'title', [d.actual_sha256 && `SHA-256: ${d.actual_sha256}`, d.actual_md5 && `MD5: ${d.actual_md5}`].filter(Boolean).join(' / '));
     c.toggle.hidden = d.status === 'completed';
-    text(c.toggle, inFlight && inFlight !== 'delete' ? 'Working…' : active(d.status) ? 'Ⅱ Pause' : d.status === 'corrupt' ? '↻ Re-download' : d.status === 'failed' ? '↻ Retry' : '▶ Resume');
-    text(c.cancel, inFlight === 'delete' ? 'Removing…' : d.status === 'completed' ? 'Remove' : '× Cancel');
+    text(c.toggle, inFlight && inFlight !== 'delete' ? 'Working…' : active(d.status) ? 'Pause' : d.status === 'corrupt' ? 'Re-download' : d.status === 'failed' ? 'Retry' : 'Resume');
+    text(c.cancel, inFlight === 'delete' ? 'Removing…' : d.status === 'completed' ? 'Remove' : 'Cancel');
     attr(c.cancel, 'title', d.status === 'completed' ? 'Remove from queue. The completed file is kept.' : 'Cancel this transfer and discard its partial data.');
+    attr(c.toggle, 'aria-label', `${c.toggle.textContent}: ${d.filename}`);
+    attr(c.cancel, 'aria-label', `${c.cancel.textContent}: ${d.filename}`);
     c.toggle.disabled = c.cancel.disabled = !!inFlight;
     updateChunks(c, d);
   }
   function updateChunks(c, d) {
     const complete = d.chunks.filter(chunk => chunk.status === 'completed').length;
-    text(c.summary, d.chunks.length ? `CHUNKS / ${complete} OF ${d.chunks.length} COMPLETE` : 'CHUNKS / AWAITING SOURCE');
+    text(c.summary, d.chunks.length ? `Chunks · ${complete} of ${d.chunks.length} complete` : 'Chunks · Checking source');
     if (!d.chunks.length) {
       if (!c.grid.querySelector('.chunk-waiting')) {
         const waiting = document.createElement('span'); waiting.className = 'chunk-waiting';
@@ -282,7 +283,7 @@
       $('search').value = ''; scheduleRender();
       await poll(true);
     } catch (error) { showError(error.message); }
-    finally { button.disabled = false; text(button, '＋ Add transfer'); }
+    finally { button.disabled = false; text(button, 'Add transfer'); }
   });
   function updateFilters() {
     for (const button of document.querySelectorAll('[data-filter]')) {
@@ -314,18 +315,18 @@
     if (!rateDirty && !rateRunning && document.activeElement !== $('limit-rate') && document.activeElement !== $('rate-slider')) {
       $('limit-rate').value = rateInput(rate); sliderDisplay(sliderPosition(rate), rate);
     }
-    if (!rateDirty && !rateRunning) text($('rate-feedback'), 'APPLIED / SAVED TO JOURNAL');
+    if (!rateDirty && !rateRunning) text($('rate-feedback'), 'Saved. Applies to all active transfers.');
   }
   $('limit-rate').addEventListener('input', () => {
     rateDirty = true; rateRevision++;
     $('limit-rate').removeAttribute('aria-invalid'); $('rate-feedback').classList.remove('error');
-    text($('rate-feedback'), 'DRAFT / PRESS ENTER TO APPLY');
+    text($('rate-feedback'), 'Press Enter or Apply to save.');
   });
   $('rate-slider').addEventListener('input', () => {
     const position = Number($('rate-slider').value), rate = sliderRate(position);
     rateDirty = true; rateRevision++;
     $('limit-rate').value = rateInput(rate); sliderDisplay(position, rate);
-    text($('rate-feedback'), `RELEASE TO APPLY / ${rate == null ? 'UNLIMITED' : speed(rate)}`);
+    text($('rate-feedback'), `Release to apply · ${rate == null ? 'Unlimited' : speed(rate)}`);
   });
   $('rate-slider').addEventListener('change', () => queueRate($('limit-rate').value));
   $('rate-form').addEventListener('submit', event => { event.preventDefault(); queueRate($('limit-rate').value.trim() || 'off'); });
@@ -340,12 +341,12 @@
     text($('rate-button'), 'Applying…');
     while (queuedRate) {
       const request = queuedRate; queuedRate = null;
-      text($('rate-feedback'), 'APPLYING TO ACTIVE CONNECTIONS…');
+      text($('rate-feedback'), 'Applying to active connections…');
       try {
         configuration = await api('/api/config', { limit_rate: request.value });
         if (request.revision === rateRevision) rateDirty = false;
         $('limit-rate').removeAttribute('aria-invalid'); $('rate-feedback').classList.remove('error');
-        text($('rate-feedback'), rateDirty ? 'DRAFT / PRESS ENTER TO APPLY' : 'APPLIED / SAVED TO JOURNAL');
+        text($('rate-feedback'), rateDirty ? 'Press Enter or Apply to save.' : 'Saved. Applies to all active transfers.');
         activity('Bandwidth applied', configuration.limit_rate);
       } catch (error) {
         rateDirty = true;

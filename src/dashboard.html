@@ -4,61 +4,128 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
-  <meta name="theme-color" content="#101313">
+  <meta name="theme-color" content="#0b0d13">
   <title>Vise / Transfer console</title>
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath fill='%23c6f36b' d='M3 3h7l6 19L22 3h7L19 29h-6z'/%3E%3C/svg%3E">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath fill='%23e2e8f0' d='M3 3h7l6 19L22 3h7L19 29h-6z'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="/assets/dashboard.css">
   <script src="/assets/dashboard.js" defer></script>
 </head>
 <body>
   <a class="skip-link" href="#transfers">Skip to transfers</a>
   <header class="masthead">
-    <a class="brand" href="/" aria-label="Vise home"><svg viewBox="0 0 40 40" aria-hidden="true"><path d="M3 7h9v6H9v14h8v6H3zm34 0h-9v6h3v14h-8v6h14z"/><path d="M17 5h6v13h5l-8 9-8-9h5z"/></svg><span>VISE<span class="brand-period">.</span></span></a>
-    <span class="masthead-divider" aria-hidden="true"></span><span class="eyebrow console-name">TRANSFER CONSOLE <span class="muted">/ 01</span></span>
-    <div class="connection" id="connection" role="status"><span class="led"></span><span id="connection-text">CONNECTING</span></div>
+    <div class="masthead-inner">
+      <a class="brand" href="/" aria-label="Vise home">
+        <svg viewBox="0 0 40 40" aria-hidden="true"><path d="M3 7h9v6H9v14h8v6H3zm34 0h-9v6h3v14h-8v6h14z"/><path d="M17 5h6v13h5l-8 9-8-9h5z"/></svg>
+        <span>Vise</span>
+      </a>
+      <span class="masthead-divider" aria-hidden="true">/</span>
+      <span class="console-name">Downloads</span>
+      <div class="connection" id="connection" role="status"><span class="led"></span><span id="connection-text">Connecting</span></div>
+    </div>
   </header>
   <main>
-    <div class="page-heading"><div><div class="eyebrow accent">LOCAL ENGINE / LIVE TELEMETRY</div><h1>A firm grip.<br><span class="muted">On every byte.</span></h1></div><div class="session-note mono"><span class="led small"></span> ASYNC BY DESIGN<br><span class="muted">PARALLEL. PERSISTENT. PRECISE.</span></div></div>
+    <div class="page-heading">
+      <h1>Downloads</h1>
+      <p>Your queue, progress, and bandwidth in one place.</p>
+    </div>
     <section class="overview" aria-label="Transfer overview">
-      <div class="metric"><span class="eyebrow">01 / THROUGHPUT</span><div class="metric-value" id="total-speed">—</div><span class="metric-sub mono" id="speed-note">Awaiting engine telemetry</span></div>
-      <div class="metric"><span class="eyebrow">02 / ACTIVE TRANSFERS</span><div class="metric-value" id="active-count">—</div><span class="metric-sub mono" id="connection-count">— active chunks</span></div>
-      <div class="metric"><span class="eyebrow">03 / RECEIVED</span><div class="metric-value" id="received-total">—</div><span class="metric-sub mono">Across the current queue</span></div>
-      <div class="metric"><span class="eyebrow">04 / COMPLETED</span><div class="metric-value" id="completed-count">—</div><span class="metric-sub mono" id="queue-count">— in queue</span></div>
+      <div class="metric"><span class="metric-label">Transfer speed</span><div class="metric-value" id="total-speed">—</div><span class="metric-sub" id="speed-note">Awaiting engine telemetry</span></div>
+      <div class="metric"><span class="metric-label">Active transfers</span><div class="metric-value" id="active-count">—</div><span class="metric-sub" id="connection-count">— active chunks</span></div>
+      <div class="metric"><span class="metric-label">Downloaded</span><div class="metric-value" id="received-total">—</div><span class="metric-sub">Across the current queue</span></div>
+      <div class="metric"><span class="metric-label">Completed</span><div class="metric-value" id="completed-count">—</div><span class="metric-sub" id="queue-count">— in queue</span></div>
     </section>
     <div class="workspace">
       <div class="primary-column">
-        <section class="panel throughput-panel" aria-labelledby="throughput-title">
-          <div class="panel-heading"><h2 id="throughput-title"><span class="section-index">01</span> TRANSFER RATE</h2><span class="eyebrow muted">ROLLING 60 SECONDS</span></div>
-          <div class="graph-meta mono"><span><span class="legend-line"></span> AGGREGATE <b id="graph-current">—</b></span><span class="muted">PEAK <b id="graph-peak">—</b></span></div>
-          <div class="graph-wrap"><span class="graph-scale mono" id="graph-scale">—</span><svg id="speed-graph" class="speed-graph" viewBox="0 0 800 150" preserveAspectRatio="none" role="img" aria-label="Aggregate transfer speed over the last sixty seconds"><defs><linearGradient id="speed-fill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#c6f36b" stop-opacity=".24"/><stop offset="100%" stop-color="#c6f36b" stop-opacity="0"/></linearGradient></defs><path class="graph-grid" d="M0 0H800M0 50H800M0 100H800M0 149H800M133 0V150M266 0V150M400 0V150M533 0V150M666 0V150"/><path id="graph-area" class="graph-area"/><path id="graph-line" class="graph-line"/></svg><div class="graph-empty mono" id="graph-empty">LISTENING FOR TRANSFER DATA</div></div>
-          <div class="graph-axis mono"><span>−60s</span><span>−30s</span><span>NOW</span></div>
-        </section>
-        <section class="panel intake" aria-labelledby="intake-title">
-          <div class="panel-heading"><h2 id="intake-title"><span class="section-index">02</span> NEW TRANSFER</h2><span class="eyebrow muted">HTTP / HTTPS</span></div>
-          <form id="add-form"><div class="intake-fields"><label class="url-field" for="url">Source URL<input id="url" name="url" type="url" required maxlength="8192" placeholder="https://example.com/archive.zip" autocomplete="off" spellcheck="false"></label><label for="filename">Filename <span class="muted">/ optional</span><input id="filename" name="filename" maxlength="200" placeholder="Use source filename" autocomplete="off"></label><button id="add-button" class="button primary" type="submit"><span aria-hidden="true">＋</span> Add transfer</button></div><details class="checksum-options"><summary>Checksum verification <span class="muted">/ optional</span></summary><p>Verify before publishing the file. Both hashes must match when both are provided.</p><div class="checksum-fields"><label for="expected-sha256">Expected SHA-256<input id="expected-sha256" name="expected-sha256" minlength="64" maxlength="64" pattern="[0-9a-fA-F]{64}" placeholder="64 hexadecimal digits" autocomplete="off" spellcheck="false"></label><label for="expected-md5">Expected MD5<input id="expected-md5" name="expected-md5" minlength="32" maxlength="32" pattern="[0-9a-fA-F]{32}" placeholder="32 hexadecimal digits" autocomplete="off" spellcheck="false"></label></div></details></form>
+        <section class="intake" aria-labelledby="intake-title">
+          <div class="panel-heading"><h2 id="intake-title">New transfer</h2><span class="section-note">HTTP / HTTPS</span></div>
+          <form id="add-form">
+            <div class="intake-fields">
+              <label class="url-field" for="url">Source URL<input id="url" name="url" type="url" required maxlength="8192" placeholder="https://example.com/archive.zip" autocomplete="off" spellcheck="false"></label>
+              <label for="filename">Filename <span class="muted">(optional)</span><input id="filename" name="filename" maxlength="200" placeholder="Use source filename" autocomplete="off"></label>
+              <button id="add-button" class="button primary" type="submit">Add transfer</button>
+            </div>
+            <details class="checksum-options">
+              <summary>Checksum verification <span class="muted">(optional)</span></summary>
+              <p>Verify before publishing the file. Both hashes must match when both are provided.</p>
+              <div class="checksum-fields">
+                <label for="expected-sha256">Expected SHA-256<input id="expected-sha256" name="expected-sha256" minlength="64" maxlength="64" pattern="[0-9a-fA-F]{64}" placeholder="64 hexadecimal digits" autocomplete="off" spellcheck="false"></label>
+                <label for="expected-md5">Expected MD5<input id="expected-md5" name="expected-md5" minlength="32" maxlength="32" pattern="[0-9a-fA-F]{32}" placeholder="32 hexadecimal digits" autocomplete="off" spellcheck="false"></label>
+              </div>
+            </details>
+          </form>
         </section>
         <section id="transfers" class="transfers" aria-labelledby="transfers-title" tabindex="-1">
-          <div class="transfer-heading"><h2 id="transfers-title">TRANSFER QUEUE <span id="visible-count" class="count-tag mono">00</span></h2><label class="search"><span class="sr-only">Search transfers</span><input id="search" type="search" placeholder="Filter by filename or URL" autocomplete="off"></label></div>
-          <div class="filter-bar" role="group" aria-label="Filter transfers"><button type="button" class="filter selected" data-filter="all" aria-pressed="true">All <span data-count="all">0</span></button><button type="button" class="filter" data-filter="active" aria-pressed="false">Active <span data-count="active">0</span></button><button type="button" class="filter" data-filter="paused" aria-pressed="false">Paused <span data-count="paused">0</span></button><button type="button" class="filter" data-filter="completed" aria-pressed="false">Done <span data-count="completed">0</span></button><button type="button" class="filter" data-filter="failed" aria-pressed="false">Failed <span data-count="failed">0</span></button></div>
-          <div id="downloads" aria-label="Downloads"></div>
-          <div id="empty-state" class="empty-state"><span class="empty-cross" aria-hidden="true">↓</span><h3 id="empty-title">Connecting to your engine</h3><p id="empty-description">Your saved transfers will appear here.</p></div>
+          <div class="transfer-heading">
+            <h2 id="transfers-title">Transfer queue <span id="visible-count" class="count-tag mono">0</span></h2>
+            <label class="search"><span class="sr-only">Search transfers</span><input id="search" type="search" placeholder="Search filename or URL…" autocomplete="off"></label>
+          </div>
+          <div class="filter-bar" role="group" aria-label="Filter transfers">
+            <button type="button" class="filter selected" data-filter="all" aria-pressed="true">All <span data-count="all">0</span></button>
+            <button type="button" class="filter" data-filter="active" aria-pressed="false">Active <span data-count="active">0</span></button>
+            <button type="button" class="filter" data-filter="paused" aria-pressed="false">Paused <span data-count="paused">0</span></button>
+            <button type="button" class="filter" data-filter="completed" aria-pressed="false">Done <span data-count="completed">0</span></button>
+            <button type="button" class="filter" data-filter="failed" aria-pressed="false">Failed <span data-count="failed">0</span></button>
+          </div>
+          <div class="queue-list">
+            <div id="downloads" aria-label="Downloads"></div>
+            <div id="empty-state" class="empty-state"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m-4-4 4 4 4-4M5 16v4h14v-4"/></svg><h3 id="empty-title">Connecting to your engine</h3><p id="empty-description">Your saved transfers will appear here.</p></div>
+          </div>
         </section>
       </div>
-      <aside class="secondary-column" aria-label="Transfer controls and activity">
-        <section class="panel bandwidth-panel" aria-labelledby="bandwidth-title"><div class="panel-heading"><h2 id="bandwidth-title"><span class="section-index">03</span> BANDWIDTH</h2><span class="tag mono">GLOBAL</span></div>
-          <div class="limit-readout mono" id="rate-current">—</div><p class="panel-description">One budget. Every active connection.</p>
-          <form id="rate-form"><label for="rate-slider" class="sr-only">Global bandwidth slider</label><input id="rate-slider" type="range" min="0" max="100" step="1" value="0" aria-valuetext="Unlimited" aria-describedby="rate-hint"><div class="slider-axis mono"><span>UNLIMITED</span><span>1 GiB/s</span></div><div class="rate-input-row"><label class="sr-only" for="limit-rate">Global bandwidth limit</label><input id="limit-rate" name="limit-rate" placeholder="5M or off" maxlength="64" autocomplete="off" spellcheck="false" aria-describedby="rate-hint rate-feedback"><button class="button" id="rate-button" type="submit">Apply</button></div></form>
-          <div class="presets" role="group" aria-label="Bandwidth presets"><button class="preset" type="button" data-rate="1M">1 MiB/s</button><button class="preset" type="button" data-rate="5M">5 MiB/s</button><button class="preset" type="button" data-rate="20M">20 MiB/s</button><button class="preset" type="button" data-rate="off">Unlimited</button></div>
-          <p id="rate-hint" class="helper">K / M = KiB / MiB per second. Use <span class="mono">off</span> for unlimited. Changes apply live and are saved.</p><div id="rate-feedback" class="rate-feedback mono" role="status">Waiting for configuration</div>
+      <aside class="secondary-column" aria-label="Transfer telemetry and controls">
+        <section class="panel throughput-panel" aria-labelledby="throughput-title">
+          <div class="panel-heading"><h2 id="throughput-title">Throughput</h2><span class="section-note">Last 60 seconds</span></div>
+          <div class="graph-meta"><span class="mono" id="graph-current">—</span><span class="muted">Peak <b class="mono" id="graph-peak">—</b></span></div>
+          <div class="graph-wrap">
+            <span class="graph-scale mono" id="graph-scale">—</span>
+            <svg id="speed-graph" class="speed-graph" viewBox="0 0 800 150" preserveAspectRatio="none" role="img" aria-label="Aggregate transfer speed over the last sixty seconds">
+              <defs><linearGradient id="speed-fill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#8cceaa" stop-opacity=".10"/><stop offset="100%" stop-color="#8cceaa" stop-opacity="0"/></linearGradient></defs>
+              <path class="graph-grid" d="M0 1H800M0 50H800M0 100H800M0 149H800"/><path id="graph-area" class="graph-area"/><path id="graph-line" class="graph-line"/>
+            </svg>
+            <div class="graph-empty" id="graph-empty">No transfer activity yet</div>
+          </div>
+          <div class="graph-axis mono"><span>−60s</span><span>−30s</span><span>Now</span></div>
         </section>
-        <section class="panel activity-panel" aria-labelledby="activity-title"><div class="panel-heading"><h2 id="activity-title"><span class="section-index">04</span> ACTIVITY</h2><span class="live-caption mono"><span class="led small"></span> SESSION</span></div><ol id="activity" class="activity-list"><li class="activity-empty mono">Waiting for engine events.</li></ol></section>
-        <section class="engine-note"><span class="eyebrow accent">BUILT TO KEEP GOING.</span><p>Chunk state is journaled to SQLite.<br>Pause now. Pick up where you left off.</p><div class="chunk-legend mono"><span><i data-state="downloading"></i> Active</span><span><i data-state="completed"></i> Done</span><span><i data-state="queued"></i> Pending</span></div></section>
+        <section class="panel bandwidth-panel" aria-labelledby="bandwidth-title">
+          <div class="panel-heading"><h2 id="bandwidth-title">Bandwidth</h2><span class="section-note">Global limit</span></div>
+          <div class="limit-readout mono" id="rate-current">—</div>
+          <p class="panel-description">Shared across all active transfers.</p>
+          <form id="rate-form">
+            <label for="rate-slider" class="sr-only">Global bandwidth slider</label>
+            <input id="rate-slider" type="range" min="0" max="100" step="1" value="0" aria-valuetext="Unlimited" aria-describedby="rate-hint">
+            <div class="slider-axis"><span>Unlimited</span><span class="mono">1 GiB/s</span></div>
+            <div class="rate-input-row"><label class="sr-only" for="limit-rate">Global bandwidth limit</label><input id="limit-rate" name="limit-rate" placeholder="5M or off" maxlength="64" autocomplete="off" spellcheck="false" aria-describedby="rate-hint rate-feedback"><button class="button" id="rate-button" type="submit">Apply</button></div>
+          </form>
+          <div class="presets" role="group" aria-label="Bandwidth presets">
+            <button class="preset" type="button" data-rate="1M">1 MiB/s</button><button class="preset" type="button" data-rate="5M">5 MiB/s</button><button class="preset" type="button" data-rate="20M">20 MiB/s</button><button class="preset" type="button" data-rate="off">Unlimited</button>
+          </div>
+          <p id="rate-hint" class="helper">Use K or M for KiB/s or MiB/s, or <code>off</code> for unlimited. Changes apply live and are saved.</p>
+          <div id="rate-feedback" class="rate-feedback" role="status">Waiting for configuration</div>
+        </section>
+        <section class="activity-panel" aria-labelledby="activity-title">
+          <div class="panel-heading"><h2 id="activity-title">Recent activity</h2><span class="section-note">This session</span></div>
+          <ol id="activity" class="activity-list"><li class="activity-empty">Waiting for engine events.</li></ol>
+        </section>
+        <p class="engine-note">Progress is saved automatically. Pause a transfer and pick up where you left off.</p>
       </aside>
     </div>
-    <footer class="mono"><span>VISE / LOCAL DOWNLOAD CONTROL</span><span id="update-time">Awaiting first update</span><span>RUST + TOKIO + AXUM</span></footer>
+    <footer><span>Vise · A firm grip on every download.</span><span id="update-time">Awaiting first update</span></footer>
   </main>
   <div id="notice" class="notice" role="alert" hidden><span id="notice-text"></span><button type="button" id="dismiss-notice" aria-label="Dismiss message">×</button></div>
   <noscript><p class="noscript">Enable JavaScript to connect to the Vise engine and control transfers.</p></noscript>
-  <template id="download-template"><article class="download"><div class="download-top"><div class="file-glyph mono" aria-hidden="true">↓</div><div class="file-details"><h3 class="filename"></h3><div class="source mono"></div></div><span class="badge mono"></span></div><div class="download-telemetry"><span class="download-size mono"></span><svg class="sparkline" viewBox="0 0 160 28" preserveAspectRatio="none" role="img" aria-label="Transfer speed over the last sixty seconds"><path/></svg><span class="download-speed mono"></span><strong class="download-percent mono"></strong></div><div class="progress-track" role="progressbar" aria-label="Download progress" aria-valuemin="0" aria-valuemax="100"><div class="progress-fill"></div></div><div class="chunk-heading mono"><span class="chunk-summary"></span><span class="download-eta"></span></div><div class="chunk-grid" role="group" aria-label="Chunk progress"></div><div class="download-bottom"><span class="download-id mono"></span><div class="actions"><button type="button" class="button compact toggle"></button><button type="button" class="button compact danger cancel"></button></div></div><p class="checksum-status mono" hidden></p><p class="download-error" hidden></p></article></template>
+  <template id="download-template">
+    <article class="download">
+      <div class="download-top">
+        <svg class="file-glyph" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3H5v18h14V8Zm0 0v5h5M9 14l3 3 3-3m-3 3v-6"/></svg>
+        <div class="file-details"><h3 class="filename"></h3><div class="source"></div></div>
+        <span class="badge"></span>
+      </div>
+      <div class="download-telemetry"><span class="download-size mono"></span><svg class="sparkline" viewBox="0 0 160 28" preserveAspectRatio="none" role="img" aria-label="Transfer speed over the last sixty seconds"><path/></svg><span class="download-speed mono"></span><strong class="download-percent mono"></strong></div>
+      <div class="progress-track" role="progressbar" aria-label="Download progress" aria-valuemin="0" aria-valuemax="100"><div class="progress-fill"></div></div>
+      <div class="download-bottom"><span class="download-eta mono"></span><div class="actions"><button type="button" class="button compact toggle"></button><button type="button" class="button compact danger cancel"></button></div></div>
+      <details class="chunk-details"><summary class="chunk-summary"></summary><div class="chunk-grid" role="group" aria-label="Chunk progress"></div><div class="chunk-legend"><span><i data-state="downloading"></i>Active</span><span><i data-state="completed"></i>Done</span><span><i data-state="queued"></i>Pending</span></div></details>
+      <p class="checksum-status" hidden></p><p class="download-error" hidden></p>
+    </article>
+  </template>
 </body>
 </html>

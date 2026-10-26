@@ -15,7 +15,7 @@ hide:
 <p class="vise-tagline">A firm grip on every download.</p>
 
 Parallel transfers. Durable checkpoints. Precise bandwidth control.
-Vise brings a fast terminal workflow and an embedded industrial dashboard to the same download engine.
+Vise brings a fast terminal workflow and an embedded download dashboard to the same download engine.
 
 [Get started](installation.md){ .md-button .md-button--primary }
 [Explore the CLI](usage.md){ .md-button }
