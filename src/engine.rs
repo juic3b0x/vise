@@ -77,17 +77,25 @@ struct Job {
     output_path: PathBuf,
     part_path: PathBuf,
     record: RwLock<Record>,
+    // Readers must not observe provisional terminal state during its journal commit.
+    settlement: RwLock<()>,
     client: RwLock<Client>,
     control: Mutex<()>,
     run: Mutex<Option<Run>>,
     removed: AtomicBool,
 }
 impl Job {
+    async fn snapshot(&self) -> crate::model::Download {
+        let _settled = self.settlement.read().await;
+        self.record.read().await.snapshot()
+    }
+
     fn new(record: Record, client: Client) -> Self {
         Self {
             output_path: record.output_path.clone(),
             part_path: record.part_path.clone(),
             record: RwLock::new(record),
+            settlement: RwLock::new(()),
             client: RwLock::new(client),
             control: Mutex::new(()),
             run: Mutex::new(None),

@@ -16,6 +16,11 @@ All notable changes to Vise are documented here. The format follows [Keep a Chan
 
 - Refresh compatible dependencies for this minor release: `rustix` 1.1.5 → 1.1.6. Keep existing dependency requirements and Rust 1.88 support; add no production dependencies.
 
+### Fixed
+
+- Keep terminal task snapshots private until their SQLite commit and publication cleanup settle. If completion persistence fails, CLI/API/WebSocket readers see the resolved failed state instead of a transient `completed` result. Serialize terminal mutations with checkpoints and preserve publication evidence for recovery.
+- Add a deterministic SQLite-lock regression for both successful and rejected completion commits, alongside the end-to-end publication recovery test, to remove the scheduling-dependent Ubuntu failure.
+
 ## [0.5.1] - 2026-10-25
 
 ### Changed

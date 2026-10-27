@@ -137,7 +137,7 @@ impl Manager {
         if self.0.stopping.load(Ordering::Acquire) {
             return Err(Error::Conflict("manager is shutting down".into()));
         }
-        let status = job.record.read().await.status;
+        let status = job.snapshot().await.status;
         if status.active() {
             self.publish_job(action, &job).await;
             return Ok(());
@@ -195,7 +195,7 @@ impl Manager {
         if job.removed.load(Ordering::Acquire) {
             return Err(Error::NotFound(id));
         }
-        let status = job.record.read().await.status;
+        let status = job.snapshot().await.status;
         if status == Status::Corrupt {
             return Err(Error::Conflict(
                 "download is corrupt; use retry to re-download all chunks".into(),

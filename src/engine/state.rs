@@ -52,7 +52,7 @@ impl Manager {
     }
 
     pub(super) async fn publish_job(&self, kind: EventKind, job: &Job) {
-        self.publish(kind, Some(job.record.read().await.snapshot()));
+        self.publish(kind, Some(job.snapshot().await));
     }
 
     pub(super) async fn transition(&self, job: &Job, to: Status) -> Result<()> {
@@ -98,7 +98,7 @@ impl Manager {
         let jobs: Vec<_> = self.0.jobs.read().await.values().cloned().collect();
         let mut result = Vec::with_capacity(jobs.len());
         for job in jobs {
-            result.push(job.record.read().await.snapshot());
+            result.push(job.snapshot().await);
         }
         result
     }
@@ -124,6 +124,6 @@ impl Manager {
     }
 
     pub async fn get(&self, id: Uuid) -> Result<Download> {
-        Ok(self.job(id).await?.record.read().await.snapshot())
+        Ok(self.job(id).await?.snapshot().await)
     }
 }
