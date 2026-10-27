@@ -27,6 +27,7 @@ use crate::{
 };
 
 mod access;
+mod batch;
 use access::Access;
 
 /// Validated daemon listener configuration. Credentials never enter the journal.
@@ -108,9 +109,14 @@ fn router(state: AppState) -> Router {
         .route("/", get(index))
         .route("/assets/dashboard.css", get(stylesheet))
         .route("/assets/dashboard.js", get(javascript))
+        .route("/assets/dashboard-input.mjs", get(input_javascript))
         .route("/api/telemetry", get(telemetry))
         .route("/api/config", get(configuration).post(set_configuration))
         .route("/api/downloads", get(list).post(add))
+        .route(
+            "/api/downloads/batch",
+            post(batch::add).layer(DefaultBodyLimit::max(crate::input::MAX_BATCH_BODY_BYTES)),
+        )
         .route("/api/downloads/{id}", get(detail).delete(delete))
         .route("/api/downloads/{id}/pause", post(pause))
         .route("/api/downloads/{id}/resume", post(resume))
@@ -185,6 +191,13 @@ async fn javascript() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
         include_str!("dashboard.js"),
+    )
+}
+
+async fn input_javascript() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        include_str!("dashboard-input.mjs"),
     )
 }
 
@@ -427,6 +440,10 @@ mod tests {
             ("/", "text/html; charset=utf-8"),
             ("/assets/dashboard.css", "text/css; charset=utf-8"),
             ("/assets/dashboard.js", "text/javascript; charset=utf-8"),
+            (
+                "/assets/dashboard-input.mjs",
+                "text/javascript; charset=utf-8",
+            ),
         ] {
             let response = app
                 .clone()

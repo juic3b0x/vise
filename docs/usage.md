@@ -27,6 +27,31 @@ vise -o ./downloads -n rust-logo.svg \
 
 `-o` selects a **directory**; `-n` selects a plain filename. Vise refuses explicit filename collisions. Automatically derived names receive numeric suffixes when necessary. URL arguments normally run until the newly scheduled queue settles; `--interactive` keeps it open.
 
+## Input files
+
+```sh
+vise --input urls.txt -j 3 -c 8 -o ./downloads
+vise --input urls.txt --interactive
+vise --webui --input urls.txt
+```
+
+Use a UTF-8 text file with one HTTP(S) URL per line:
+
+```text
+# Release assets
+https://www.rust-lang.org/static/images/rust-logo-blk.svg
+
+https://raw.githubusercontent.com/rust-lang/rust/master/LICENSE-MIT
+```
+
+Vise trims each line, ignores empty lines and lines beginning with `#`, and accepts CRLF and a leading UTF-8 BOM. Fragments and query parameters stay part of the URL; inline comments are not stripped. Repeated URLs are preserved and receive collision-safe filenames.
+
+Limits are 1 MiB of input text, 1,000 URLs per invocation, and 8,192 bytes per URL. Missing files, directories, invalid UTF-8, malformed URLs, and empty lists fail before configuration or journal creation and before any positional URLs are queued. A malformed line reports its line number without echoing the URL. Positional arguments precede file entries. An explicitly provided empty file is an error even with positional URLs.
+
+The combined queue uses the normal `-j`, `-c`, `-o`, proxy, cookie, and rate settings. Without `--interactive` or a server flag, Vise exits after the session's tasks settle and reports failures through its exit code. `--name` and expected-checksum flags require exactly one URL after combining arguments and the file. `--resume-all` retains its normal behavior for saved tasks.
+
+With a running daemon, use [remote file ingestion](remote.md#bulk-ingestion) instead of starting another engine.
+
 ## Core modes
 
 | Mode | Command | Controller |
@@ -47,6 +72,7 @@ Stop a session with Ctrl+C; a service manager can send SIGTERM. Vise stops worke
 | Option | Behavior / initial default |
 | --- | --- |
 | `[URLS]...` | HTTP(S) URLs to queue; credentials embedded in URLs are rejected |
+| `--input <FILE>` | Read a bounded UTF-8 URL list; positional URLs come first |
 | `-o, --output <DIR>` | Destination for new tasks; initially `~/Downloads/Vise` |
 | `-n, --name <NAME>` | Plain output filename; requires exactly one URL |
 | `-j, --jobs <COUNT>` | Simultaneous downloads, 1–64; initially 5 from configuration |

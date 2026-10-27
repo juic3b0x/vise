@@ -1,3 +1,5 @@
+import {parseUrls, readUrlFile} from '/assets/dashboard-input.mjs';
+
 'use strict';
 
 // Dependency-free controller. Histories, event entries, and DOM nodes are bounded
@@ -55,7 +57,7 @@
 
   async function api(path, body, method) {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 10000);
+    const timeout = setTimeout(() => controller.abort(), path === '/api/downloads/batch' ? 120000 : 10000);
     try {
       const response = await fetch(path, {
         method: method || (body === undefined ? 'GET' : 'POST'),
@@ -271,19 +273,71 @@
     finally { pending.delete(id); scheduleRender(); }
   }
 
+  let readingFile = false;
+  function inputFeedback(message, error = false) {
+    text($('input-feedback'), message);
+    $('input-feedback').classList.toggle('error', error);
+  }
+  async function loadFile(file) {
+    if (readingFile || $('add-button').disabled) return;
+    readingFile = true; $('add-button').disabled = true;
+    try {
+      const {content, urls} = await readUrlFile(file);
+      $('url').value = content;
+      inputFeedback(`${file.name}: ${urls.length} URL${urls.length === 1 ? '' : 's'} ready. Select Add transfers to queue.`);
+    } catch (error) { inputFeedback(error.message, true); }
+    finally { readingFile = false; $('add-button').disabled = false; $('input-file').value = ''; }
+  }
+  $('input-file').addEventListener('change', () => loadFile($('input-file').files[0]));
+  const drop = $('file-drop');
+  for (const type of ['dragenter', 'dragover']) drop.addEventListener(type, event => {
+    event.preventDefault(); drop.classList.add('dragging');
+  });
+  drop.addEventListener('dragleave', event => { if (!drop.contains(event.relatedTarget)) drop.classList.remove('dragging'); });
+  drop.addEventListener('drop', event => {
+    event.preventDefault(); drop.classList.remove('dragging');
+    if (event.dataTransfer.files.length !== 1) { inputFeedback('Drop exactly one .txt file.', true); return; }
+    loadFile(event.dataTransfer.files[0]);
+  });
+  $('url').addEventListener('input', () => inputFeedback('Ready to submit. Filename and checksum fields apply to one URL only.'));
+  function added(items) {
+    for (const item of items) if (!downloads.some(d => d.id === item.id)) {
+      downloads.push(item); activity('Transfer added', item.filename);
+    }
+    filter = 'all'; updateFilters(); $('search').value = ''; scheduleRender();
+  }
+  async function submitUrls(urls) {
+    const filename = $('filename').value.trim() || null;
+    const expected_sha256 = $('expected-sha256').value.trim() || null;
+    const expected_md5 = $('expected-md5').value.trim() || null;
+    if (urls.length > 1 && (filename || expected_sha256 || expected_md5)) {
+      throw Error('Filename and checksum fields require exactly one URL. Clear these fields to submit a batch.');
+    }
+    if (urls.length === 1) {
+      const item = await api('/api/downloads', {url: urls[0], filename, expected_sha256, expected_md5});
+      added([item]); $('add-form').reset(); inputFeedback('Transfer queued.');
+      return;
+    }
+    const result = await api('/api/downloads/batch', {urls});
+    added(result.accepted.map(entry => entry.download));
+    if (result.rejected.length) {
+      // Keep only rejected entries for inspection; never automatically retry a
+      // batch. A journal/start failure may have left a paused task in history.
+      $('url').value = result.rejected.map(entry => urls[entry.index - 1]).join('\n');
+      inputFeedback(`${result.accepted.length} queued; ${result.rejected.length} rejected. Check queue history before retrying.`, true);
+      showError(result.rejected.map(entry => `Entry ${entry.index}: ${entry.error}`).join('\n'));
+    } else {
+      $('add-form').reset(); inputFeedback(`${result.accepted.length} transfers queued.`);
+    }
+  }
   $('add-form').addEventListener('submit', async event => {
     event.preventDefault();
     const button = $('add-button'); button.disabled = true; text(button, 'Adding…');
     try {
-      const item = await api('/api/downloads', { url: $('url').value.trim(), filename: $('filename').value.trim() || null,
-        expected_sha256: $('expected-sha256').value.trim() || null, expected_md5: $('expected-md5').value.trim() || null });
-      $('add-form').reset(); $('url').focus();
-      if (!downloads.some(d => d.id === item.id)) { downloads.push(item); activity('Transfer added', item.filename); }
-      filter = 'all'; updateFilters();
-      $('search').value = ''; scheduleRender();
+      await submitUrls(parseUrls($('url').value)); $('url').focus();
       await poll(true);
-    } catch (error) { showError(error.message); }
-    finally { button.disabled = false; text(button, 'Add transfer'); }
+    } catch (error) { inputFeedback(error.message, true); showError(error.message); }
+    finally { button.disabled = false; text(button, 'Add transfers'); }
   });
   function updateFilters() {
     for (const button of document.querySelectorAll('[data-filter]')) {

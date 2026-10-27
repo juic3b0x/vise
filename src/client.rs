@@ -3,6 +3,7 @@ use clap::{Args as ClapArgs, Subcommand};
 use vise::rate_limiter::RateLimit;
 
 mod api;
+mod batch;
 mod commands;
 mod output;
 mod settings;
@@ -46,8 +47,12 @@ enum Command {
 
 #[derive(ClapArgs)]
 struct Add {
-    /// HTTP(S) source URL
-    url: String,
+    /// HTTP(S) source URLs (positional entries precede --input entries)
+    #[arg(required_unless_present = "input")]
+    urls: Vec<String>,
+    /// Read a local UTF-8 URL list and send it to the daemon
+    #[arg(long, value_name = "FILE")]
+    input: Option<std::path::PathBuf>,
     /// Plain output filename, not a path
     #[arg(short = 'n', long)]
     name: Option<String>,

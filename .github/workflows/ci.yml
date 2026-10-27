@@ -21,6 +21,8 @@ jobs:
         with:
           node-version: '22'
       - run: node extension/tests/extension.test.cjs
+      - run: node --test tests/dashboard-input.test.mjs
+      - run: node --input-type=module --check < src/dashboard.js
       - run: node --check extension/background.js && node --check extension/common.js && node --check extension/options.js
   check:
     strategy:

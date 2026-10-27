@@ -100,12 +100,13 @@ vise --interactive
 
 ## REST API
 
-All URLs below use the initial loopback listener. API task controls require the full download UUID returned by queue admission or listing. Mutation requests require `Content-Type: application/json`, including DELETE. JSON request bodies are limited to 16 KiB.
+All URLs below use the initial loopback listener. API task controls require the full download UUID returned by queue admission or listing. Mutation requests require `Content-Type: application/json`, including DELETE. JSON request bodies are limited to 16 KiB except the batch route, which accepts up to 2 MiB.
 
 | Method | Path | Result |
 | --- | --- | --- |
 | GET | `/api/downloads` | All saved and active download snapshots |
 | POST | `/api/downloads` | Queue a task; HTTP 201 and its snapshot |
+| POST | `/api/downloads/batch` | Queue a validated list; HTTP 200 with indexed admission results |
 | GET | `/api/downloads/{id}` | One task |
 | DELETE | `/api/downloads/{id}` | Stop/remove task and staging data; HTTP 204; completed output is kept |
 | POST | `/api/downloads/{id}/pause` | Stop workers and durably pause |
@@ -149,6 +150,30 @@ curl --fail-with-body --user vise -X DELETE \
 ```
 
 Deletion preserves an already published final file. It removes unfinished staging data, so use pause when you intend to resume later.
+
+### Batch ingestion
+
+Submit exactly one of `urls` (an array of URL strings) or `content` (UTF-8 list text) to `POST /api/downloads/batch`. An optional `proxy_url` applies to every entry; omission/null inherits the daemon default. Unknown fields are rejected. Batch entries inherit daemon destinations and cookie settings; filenames are automatically derived. Use single-task admission for individual filenames or expected hashes.
+
+```sh
+curl --fail-with-body --user vise -H 'Content-Type: application/json' \
+  -d '{"urls":["https://www.rust-lang.org/static/images/rust-logo-blk.svg","https://raw.githubusercontent.com/rust-lang/rust/master/LICENSE-MIT"]}' \
+  http://127.0.0.1:8080/api/downloads/batch
+```
+
+Or encode a local text file as JSON, avoiding shell escaping of its contents:
+
+```sh
+python3 -c 'import json, pathlib; print(json.dumps({"content": pathlib.Path("urls.txt").read_text(encoding="utf-8")}))' |
+  curl --fail-with-body --user vise -H 'Content-Type: application/json' \
+    --data-binary @- http://127.0.0.1:8080/api/downloads/batch
+```
+
+The text parser follows [input-file rules](usage.md#input-files). Both formats allow up to 1,000 URLs and a 1 MiB decoded list; individual URLs are at most 8,192 bytes. The JSON envelope may be up to 2 MiB. Invalid lists, proxy values, or schema fields reject the request before any task is added. Existing authentication, Host/Origin checks, and JSON-only mutation requirements apply.
+
+A valid request returns HTTP 200 with `accepted` and `rejected` arrays. Each accepted entry contains a one-based `index` and a normal `download` snapshot; each rejected entry contains an `index` and an `error` string. Indices refer to URL entries after removing comments/empty lines. HTTP 200 acknowledges the report; inspect both arrays, since it does not mean every task was admitted or completed.
+
+Admission reuses the engine's ordinary SQLite transactions and worker semaphore. Operational failures are reported per entry, so admission is not one database transaction for the entire list. Successful entries stay queued if a later entry fails. A journal/start failure can leave a recoverable paused task; inspect queue history before manually retrying rejected entries. An accepted request continues if its client disconnects, and clients must not automatically replay ambiguous submissions. The original single-task endpoint and HTTP 201 response remain unchanged.
 
 ### Admission fields and snapshots
 

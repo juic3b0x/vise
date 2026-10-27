@@ -20,7 +20,7 @@ For a persistent service or the browser extension, use the [authenticated daemon
 
 ![Vise dashboard with a sample transfer queue, throughput graph, and bandwidth controls](webui-industrial.jpg){ loading=lazy }
 
-The preview above uses sample transfers to illustrate active, paused, completed, and failed states.
+The preview above uses sample transfers to illustrate bulk input and live queue controls.
 
 ## Live telemetry
 
@@ -36,7 +36,11 @@ Range-ineligible downloads can legitimately show a single chunk. Unknown-length 
 
 ## Queue and task controls
 
-Add an HTTP(S) URL and optional filename using the queue form. Expand **Checksum verification** for expected SHA-256/MD5 values. Per-task proxy overrides are available through the [API](daemon.md#queue-and-control-a-task); otherwise dashboard additions inherit the engine's configured default proxy. Cookie-backed authentication inherits the engine's configured cookie file; the dashboard does not upload cookie files.
+Paste one or more HTTP(S) URLs in **Source URLs**, or choose/drop one `.txt` file into the upload area. Files are decoded and parsed locally; only the URL list is sent as JSON after selecting **Add transfers**. Blank lines and `#` comments are ignored. Limits are 1 MiB, 1,000 URLs, and 8,192 bytes per URL. Invalid UTF-8 or malformed lines produce clear errors without replacing the existing form contents.
+
+Filename and checksum fields require exactly one URL. Multi-URL submissions use the daemon's [batch API](daemon.md#batch-ingestion), with indexed admission results. Successfully admitted rows appear immediately; rejected entries stay in the input for inspection. Check queue history before manually retrying operational failures. After an interrupted response, the server may already have accepted some or all entries, so no automatic resubmission occurs.
+
+Add an optional filename for a single URL using the queue form. Expand **Checksum verification** for expected SHA-256/MD5 values. Per-task proxy overrides are available through the [API](daemon.md#queue-and-control-a-task); otherwise dashboard additions inherit the engine's configured default proxy. Cookie-backed authentication inherits the engine's configured cookie file; the dashboard does not upload cookie files.
 
 Use search and the All, Active, Paused, Done, and Failed filters to focus the queue. Per-task controls send API requests without a page reload:
 

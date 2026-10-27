@@ -22,6 +22,9 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+mod batch;
+pub use batch::{Accepted, BatchResult, Rejected};
+
 mod completion;
 mod http;
 mod journal;
