@@ -87,7 +87,11 @@ vise https://example.com/archive.zip
 
 ```sh
 vise --batch https://example.com/a.zip https://example.com/b.zip
+vise --input urls.txt -j 3 -o ./downloads
+vise remote add --input urls.txt --wait --json
 ```
+
+URL lists are UTF-8 text, one HTTP(S) URL per line. Whitespace, blank lines, and `#` comments are handled automatically. Lists may contain up to 1,000 URLs and 1 MiB of text; positional URLs are queued before file entries. Names, hashes, proxies, cookies, and destinations follow the normal [CLI rules](docs/usage.md#input-files).
 
 URL arguments run until the queue settles. `--batch` explicitly disables terminal input.
 
@@ -287,7 +291,7 @@ vise --webui --bind 127.0.0.1:8080
 
 Open **[http://127.0.0.1:8080](http://127.0.0.1:8080)** in your browser. Use the exact numeric loopback address printed by Vise.
 
-The dashboard provides a rolling 60-second throughput graph, per-transfer sparklines, and live chunk grids showing active, completed, pending, paused, and failed segments. Filter the queue by state or search filenames and URLs. Add transfers and pause, resume, retry, or cancel them without reloading. Cancel discards partial data; Remove clears a completed queue entry while keeping its output file. The dashboard is served directly from the executable: no Node.js, frontend build, external fonts, CDN, or separate server is required.
+The dashboard provides a rolling 60-second throughput graph, per-transfer sparklines, and live chunk grids showing active, completed, pending, paused, and failed segments. Filter the queue by state or search filenames and URLs. Paste one or more URLs or choose/drop a `.txt` list, then select **Add transfers**. Pause, resume, retry, or cancel tasks without reloading. Cancel discards partial data; Remove clears a completed queue entry while keeping its output file. The dashboard is served directly from the executable: no Node.js, frontend build, external fonts, CDN, or separate server is required.
 
 Use the **Bandwidth** slider, presets, or **Global bandwidth limit** input to change the cap during a transfer. Enter values such as `500K`, `5M`, or `off`, then select **Apply** or press Enter. The logarithmic slider spans 16 KiB/s–1 GiB/s, with unlimited at its left edge, and applies on release. The text input accepts the full rate range, including values outside the slider's range. The current setting streams to every open dashboard and is saved in the journal. Applied changes also appear in the WebUI terminal monitor.
 
@@ -327,6 +331,7 @@ WebUI mode uses the same download engine and worker pool as the CLI, and replace
 | `--expected-sha256` | Expected SHA-256 for one URL, 64 hex digits | Learn from metadata if available |
 | `--expected-md5` | Expected MD5 for one URL, 32 hex digits | Learn from metadata if available |
 | `--proxy` | Default HTTP/HTTPS/SOCKS5/SOCKS5h route for new downloads; `""` clears it | Configured; initially no explicit route |
+| `--input FILE` | Read a UTF-8 URL list before queue startup | Off |
 | `--cookies FILE` | Netscape cookie file for new tasks; its path is journaled for resume | Configured; initially none |
 | `-i, --interactive` | Keep the terminal queue open | Off with URL arguments |
 | `--batch` | Never read terminal input | Off |

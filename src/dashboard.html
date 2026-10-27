@@ -8,7 +8,7 @@
   <title>Vise / Transfer console</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath fill='%23e2e8f0' d='M3 3h7l6 19L22 3h7L19 29h-6z'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="/assets/dashboard.css">
-  <script src="/assets/dashboard.js" defer></script>
+  <script type="module" src="/assets/dashboard.js"></script>
 </head>
 <body>
   <a class="skip-link" href="#transfers">Skip to transfers</a>
@@ -40,9 +40,14 @@
           <div class="panel-heading"><h2 id="intake-title">New transfer</h2><span class="section-note">HTTP / HTTPS</span></div>
           <form id="add-form">
             <div class="intake-fields">
-              <label class="url-field" for="url">Source URL<input id="url" name="url" type="url" required maxlength="8192" placeholder="https://example.com/archive.zip" autocomplete="off" spellcheck="false"></label>
+              <label class="url-field" for="url">Source URLs<textarea id="url" name="url" rows="4" maxlength="1048576" required placeholder="https://example.com/archive.zip&#10;https://example.com/dataset.tar.gz" autocomplete="off" spellcheck="false" aria-describedby="input-hint input-feedback"></textarea></label>
+              <div class="input-tools">
+                <p id="input-hint" class="helper">One URL per line. Blank lines and # comments are ignored. Up to 1,000 URLs / 1 MiB.</p>
+                <label class="file-drop" id="file-drop" for="input-file"><input id="input-file" type="file" accept=".txt,text/plain" aria-label="Choose URL-list text file"><span>Drop a .txt file here or <strong>choose a file</strong></span></label>
+                <p id="input-feedback" class="input-feedback" role="status">Paste URLs or load a text file, then select Add transfers.</p>
+              </div>
               <label for="filename">Filename <span class="muted">(optional)</span><input id="filename" name="filename" maxlength="200" placeholder="Use source filename" autocomplete="off"></label>
-              <button id="add-button" class="button primary" type="submit">Add transfer</button>
+              <button id="add-button" class="button primary" type="submit">Add transfers</button>
             </div>
             <details class="checksum-options">
               <summary>Checksum verification <span class="muted">(optional)</span></summary>

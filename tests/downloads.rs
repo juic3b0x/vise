@@ -5,6 +5,8 @@ mod fixture;
 #[path = "support/proxy.rs"]
 mod proxy_support;
 
+#[path = "downloads/bulk.rs"]
+mod bulk;
 #[path = "downloads/checksums.rs"]
 mod checksums;
 #[path = "downloads/cli.rs"]

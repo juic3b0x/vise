@@ -20,6 +20,9 @@ struct Args {
     command: Option<Command>,
     /// HTTP(S) URLs to enqueue
     urls: Vec<String>,
+    /// Read HTTP(S) URLs from a UTF-8 text file (one per line; # comments)
+    #[arg(long, value_name = "FILE")]
+    input: Option<PathBuf>,
     /// Launch the local dashboard instead of the terminal controller
     #[arg(long)]
     webui: bool,
@@ -107,7 +110,7 @@ fn report_error(writer: &mut impl std::io::Write, error: &anyhow::Error) -> std:
     writeln!(writer, "Vise: {error:#}")
 }
 
-async fn run(args: Args) -> anyhow::Result<u8> {
+async fn run(mut args: Args) -> anyhow::Result<u8> {
     if let Some(Command::Remote(remote)) = args.command {
         return client::run(remote).await;
     }
@@ -115,6 +118,9 @@ async fn run(args: Args) -> anyhow::Result<u8> {
         !args.urls.iter().any(|url| url == "remote"),
         "put remote immediately after vise; local-engine options cannot be mixed with daemon client commands"
     );
+    if args.input.is_some() || !args.urls.is_empty() {
+        args.urls = vise::input::load(std::mem::take(&mut args.urls), args.input.take()).await?;
+    }
     let expected = ExpectedChecksums::new(
         args.expected_sha256.as_deref(),
         args.expected_md5.as_deref(),

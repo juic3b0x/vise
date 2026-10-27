@@ -2,6 +2,25 @@
 
 All notable changes to Vise are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.6.0] - 2026-10-26
+
+### Added
+
+- **Bulk URL ingestion:** `--input FILE` loads UTF-8 URL lists before engine startup. Trim whitespace, skip blank lines and `#` comments, accept a leading BOM and CRLF, and preserve ordering and duplicate URLs. Positional URLs precede file entries; existing job, destination, proxy, cookie, and resume rules apply.
+- **Native daemon batches:** Authenticated `POST /api/downloads/batch` accepts either a URL array or text content, with an optional shared proxy. Validate the entire list before admission; return accepted task snapshots and indexed operational errors without replaying submissions. Single-task admission remains compatible.
+- **WebUI batch inputs:** Paste multiple URLs, choose a `.txt` file, or drop one into the dashboard. Files are parsed locally and submitted as JSON; show validation, queueing, and partial-admission feedback without reloading.
+- **Remote file queueing:** `vise remote add --input FILE` and multiple URL arguments submit to the daemon; `--wait` waits for every accepted task, and JSON output includes per-entry results. Filename/checksum overrides require one resolved URL.
+- Shared bounds of 1 MiB of text, 1,000 URLs, and 8,192 bytes per URL; the batch route accepts JSON bodies up to 2 MiB while existing routes retain their 16 KiB limit. Add Rust and dependency-free frontend regressions for parsing, authentication, limits, concurrency, and durable queue admission.
+
+### Changed
+
+- Refresh compatible dependencies for this minor release: `rustix` 1.1.5 → 1.1.6. Keep existing dependency requirements and Rust 1.88 support; add no production dependencies.
+
+### Fixed
+
+- Keep terminal task snapshots private until their SQLite commit and publication cleanup settle. If completion persistence fails, CLI/API/WebSocket readers see the resolved failed state instead of a transient `completed` result. Serialize terminal mutations with checkpoints and preserve publication evidence for recovery.
+- Add a deterministic SQLite-lock regression for both successful and rejected completion commits, alongside the end-to-end publication recovery test, to remove the scheduling-dependent Ubuntu failure.
+
 ## [0.5.1] - 2026-10-25
 
 ### Changed
@@ -167,6 +186,7 @@ Initial release.
 - **Local WebUI safeguards:** Loopback-only binding, host and browser-origin validation, JSON-only mutations, and a Content Security Policy constrain browser access.
 - **Safe publication:** Existing output files are never overwritten, and configured checksum verification must succeed before final publication. SHA-256 from a trusted source is preferred for security-sensitive verification; MD5 supports legacy compatibility and accidental-corruption detection.
 
+[0.6.0]: https://github.com/juic3b0x/vise/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/juic3b0x/vise/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/juic3b0x/vise/compare/v0.4.4...v0.5.0
 [0.4.4]: https://github.com/juic3b0x/vise/compare/v0.4.3...v0.4.4

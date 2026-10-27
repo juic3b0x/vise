@@ -22,7 +22,7 @@ The optional Manifest V3 browser extension uses its own loopback host permission
 
 ## Controllers and API boundaries
 
-The CLI, daemon, and WebUI call the same manager rather than maintaining independent transfer pools. REST controls mutate shared jobs; WebSocket and HTTP telemetry endpoints expose owned snapshots. SQLite supplies durable recovery state while the manager keeps the live worker view in memory.
+The CLI, daemon, and WebUI call the same manager rather than maintaining independent transfer pools. REST controls mutate shared jobs; WebSocket and HTTP telemetry endpoints expose owned snapshots. Terminal snapshots wait for the SQLite completion commit and publication cleanup to settle. If the commit fails, readers see the resolved failed state and recovery evidence is retained, instead of observing a provisional completed result. SQLite supplies durable recovery state while the manager keeps the live worker view in memory.
 
 See the [CLI and interactive reference](usage.md), [daemon REST and WebSocket reference](daemon.md#rest-api), and [WebUI guide](webui.md) for controller commands, authentication, endpoint schemas, and runnable examples.
 

@@ -43,6 +43,7 @@ With both an explicit endpoint and `VISE_API_TOKEN`, the client needs no local c
 | Command | Behavior |
 | --- | --- |
 | `remote add URL` | Admit a new task and return its snapshot; success means queued, not completed |
+| `remote add --input FILE` | Read a client-local URL list and queue it in the daemon |
 | `remote list` | List every saved and active task |
 | `remote get ID` | Inspect one task |
 | `remote pause ID` | Stop its workers and checkpoint its offsets |
@@ -86,6 +87,20 @@ vise remote add --wait --json \
 
 `add --wait --json` writes one final download snapshot. Other one-shot commands write one result: arrays for lists, download objects for task operations, a configuration object for rate controls, and a deletion receipt containing `id` and `deleted: true`. Errors go to stderr without contaminating JSON stdout. JSON contains the same task metadata as the API, including source URLs and absolute daemon paths; protect captured output when those are sensitive.
 
+## Bulk ingestion
+
+```sh
+vise remote add --input urls.txt --wait --json
+vise remote --request-timeout 120 add --input urls.txt
+vise remote add https://www.rust-lang.org/static/images/rust-logo-blk.svg --input urls.txt
+```
+
+The file is read on the **client machine**, validated using the [input-file rules](usage.md#input-files), and sent as a URL array; the daemon never opens a client-supplied file path. The client does not create a journal or change daemon concurrency/output settings. Positional URLs come first; repeated URLs are retained. `--name` and checksum overrides require exactly one combined URL. `--proxy` may apply to an entire batch and still affects only transfer traffic.
+
+Multiple resolved URLs use the [batch endpoint](daemon.md#batch-ingestion). JSON output is `{accepted, rejected}` with one-based indices and task snapshots or errors. A single resolved URL retains the existing single-task endpoint and snapshot output. Any rejected entry produces exit code 2; inspect daemon history before retrying, because an operational failure can leave a paused task.
+
+For batches, `--wait` waits until all accepted tasks settle and returns success only if every entry was admitted and published. Failed, paused, or corrupt tasks produce exit code 2. A removed task or lost connection is an error. Interrupting the client detaches without stopping daemon work. For a large list, raise `--request-timeout` if admission exceeds the default 15 seconds; it remains a per-request timeout.
+
 ## Live monitoring
 
 ```sh
@@ -103,12 +118,12 @@ Ctrl+C or SIGTERM on Unix exits with 130; Windows supports Ctrl+C. Interrupting 
 | --- | --- |
 | `0` | Command acknowledged, or a waited task completed; also a closed stdout consumer |
 | `1` | Configuration, authentication, transport, API, protocol, or output failure |
-| `2` | A waited task failed, was corrupt, or was paused; Clap also uses 2 for invalid CLI arguments |
+| `2` | A batch entry was rejected, or a waited task failed, was corrupt, or was paused; Clap also uses 2 for invalid CLI arguments |
 | `130` | Client interrupted; daemon work is left running |
 
 ## Failure and credential handling
 
-The API client bypasses environment proxies, has no download cookie jar, preserves TLS certificate validation, and refuses redirects. Tokens are marked sensitive in request headers and never copied into diagnostic output. Responses are bounded to 32 MiB; request bodies retain the API's 16 KiB limit. Human-readable server text is escaped before terminal display.
+The API client bypasses environment proxies, has no download cookie jar, preserves TLS certificate validation, and refuses redirects. Tokens are marked sensitive in request headers and never copied into diagnostic output. Responses are bounded to 32 MiB; ordinary request bodies retain the API's 16 KiB limit, and batch bodies allow up to 2 MiB. Human-readable server text is escaped before terminal display.
 
 Requests are not automatically retried. If a submission loses its response, it might already have been admitted: inspect `vise remote list` before repeating it. The client never falls back to starting a local engine after authentication or connection failure.
 

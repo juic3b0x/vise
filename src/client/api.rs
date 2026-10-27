@@ -90,7 +90,12 @@ impl Api {
             .header(header::AUTHORIZATION, self.settings.authorization.clone());
         if let Some(body) = body {
             let bytes = serde_json::to_vec(body)?;
-            ensure!(bytes.len() <= 16 * 1024, "API request exceeds 16 KiB");
+            let maximum = if path == "api/downloads/batch" {
+                vise::input::MAX_BATCH_BODY_BYTES
+            } else {
+                16 * 1024
+            };
+            ensure!(bytes.len() <= maximum, "API request exceeds its size limit");
             request = request
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(bytes);

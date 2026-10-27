@@ -34,22 +34,7 @@ pub(super) fn make_chunks(total: Option<u64>, ranged: bool, connections: usize) 
         .collect()
 }
 
-pub(super) fn validate_url(input: &str) -> Result<Url> {
-    if input.len() > 8192 {
-        return Err(Error::Invalid("URL is too long".into()));
-    }
-    let url = Url::parse(input).map_err(|e| Error::Invalid(format!("invalid URL: {e}")))?;
-    if !matches!(url.scheme(), "http" | "https")
-        || url.host_str().is_none()
-        || !url.username().is_empty()
-        || url.password().is_some()
-    {
-        return Err(Error::Invalid(
-            "use an HTTP(S) URL without embedded credentials".into(),
-        ));
-    }
-    Ok(url)
-}
+pub(super) use crate::input::validate_url;
 
 pub(super) fn validate_filename(name: &str) -> Result<()> {
     if name.is_empty()

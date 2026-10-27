@@ -135,13 +135,12 @@ async fn completion_event_observes_committed_output_and_no_staging_file() {
 
 #[tokio::test]
 async fn failed_completion_commit_emits_no_success_and_recovers_the_published_file() {
-    let fixture = Fixture::start(Mode::SlowRanges).await;
+    let fixture = Fixture::start(Mode::Ranges).await;
     let root = tempfile::tempdir().unwrap();
     let settings = config(&root.path().join("home"), &root.path().join("output"));
     let first = Manager::open(settings.clone()).await.unwrap();
-    let task = first.add(&fixture.url, None).await.unwrap();
-    progress(&first, task.id).await;
-    first.pause(task.id).await.unwrap();
+    // Arm the failure before any worker can publish, independent of fixture
+    // timing or scheduler load. Resume behavior is exercised by recovery below.
     let connection = rusqlite::Connection::open(first.database_path()).unwrap();
     connection
         .execute_batch(
@@ -150,7 +149,7 @@ async fn failed_completion_commit_emits_no_success_and_recovers_the_published_fi
         )
         .unwrap();
     let mut events = first.subscribe_events();
-    first.resume(task.id).await.unwrap();
+    let task = first.add(&fixture.url, None).await.unwrap();
     let failed = terminal(&first, task.id).await;
     assert_eq!(failed.status, Status::Failed);
     assert!(

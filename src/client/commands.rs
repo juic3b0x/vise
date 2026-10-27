@@ -102,8 +102,19 @@ struct Admission<'a> {
 async fn add_download(api: &Api, output: &Output, add: Add) -> Result<u8> {
     let expected =
         ExpectedChecksums::new(add.expected_sha256.as_deref(), add.expected_md5.as_deref())?;
+    let urls = vise::input::load(add.urls, add.input).await?;
+    anyhow::ensure!(
+        urls.len() == 1 || (add.name.is_none() && expected.is_empty()),
+        "filename and checksum flags require exactly one URL"
+    );
+    if urls.len() > 1 {
+        return super::batch::submit(api, output, urls, add.proxy, add.wait).await;
+    }
+    let url = urls
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("provide a URL"))?;
     let body = Admission {
-        url: &add.url,
+        url,
         filename: add.name.as_deref(),
         expected_sha256: expected.sha256,
         expected_md5: expected.md5,
