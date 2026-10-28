@@ -270,3 +270,10 @@ textarea::placeholder { color: #7f8da3; opacity: 1; }
 @media (max-width: 1150px) and (min-width: 861px), (max-width: 600px) {
   .intake-fields > label[for=filename] { grid-column: 1; }
 }
+
+/* Write-only admission fields share the existing form surface. */
+.request-options { margin-top: 16px; }
+.request-options p { color: var(--muted); font-size: 12px; margin: 12px 0; }
+.request-options label { margin-top: 12px; }
+.request-options textarea { display: block; width: 100%; margin-top: 8px; padding: 10px; resize: vertical; color: var(--text); background: var(--bg); border: 1px solid rgba(255,255,255,.12); border-radius: 6px; font: 12px var(--mono); }
+.request-summary { margin-top: 12px; font-size: 11px; color: var(--muted); overflow-wrap: anywhere; }

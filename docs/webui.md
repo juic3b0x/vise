@@ -40,7 +40,7 @@ Paste one or more HTTP(S) URLs in **Source URLs**, or choose/drop one `.txt` fil
 
 Filename and checksum fields require exactly one URL. Multi-URL submissions use the daemon's [batch API](daemon.md#batch-ingestion), with indexed admission results. Successfully admitted rows appear immediately; rejected entries stay in the input for inspection. Check queue history before manually retrying operational failures. After an interrupted response, the server may already have accepted some or all entries, so no automatic resubmission occurs.
 
-Add an optional filename for a single URL using the queue form. Expand **Checksum verification** for expected SHA-256/MD5 values. Per-task proxy overrides are available through the [API](daemon.md#queue-and-control-a-task); otherwise dashboard additions inherit the engine's configured default proxy. Cookie-backed authentication inherits the engine's configured cookie file; the dashboard does not upload cookie files.
+Add an optional filename for a single URL using the queue form. Expand **Checksum verification** for expected SHA-256/MD5 values. Expand **Advanced request settings** for private per-task authentication (see below). Per-task proxy overrides are available through the [API](daemon.md#queue-and-control-a-task); otherwise dashboard additions inherit the engine's configured default proxy. Cookie-backed authentication inherits the engine's configured cookie file; the dashboard does not upload cookie files.
 
 Use search and the All, Active, Paused, Done, and Failed filters to focus the queue. Per-task controls send API requests without a page reload:
 
@@ -52,6 +52,29 @@ Use search and the All, Active, Paused, Done, and Failed filters to focus the qu
 | Cancel / delete | Stop the task and remove its queue entry and partial data |
 
 Deleting a completed entry keeps its published output file. Pausing is the right choice when staging data should survive. Controls show request failures instead of claiming an action succeeded before the server acknowledges it.
+
+## Advanced request settings
+
+The collapsed **Advanced request settings** disclosure accepts:
+
+- **Custom headers:** One `Name: value` per line, such as an Authorization header. Duplicate headers retain their order. Use at most 32 headers; each value is limited to 8 KiB. Vise validates the combined size and rejects headers it controls.
+- **Referer:** An absolute HTTP(S) URL without embedded credentials. Its fragment is removed by the backend.
+- **User agent:** An optional custom value, limited to 512 bytes. Blank fields inherit the daemon’s defaults.
+- **Structured cookies:** A JSON array using the [API cookie format](daemon.md#request-credentials), including domain, path, secure, expiry, httpOnly, and hostOnly scope. Raw `Cookie` and `Set-Cookie` custom headers are rejected.
+
+For example, a session cookie record is:
+
+```json
+[{"name":"session","value":"example-session-value","domain":"downloads.example.com","path":"/","secure":true,"expires":null,"httpOnly":true,"hostOnly":true}]
+```
+
+Only use credentials you intend to entrust to the daemon. Request credentials are persisted in its **plaintext private SQLite journal**, including WAL/SHM files and any backups. Protect that directory and your browser profile. Browser developer tools and network inspectors can display the outbound admission body.
+
+These are **write-only controls**: the dashboard never populates them from snapshots, never writes them to local/session storage, never sends them to the console or activity feed, and clears them before sending and after every submission attempt handled by the form, including validation errors. Navigating away or restoring the page also clears them. You must re-enter credentials for a new admission after an error; the dashboard never automatically retries an ambiguous POST.
+
+Task rows show only the public request summary: validated header names/counts and presence indicators for custom headers, referer, user agent, and cookies. They cannot reveal saved values. Changing the form affects only new tasks, never an existing task’s saved credentials.
+
+Batches with custom headers, a referer, or supplied cookies must share a single origin (scheme, normalized host, effective port). The form explains that mixed-origin lists must be split before any admission. User agent alone is exempt. Server-side rejection messages remain visible next to the form and in the error notice. Cross-origin redirects strip credentials and custom user agents, reduce the referer to its origin, and never restore credentials later in the chain. See [origin policy](architecture.md#private-request-contexts).
 
 ## Global bandwidth controls
 

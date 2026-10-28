@@ -168,7 +168,7 @@ vise --daemon --cookies ./cookies.txt --resume-all
 
 Each task has its own Reqwest cookie jar, shared by that task's probe, chunks, retries, and redirects. Response cookies update that jar during the run. SQLite stores the absolute cookie-file path, **not cookies imported from that file**. Explicitly supplied API cookies are private journal credentials, as described below. Resume reloads the saved file, so keep it available and replace its contents when the login session needs refreshing. A new process default does not replace a saved task's file. Missing or malformed saved files fail only their task, without sending an unauthenticated request or discarding saved progress. Cookies learned from responses are kept in memory and are not written back to the file; after a restart the file remains the source of authentication.
 
-Cookie files are plaintext credentials: keep them private and outside source control. Cookie paths and values are omitted from public download snapshots. The browser extension still forwards only the selected URL; it does not export browser cookies.
+Cookie files are plaintext credentials: keep them private and outside source control. Cookie paths and values are omitted from public download snapshots. The browser extension sends only the selected URL by default; separate opt-in switches allow scoped browser-cookie and referer forwarding. See [extension privacy and permissions](docs/extension.md#forward-request-credentials).
 
 ## Per-task request credentials
 
@@ -187,7 +187,7 @@ Credentialed batches must share one origin (scheme, normalized host, effective p
 
 New request settings survive restart in the **plaintext private SQLite journal**; Unix credential writes require mode `0600`. Protect the home directory with account ACLs on Windows. Recovered tasks never inherit later defaults. Public snapshots expose header names/counts and presence flags only. The binary logger also blocks audited raw cookie-store events regardless of `RUST_LOG`, including global trace/debug settings. Cross-origin redirects strip credentials and custom user agents, reduce a supplied referer to its origin, and never restore credentials later in the chain. Old tasks without these settings retain their original redirect behavior.
 
-The dashboard and extension are unchanged in this backend update. See [usage](docs/usage.md#request-headers-and-referer), [API details](docs/daemon.md#request-credentials), and the [security policy](SECURITY.md#per-task-request-credentials).
+Expand the dashboard’s **Advanced request settings** to submit write-only headers, referer, user agent, or structured cookies. Inputs clear after submission; task views show only header names/counts and presence flags. Extension forwarding is off by default, with per-site runtime grants, separate cookie/referer switches, and an explicit **Send URL only to Vise** fallback when a cookie context cannot be identified. See [usage](docs/usage.md#request-headers-and-referer), [API details](docs/daemon.md#request-credentials), and the [security policy](SECURITY.md#per-task-request-credentials).
 
 ## Checksum verification
 

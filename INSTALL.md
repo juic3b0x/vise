@@ -76,7 +76,7 @@ The source includes a dependency-free Manifest V3 extension in [extension/](exte
 
 Temporary Firefox add-ons are removed when Firefox closes. Persistent distribution requires a signed package; this repository does not claim a published Chrome Web Store or Mozilla Add-ons listing.
 
-If your browser requests host/site access, allow it for the configured `127.0.0.1` or `localhost` address. Copy the token from `daemon.VISE_API_TOKEN` in `~/.vise/config.toml`, or use the `VISE_API_TOKEN` environment override used to launch the daemon. Right-click an HTTP(S) link and select **Send to Vise**. See the [extension guide](extension/README.md) for permissions, privacy, and troubleshooting.
+If your browser requests host/site access, allow it for the configured `127.0.0.1` or `localhost` address. Copy the token from `daemon.VISE_API_TOKEN` in `~/.vise/config.toml`, or use the `VISE_API_TOKEN` environment override used to launch the daemon. Right-click an HTTP(S) link and select **Send to Vise**. Credential forwarding is off by default. To opt in, independently enable cookie/referer forwarding, grant the download site with **Grant site access**, and save preferences. Runtime host grants cover that scheme/host on all ports; cookie permission is optional. Cookie forwarding requires an identifiable tab store and partition (Chrome 132+ lookup); current Firefox safely refuses this path. **Send URL only to Vise** always bypasses browser credential capture. The daemon journals supplied credentials as plaintext, so protect `~/.vise/`, its WAL/SHM files, and backups. See the [extension guide](extension/README.md) for permissions, privacy, and troubleshooting.
 
 ## Upgrading from per-directory journals
 

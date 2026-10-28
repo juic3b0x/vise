@@ -22,10 +22,21 @@
       <label for="auth-token">Bearer token</label>
       <div class="token-field"><input id="auth-token" name="authToken" type="password" minlength="32" maxlength="256" required autocomplete="off" spellcheck="false" aria-describedby="token-help"><button id="show-token" type="button" aria-pressed="false">Show</button></div>
       <small id="token-help">Copy daemon.VISE_API_TOKEN from ~/.vise/config.toml, or the environment token used to start Vise.</small>
+      <fieldset>
+        <legend>Forward request credentials (off by default)</legend>
+        <label class="switch"><input id="forward-cookies" type="checkbox"> Forward cookies for the clicked link</label>
+        <label class="switch"><input id="forward-referer" type="checkbox"> Forward the context-menu page URL as referer</label>
+        <small>Only explicit sends use these settings. Credentials are saved in the daemon’s private plaintext journal. Cookie forwarding requires an identifiable tab store and partition; otherwise use “Send URL only to Vise”.</small>
+        <label for="site-url">Grant a download site</label>
+        <input id="site-url" type="url" placeholder="https://downloads.example.com" autocomplete="off" spellcheck="false">
+        <div class="actions"><button id="grant-site" type="button">Grant site access</button><button id="revoke-sites" type="button">Revoke forwarded-site access</button></div>
+        <small>Grant requests only this scheme and host (all its ports and paths). Cookies permission is requested only when cookie forwarding is checked. Grants do not turn forwarding on.</small>
+        <p id="site-grants" class="grants" aria-live="polite"></p>
+      </fieldset>
       <div class="actions"><button id="save" type="submit" disabled>Save settings</button><button id="test" type="button" disabled>Test connection</button></div>
     </form>
     <p id="status" role="status" aria-live="polite">Loading settings…</p>
-    <footer>Settings stay in this browser’s local extension storage. The token is not encrypted; protect your browser profile. Only links you explicitly send are shared with your local Vise daemon. Browser cookies and page content are not forwarded.</footer>
+    <footer>Settings stay in this browser’s local extension storage. The token is not encrypted; protect your browser profile. Only links you explicitly send are shared with your local Vise daemon. Captured cookies and referers are never stored here. Separate forwarding switches start off. No page content is read. Browser site grants and saved preferences remain until revoked.</footer>
   </main>
 </body>
 </html>

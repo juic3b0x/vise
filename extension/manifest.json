@@ -5,6 +5,8 @@
   "description": "Send an HTTP(S) link to your local Vise daemon from its context menu.",
   "minimum_chrome_version": "121",
   "permissions": ["contextMenus", "storage", "notifications"],
+  "optional_permissions": ["cookies"],
+  "optional_host_permissions": ["http://*/*", "https://*/*"],
   "host_permissions": ["http://127.0.0.1/*", "http://localhost/*"],
   "background": {
     "service_worker": "background.js",
