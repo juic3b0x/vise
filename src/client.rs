@@ -63,6 +63,13 @@ struct Add {
     /// Download proxy route; never used for the API connection
     #[arg(long)]
     proxy: Option<String>,
+    /// Custom download header; repeat for additional headers
+    #[arg(long, value_name = "NAME: VALUE")]
+    header: Vec<String>,
+    #[arg(long, value_name = "URL")]
+    referer: Option<String>,
+    #[arg(long, value_name = "STRING")]
+    user_agent: Option<String>,
     /// Wait for verified publication; a failed, corrupt, or paused task exits 2
     #[arg(long)]
     wait: bool,

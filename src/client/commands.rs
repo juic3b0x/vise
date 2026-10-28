@@ -107,8 +107,14 @@ async fn add_download(api: &Api, output: &Output, add: Add) -> Result<u8> {
         urls.len() == 1 || (add.name.is_none() && expected.is_empty()),
         "filename and checksum flags require exactly one URL"
     );
+    let request = vise::net::credentials::RequestOverrides::from_cli(
+        &add.header,
+        add.referer.as_deref(),
+        add.user_agent.as_deref(),
+    )?;
+    request.validate_urls(&Default::default(), &urls)?;
     if urls.len() > 1 {
-        return super::batch::submit(api, output, urls, add.proxy, add.wait).await;
+        return super::batch::submit(api, output, urls, add.proxy, request, add.wait).await;
     }
     let url = urls
         .first()
@@ -120,6 +126,8 @@ async fn add_download(api: &Api, output: &Output, add: Add) -> Result<u8> {
         expected_md5: expected.md5,
         proxy_url: add.proxy.as_deref(),
     };
+    let mut body = serde_json::to_value(body)?;
+    request.encode_admission(&mut body)?;
     let item: Download = api.post("api/downloads", &body).await?;
     if add.wait {
         return wait(api, output, item).await;

@@ -80,6 +80,15 @@ struct Args {
     /// Netscape cookies.txt file for new downloads; saved tasks retain their file
     #[arg(long, value_name = "FILE")]
     cookies: Option<PathBuf>,
+    /// Custom request header for new downloads (repeatable; per-task API only in server modes)
+    #[arg(long, value_name = "NAME: VALUE")]
+    header: Vec<String>,
+    /// Referer for new downloads (per-task API only in server modes)
+    #[arg(long, value_name = "URL")]
+    referer: Option<String>,
+    /// User agent for new downloads; empty selects Vise's built-in value
+    #[arg(long, value_name = "STRING")]
+    user_agent: Option<String>,
 }
 
 #[derive(Subcommand)]

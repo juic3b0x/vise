@@ -2,6 +2,20 @@
 
 All notable changes to Vise are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- Private per-task custom headers, referer, user agent, and scoped API cookies, persisted in schema 6 for authenticated retry and restart-safe resume. Add local and remote `--header`, `--referer`, and `--user-agent`, plus optional `downloads.user_agent` configuration.
+- Shared request settings for positional/input-file/remote/API batches, with complete origin validation before admission. Public task summaries expose only header names/counts and credential-presence flags.
+- Origin-aware transport for newly configured tasks: retain credentials on same-origin redirects, strip them after crossing origins, reduce supplied referers to origin only, and keep credentials disabled for the remaining chain. Preserve task proxy routes, range checks, checksums, and legacy NULL-context redirect behavior.
+
+### Security
+
+- Centrally redact private request values in formatting and ordinary serialization; sanitize admission JSON and transport errors. Reject injection, forbidden headers, duplicate user-agent/referer sources, and oversized credentials.
+- Reject process-wide header/referer defaults in daemon/WebUI modes and mixed-origin credentialed batches. Require Unix journal mode `0600` before credential persistence; warn once on Windows to protect home-directory ACLs.
+- Add local-fixture regressions for redirects, proxy routing, cookie merging, abrupt termination, migrations, API/WebSocket/monitor/trace redaction, and daemon-token separation. Frontend and extension forwarding changes are deferred.
+
 ## [0.6.0] - 2026-10-26
 
 ### Added
@@ -198,3 +212,5 @@ Initial release.
 [0.2.0]: https://github.com/juic3b0x/vise/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/juic3b0x/vise/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/juic3b0x/vise/releases/tag/v0.1.0
+
+[Unreleased]: https://github.com/juic3b0x/vise/compare/v0.6.0...HEAD

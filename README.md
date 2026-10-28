@@ -61,6 +61,7 @@ On the first normal startup, Vise creates `~/.vise/config.toml`. On Unix it reso
 | `downloads.global_speed_limit_kbps` | `0` restores the saved cap (initially unlimited); positive values are KiB/s |
 | `proxy.url` | `""` for no explicit proxy |
 | `downloads.cookies_file` | Unset; optional Netscape cookie-file path |
+| `downloads.user_agent` | Unset; optional user agent for new tasks |
 
 Explicit CLI options take precedence, even if their values match a previous default. `--bind` overrides the complete address; alternatively use `--host` and/or `--port` to override individual file fields. These address options require `--daemon` or `--webui`; `--bind` is exclusive with `--host`/`--port`.
 
@@ -165,9 +166,28 @@ vise --daemon --cookies ./cookies.txt --resume-all
 
 `--cookies FILE` imports a Netscape-format cookie file for new tasks, including additions through the interactive queue, WebUI, and daemon API. Alternatively, set `cookies_file = "~/cookies.txt"` under `[downloads]` in `~/.vise/config.toml`; the CLI flag overrides it. Domain/host-only scope, paths, secure flags, expiration, and `#HttpOnly_` records are preserved. Empty lines and comments are ignored; expired cookies are skipped. Invalid records report the file and line number without echoing their contents.
 
-Each task has its own Reqwest cookie jar, shared by that task's probe, chunks, retries, and redirects. Response cookies update that jar during the run. SQLite stores the absolute cookie-file path, **not cookie values**. Resume reloads the saved file, so keep it available and replace its contents when the login session needs refreshing. A new process default does not replace a saved task's file. Missing or malformed saved files fail only their task, without sending an unauthenticated request or discarding saved progress. Cookies learned from responses are kept in memory and are not written back to the file; after a restart the file remains the source of authentication.
+Each task has its own Reqwest cookie jar, shared by that task's probe, chunks, retries, and redirects. Response cookies update that jar during the run. SQLite stores the absolute cookie-file path, **not cookies imported from that file**. Explicitly supplied API cookies are private journal credentials, as described below. Resume reloads the saved file, so keep it available and replace its contents when the login session needs refreshing. A new process default does not replace a saved task's file. Missing or malformed saved files fail only their task, without sending an unauthenticated request or discarding saved progress. Cookies learned from responses are kept in memory and are not written back to the file; after a restart the file remains the source of authentication.
 
 Cookie files are plaintext credentials: keep them private and outside source control. Cookie paths and values are omitted from public download snapshots. The browser extension still forwards only the selected URL; it does not export browser cookies.
+
+## Per-task request credentials
+
+```sh
+vise --header "Authorization: Bearer $DOWNLOAD_TOKEN" \
+  --referer https://downloads.example.com/releases \
+  --user-agent 'MyDownloader/1.0' https://downloads.example.com/archive.zip
+
+vise remote add --header "Authorization: Bearer $DOWNLOAD_TOKEN" \
+  --input urls.txt --wait
+```
+
+Repeat `--header 'Name: value'` for additional headers. Local CLI/interactive additions inherit startup settings; remote flags apply to every URL in that invocation. `--daemon` and `--webui` reject process-wide `--header` and `--referer`: send these per task through the API instead. `--user-agent` and optional `[downloads].user_agent` remain allowed in server modes; explicit CLI settings take precedence.
+
+Credentialed batches must share one origin (scheme, normalized host, effective port); split mixed-origin lists before submission. User agent alone is exempt. Raw `Cookie`/`Set-Cookie` headers are rejected: use `--cookies FILE` or the API's structured `cookies` records.
+
+New request settings survive restart in the **plaintext private SQLite journal**; Unix credential writes require mode `0600`. Protect the home directory with account ACLs on Windows. Recovered tasks never inherit later defaults. Public snapshots expose header names/counts and presence flags only. Cross-origin redirects strip credentials and custom user agents, reduce a supplied referer to its origin, and never restore credentials later in the chain. Old tasks without these settings retain their original redirect behavior.
+
+The dashboard and extension are unchanged in this backend update. See [usage](docs/usage.md#request-headers-and-referer), [API details](docs/daemon.md#request-credentials), and the [security policy](SECURITY.md#per-task-request-credentials).
 
 ## Checksum verification
 
@@ -333,6 +353,9 @@ WebUI mode uses the same download engine and worker pool as the CLI, and replace
 | `--proxy` | Default HTTP/HTTPS/SOCKS5/SOCKS5h route for new downloads; `""` clears it | Configured; initially no explicit route |
 | `--input FILE` | Read a UTF-8 URL list before queue startup | Off |
 | `--cookies FILE` | Netscape cookie file for new tasks; its path is journaled for resume | Configured; initially none |
+| `--header NAME:VALUE` | Repeatable custom header; forbidden as a server-wide default | None |
+| `--referer URL` | Referer; forbidden as a server-wide default | None |
+| `--user-agent STRING` | User agent for new tasks | Configured; initially Vise/version |
 | `-i, --interactive` | Keep the terminal queue open | Off with URL arguments |
 | `--batch` | Never read terminal input | Off |
 | `--resume-all` | Resume global paused/failed tasks at their saved paths | Off |

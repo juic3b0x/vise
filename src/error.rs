@@ -12,6 +12,8 @@ pub enum Error {
     Io(#[from] std::io::Error),
     #[error("HTTP transport error: {0}")]
     Http(#[from] reqwest::Error),
+    #[error("HTTP transport error ({kind})")]
+    PrivateHttp { kind: &'static str, retryable: bool },
     #[error("server returned HTTP {status}")]
     Remote {
         status: StatusCode,
@@ -25,6 +27,8 @@ pub enum Error {
     State(#[from] serde_json::Error),
     #[error("SQLite journal error: {0}")]
     Database(#[from] rusqlite::Error),
+    #[error("download admission body exceeds its size limit")]
+    PayloadTooLarge,
     #[error("download interrupted")]
     Cancelled,
     #[error("worker failed: {0}")]
@@ -32,11 +36,33 @@ pub enum Error {
 }
 
 impl Error {
+    pub(crate) fn private_transport(error: reqwest::Error) -> Self {
+        let retryable = error.is_timeout()
+            || error.is_connect()
+            || error.is_body()
+            || error.is_request()
+            || error.is_decode();
+        let kind = if error.is_timeout() {
+            "timeout"
+        } else if error.is_connect() {
+            "connection failed"
+        } else {
+            "request or body failed"
+        };
+        Self::PrivateHttp { kind, retryable }
+    }
+    pub(crate) fn without_request_details(self) -> Self {
+        match self {
+            Self::Http(error) => Self::private_transport(error),
+            other => other,
+        }
+    }
     pub(crate) fn retryable(&self) -> bool {
         match self {
             Self::Http(e) => {
                 e.is_timeout() || e.is_connect() || e.is_body() || e.is_request() || e.is_decode()
             }
+            Self::PrivateHttp { retryable, .. } => *retryable,
             Self::Remote { status, .. } => {
                 status.is_server_error()
                     || *status == StatusCode::REQUEST_TIMEOUT

@@ -349,6 +349,7 @@ mod tests {
     #[test]
     fn events_are_timestamped_colorized_and_terminal_safe() {
         let download = Download {
+            request: Default::default(),
             id: Uuid::nil(),
             url: String::new(),
             filename: "test\n\x1b[31m.bin".into(),

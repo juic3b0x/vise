@@ -112,6 +112,7 @@ mod tests {
                 filename: "empty.bin".into(),
                 proxy_url: None,
                 cookies_file: None,
+                request_credentials: None,
                 status: Status::Downloading,
                 total_bytes: Some(0),
                 ranged: false,

@@ -197,6 +197,7 @@ async fn stalled_reads_exhaust_a_bounded_retry_budget() {
         limit_rate: None,
         proxy_url: None,
         cookies_file: None,
+        request: Default::default(),
     })
     .await
     .unwrap();

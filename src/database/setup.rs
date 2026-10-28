@@ -75,6 +75,13 @@ pub(super) fn migrate(
     match version {
         0 => initialize(connection),
         1..=4 => super::migration::upgrade_paths(connection, version, path),
+        5 => {
+            let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            tx.execute_batch("ALTER TABLE downloads ADD COLUMN request_credentials TEXT;")?;
+            tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+            tx.commit()?;
+            Ok(())
+        }
         _ => Ok(()),
     }
 }
@@ -96,5 +103,31 @@ pub(super) fn check_integrity(connection: &Connection) -> Result<()> {
             "SQLite journal integrity check failed: {check}"
         )));
     }
+    Ok(())
+}
+
+/// Check at every credential-bearing write, including unchanged checkpoints.
+#[cfg(unix)]
+pub(super) fn credentials_permissions(path: &std::path::Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    for suffix in ["", "-wal", "-shm"] {
+        let mut name = path.as_os_str().to_os_string();
+        name.push(suffix);
+        let metadata = match std::fs::metadata(std::path::PathBuf::from(name)) {
+            Err(error) if !suffix.is_empty() && error.kind() == std::io::ErrorKind::NotFound => {
+                continue;
+            }
+            result => result?,
+        };
+        if metadata.permissions().mode() & 0o7777 != 0o600 {
+            return Err(Error::Invalid("refusing to persist request credentials: journal and WAL/SHM permissions must be 0600".into()));
+        }
+    }
+    Ok(())
+}
+#[cfg(windows)]
+pub(super) fn credentials_permissions(_path: &std::path::Path) -> Result<()> {
+    static WARNING: std::sync::Once = std::sync::Once::new();
+    WARNING.call_once(||tracing::warn!("request credentials are persisted in SQLite; protect the home directory with Windows account ACLs"));
     Ok(())
 }

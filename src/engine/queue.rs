@@ -48,16 +48,25 @@ impl Manager {
         let expected = options.expected;
         let expected = ExpectedChecksums::new(expected.sha256.as_deref(), expected.md5.as_deref())?;
         let url = validate_url(url)?;
+        let request_credentials = options
+            .request
+            .resolve(&self.0.config.request)?
+            .map(Arc::new);
+        if let Some(context) = &request_credentials {
+            context.validate_urls(&[url.to_string()])?;
+            self.0.database.check_credentials_permissions().await?;
+        }
         let proxy_url = options
             .proxy_url
             .or_else(|| self.0.config.proxy_url.clone());
         let cookies_file = options
             .cookies_file
             .or_else(|| self.0.config.cookies_file.clone());
-        let (client, cookies_file) = net::client(
+        let (client, cookies_file) = net::Transport::new(
             self.0.config.read_timeout,
             proxy_url.as_ref(),
             cookies_file.as_deref(),
+            request_credentials.as_deref(),
         )
         .await?;
         let _admission = self.0.admission.lock().await;
@@ -92,6 +101,7 @@ impl Manager {
                     part_path: paths::bounded_file(&staging, &format!("{id}.part"))?,
                     proxy_url,
                     cookies_file,
+                    request_credentials,
                     status: Status::Paused,
                     total_bytes: None,
                     ranged: false,

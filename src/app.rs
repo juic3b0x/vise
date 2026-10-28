@@ -45,6 +45,9 @@ async fn seed_queue(
     args: &Args,
     expected: ExpectedChecksums,
 ) -> anyhow::Result<()> {
+    manager
+        .validate_request_batch(&args.urls, &Default::default())
+        .await?;
     if args.resume_all {
         manager.resume_all().await?;
     }

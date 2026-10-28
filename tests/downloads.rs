@@ -31,3 +31,6 @@ mod recovery;
 mod transfers;
 #[path = "downloads/web.rs"]
 mod web;
+
+#[path = "downloads/credentials/mod.rs"]
+mod credentials;

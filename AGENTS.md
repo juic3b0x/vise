@@ -45,7 +45,7 @@ Tokio (async runtime), Reqwest (streaming + range requests), Axum (API/WebSocket
   - `src/input.rs` -> bounded UTF-8 URL-list/file parsing and validation (`parse`, `read_file`, `load`, `validate_urls`).
   - `src/cli.rs`, `src/cli/progress.rs` -> interactive commands, batch completion and shared Indicatif rendering (`run`, `command`, `ProgressDisplay`).
   - `src/client.rs`, `src/client/{settings,api,commands,batch,output}.rs` -> authenticated remote commands, monitoring/waits and bounded stdout (`Settings`, `Api`, `execute`, `submit`, `Output`).
-  - `src/net/{mod,cookies}.rs` -> per-task Reqwest clients and bounded Netscape cookie import with canonical source paths (`client`, `LoadedCookies`, `load`, `parse`).
+  - `src/net/{mod,cookies,request,credentials}.rs`, `src/net/credentials/` -> per-task clients, legacy/origin-aware transports, bounded cookie import, private request settings and explicit codecs (`client`, `Transport`, `RequestOverrides`, `TaskRequestContext`).
   - `src/proxy.rs` -> validated HTTP(S)/SOCKS5/SOCKS5h routing, credential redaction and explicit no-fallback configuration (`ProxyUrl`, `apply`).
   - `src/telemetry.rs` -> WebUI-only stdout event/progress monitor with injectable async writer (`Options`, `run_with_writer`, `format_event`).
   - `src/web.rs`, `src/web/{access,batch}.rs` -> daemon/local Axum REST, WebSocket snapshots, asset serving and authentication/origin guards (`DaemonConfig`, `router`, `stream`, `Access`, `Token`).
@@ -72,7 +72,7 @@ Tokio (async runtime), Reqwest (streaming + range requests), Axum (API/WebSocket
 
 **Network & secrets**
 - An explicit proxy never falls back to a direct connection. Routes are saved per task and reused for probe, chunks, retries, and resume.
-- SQLite stores the cookie-file path only, never cookie values. Never log or echo tokens, cookies, or proxy credentials; API/telemetry expose a credential-free `proxy_url` plus `proxy_authenticated`.
+- SQLite stores cookie-file paths, never cookie values imported from those files. Explicitly supplied request headers, referer, custom user agent, and structured cookies may be persisted as private per-task credentials for restart-safe resume; response cookies remain memory-only. Credential values must never appear in logs, errors, Debug/Display, ordinary serialization, public API/WebSocket snapshots, WebUI transfer views, or terminal telemetry. Only explicit private journal and outbound-request codecs may access credential bytes. Public request metadata is limited to validated header names, counts, and presence flags; public proxy metadata remains a credential-free proxy_url plus proxy_authenticated. New request credentials are confined to the task’s initial origin across redirects; legacy file-only cookie behavior is preserved. Daemon API tokens must never enter task credentials or SQLite. Credentialed requests (custom headers, referer, supplied cookies) apply only to a single origin per admission; batches spanning multiple origins are rejected.
 - Daemon token lives in config/env only, never SQLite. Non-loopback binds require a valid token. `--webui` stays loopback-only with origin checks.
 - The dashboard is embedded in the binary: no Node, build step, CDN, or external fonts.
 

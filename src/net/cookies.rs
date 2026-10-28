@@ -94,15 +94,15 @@ pub fn parse(contents: &str) -> Result<Jar> {
     Ok(jar)
 }
 
-struct NetscapeCookie<'a> {
-    domain: &'a str,
-    subdomains: bool,
-    path: &'a str,
-    secure: bool,
-    expires: u64,
-    name: &'a str,
-    value: &'a str,
-    http_only: bool,
+pub(super) struct NetscapeCookie<'a> {
+    pub(super) domain: &'a str,
+    pub(super) subdomains: bool,
+    pub(super) path: &'a str,
+    pub(super) secure: bool,
+    pub(super) expires: u64,
+    pub(super) name: &'a str,
+    pub(super) value: &'a str,
+    pub(super) http_only: bool,
 }
 
 impl<'a> NetscapeCookie<'a> {
@@ -127,7 +127,7 @@ impl<'a> NetscapeCookie<'a> {
         Ok(cookie)
     }
 
-    fn validate(&self) -> std::result::Result<(), &'static str> {
+    pub(super) fn validate(&self) -> std::result::Result<(), &'static str> {
         validate_domain(self.domain)?;
         if !self.path.starts_with('/')
             || !self.path.bytes().all(|b| b.is_ascii_graphic() && b != b';')
@@ -168,7 +168,7 @@ impl<'a> NetscapeCookie<'a> {
         Ok(())
     }
 
-    fn insert(&self, jar: &Jar) -> std::result::Result<(), &'static str> {
+    pub(super) fn insert(&self, jar: &Jar) -> std::result::Result<(), &'static str> {
         let scheme = if self.secure { "https" } else { "http" };
         let mut url = Url::parse(&format!("{scheme}://{}/", self.domain))
             .map_err(|_| "invalid cookie domain")?;
@@ -184,6 +184,7 @@ impl<'a> NetscapeCookie<'a> {
         if self.http_only {
             header.push_str("; HttpOnly");
         }
+        let validation_header = header.clone();
         if self.expires != 0 {
             let expires = i64::try_from(self.expires)
                 .ok()
@@ -198,7 +199,7 @@ impl<'a> NetscapeCookie<'a> {
             .map_err(|_| "cannot format cookie expiration")?;
         }
         let validation = Jar::default();
-        validation.add_cookie_str(&header, &url);
+        validation.add_cookie_str(&validation_header, &url);
         // Jar's import method silently rejects invalid cookies. Surface rejection
         // instead of quietly falling back to an unauthenticated download.
         let accepted = validation
