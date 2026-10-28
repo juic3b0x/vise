@@ -14,6 +14,7 @@ fn staged(root: &Path) -> Record {
         part_path: root.join(".vise").join(format!("{id}.part")),
         proxy_url: None,
         cookies_file: None,
+        request_credentials: None,
         status: Status::Paused,
         total_bytes: Some(3),
         ranged: true,

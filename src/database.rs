@@ -18,7 +18,7 @@ mod migration;
 mod setup;
 
 const APPLICATION_ID: i32 = 0x5649_5345; // VISE
-const SCHEMA_VERSION: i32 = 5;
+const SCHEMA_VERSION: i32 = 6;
 pub const FILE_NAME: &str = "state.sqlite3";
 
 const DOWNLOADS_SCHEMA: &str = r#"
@@ -40,6 +40,7 @@ CREATE TABLE downloads (
     verified_at INTEGER CHECK (verified_at IS NULL OR verified_at>=0),
     proxy_url TEXT,
     cookies_file TEXT,
+    request_credentials TEXT,
     filename TEXT NOT NULL,
     part_path TEXT NOT NULL UNIQUE
 ) STRICT;
@@ -175,8 +176,18 @@ impl Database {
     /// One atomic snapshot transaction covers parent rows, every changed segment,
     /// segment layout resets, and cascading task deletion. The engine synchronizes
     /// partial files before this method and serializes resets with checkpoints.
+    pub(crate) async fn check_credentials_permissions(&self) -> Result<()> {
+        let path = self.path.clone();
+        self.call(move |_| setup::credentials_permissions(&path))
+            .await
+    }
+
     pub(crate) async fn persist(&self, records: Vec<Record>) -> Result<()> {
+        let path = self.path.clone();
         self.call(move |state| {
+            if records.iter().any(|r| r.request_credentials.is_some()) {
+                setup::credentials_permissions(&path)?;
+            }
             let records = snapshots(records)?;
             if state.saved == records {
                 return Ok(());
@@ -231,15 +242,15 @@ fn write_rows<'a>(
     records: impl Iterator<Item = &'a Record>,
 ) -> Result<()> {
     let mut download = transaction.prepare_cached(r#"
-        INSERT INTO downloads(id,url,output_path,total_size,status,created_at,updated_at,ranged,validator,error,expected_sha256,expected_md5,actual_sha256,actual_md5,verified_at,proxy_url,cookies_file,filename,part_path)
-        VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)
+        INSERT INTO downloads(id,url,output_path,total_size,status,created_at,updated_at,ranged,validator,error,expected_sha256,expected_md5,actual_sha256,actual_md5,verified_at,proxy_url,cookies_file,filename,part_path,request_credentials)
+        VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)
         ON CONFLICT(id) DO UPDATE SET url=excluded.url, output_path=excluded.output_path,
             total_size=excluded.total_size, status=excluded.status, updated_at=excluded.updated_at,
             ranged=excluded.ranged, validator=excluded.validator, error=excluded.error,
             expected_sha256=excluded.expected_sha256, expected_md5=excluded.expected_md5,
             actual_sha256=excluded.actual_sha256, actual_md5=excluded.actual_md5, verified_at=excluded.verified_at,
             proxy_url=excluded.proxy_url, cookies_file=excluded.cookies_file,
-            filename=excluded.filename, part_path=excluded.part_path
+            filename=excluded.filename, part_path=excluded.part_path, request_credentials=excluded.request_credentials
     "#)?;
     let mut chunk = transaction.prepare_cached(r#"
         INSERT INTO chunks(download_id,chunk_index,start_byte,end_byte,downloaded_bytes,status)
@@ -276,7 +287,12 @@ fn write_rows<'a>(
                 .map(|path| crate::paths::text(path))
                 .transpose()?,
             record.filename,
-            crate::paths::text(&record.part_path)?
+            crate::paths::text(&record.part_path)?,
+            record
+                .request_credentials
+                .as_ref()
+                .map(|v| v.journal_json())
+                .transpose()?
         ])?;
         transaction.execute(
             "DELETE FROM chunks WHERE download_id=?1 AND chunk_index>=?2",
@@ -305,7 +321,7 @@ fn read_records(connection: &mut Connection) -> Result<Vec<Record>> {
 }
 
 fn read_downloads(transaction: &Transaction<'_>) -> Result<BTreeMap<Uuid, Record>> {
-    let mut statement = transaction.prepare("SELECT id,url,filename,total_size,status,created_at,ranged,validator,error,expected_sha256,expected_md5,actual_sha256,actual_md5,verified_at,proxy_url,cookies_file,output_path,part_path FROM downloads ORDER BY id")?;
+    let mut statement = transaction.prepare("SELECT id,url,filename,total_size,status,created_at,ranged,validator,error,expected_sha256,expected_md5,actual_sha256,actual_md5,verified_at,proxy_url,cookies_file,output_path,part_path,request_credentials FROM downloads ORDER BY id")?;
     let mut rows = statement.query([])?;
     let mut records = BTreeMap::new();
     while let Some(row) = rows.next()? {
@@ -332,6 +348,7 @@ fn decode_download(row: &Row<'_>) -> Result<Record> {
         output_path: PathBuf::from(row.get::<_, String>(16)?),
         part_path: PathBuf::from(row.get::<_, String>(17)?),
         cookies_file: row.get::<_, Option<String>>(15)?.map(PathBuf::from),
+        request_credentials: decode_request_credentials(row)?,
         proxy_url: row
             .get::<_, Option<String>>(14)?
             .map(|value| value.parse())
@@ -346,6 +363,16 @@ fn decode_download(row: &Row<'_>) -> Result<Record> {
         chunks: Vec::new(),
         speed: 0.0,
     })
+}
+
+fn decode_request_credentials(
+    row: &Row<'_>,
+) -> Result<Option<Arc<crate::net::credentials::TaskRequestContext>>> {
+    row.get::<_, Option<String>>(18)?
+        .map(|value| {
+            crate::net::credentials::TaskRequestContext::from_journal(&value).map(Arc::new)
+        })
+        .transpose()
 }
 
 fn decode_checksums(row: &Row<'_>) -> Result<crate::checksum::Checksums> {
@@ -463,7 +490,7 @@ mod tests {
         assert_eq!(database.load().await.unwrap(), vec![corrupt]);
     }
 
-    fn record() -> Record {
+    pub(super) fn record() -> Record {
         let id = Uuid::new_v4();
         let output = std::env::temp_dir().join(id.to_string());
         Record {
@@ -474,6 +501,7 @@ mod tests {
             filename: "file.bin".into(),
             proxy_url: None,
             cookies_file: None,
+            request_credentials: None,
             status: Status::Paused,
             total_bytes: Some(1024),
             ranged: true,
@@ -796,3 +824,6 @@ mod tests {
         assert!(Database::open(path).await.is_err());
     }
 }
+
+#[cfg(test)]
+mod credentials_tests;

@@ -35,7 +35,18 @@ fn resolve(
     loaded: &LoadedConfig,
     environment_token: Option<String>,
 ) -> Result<Startup> {
+    anyhow::ensure!(
+        !(args.daemon || args.webui) || (args.header.is_empty() && args.referer.is_none()),
+        "--header and --referer are per-task API settings in --daemon/--webui mode; process-level defaults are forbidden"
+    );
     let file = &loaded.values;
+    let request = vise::net::credentials::RequestOverrides::from_cli(
+        &args.header,
+        args.referer.as_deref(),
+        args.user_agent.as_deref(),
+    )?
+    .with_user_agent_default(file.downloads.user_agent.as_deref())?;
+    request.validate_urls(&Default::default(), &args.urls)?;
     let bind = args.bind.unwrap_or_else(|| {
         SocketAddr::new(
             args.host.unwrap_or(file.daemon.host),
@@ -72,6 +83,7 @@ fn resolve(
         limit_rate: (args.limit_rate.is_some() || file.downloads.global_speed_limit_kbps != 0)
             .then_some(limit_rate),
         proxy_url,
+        request,
         cookies_file: args
             .cookies
             .as_deref()
@@ -226,5 +238,58 @@ mod tests {
         assert!(resolve(&args, &file, None).is_err());
         let override_jobs = Args::try_parse_from(["vise", "-j", "5"]).unwrap();
         assert!(resolve(&override_jobs, &file, None).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod credential_tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn daemon_mode_rejects_process_level_header_and_referer() {
+        let root = tempfile::tempdir().unwrap();
+        let loaded = LoadedConfig {
+            home: root.path().into(),
+            path: root.path().join("config.toml"),
+            values: Default::default(),
+        };
+        for mode in ["--daemon", "--webui"] {
+            for (flag, value) in [
+                ("--header", "X-Secret: private-sentinel"),
+                ("--referer", "https://example.com/private-sentinel"),
+            ] {
+                let args = Args::try_parse_from(["vise", mode, flag, value]).unwrap();
+                let error = resolve(&args, &loaded, None).err().unwrap().to_string();
+                assert!(error.contains("per-task") && !error.contains("private-sentinel"));
+            }
+            let args = Args::try_parse_from(["vise", mode, "--user-agent", "allowed"]).unwrap();
+            assert!(resolve(&args, &loaded, None).is_ok());
+        }
+    }
+
+    #[test]
+    fn cli_user_agent_overrides_toml_even_at_builtin_value() {
+        let root = tempfile::tempdir().unwrap();
+        let mut values = vise::config::FileConfig::default();
+        values.downloads.user_agent = Some("configured-private-agent".into());
+        let loaded = LoadedConfig {
+            home: root.path().into(),
+            path: root.path().join("config.toml"),
+            values,
+        };
+        let args = Args::try_parse_from([
+            "vise",
+            "--user-agent",
+            vise::net::credentials::BUILTIN_USER_AGENT,
+        ])
+        .unwrap();
+        let startup = resolve(&args, &loaded, None).unwrap();
+        let mut wire = serde_json::json!({});
+        startup.engine.request.encode_admission(&mut wire).unwrap();
+        assert_eq!(
+            wire["user_agent"],
+            vise::net::credentials::BUILTIN_USER_AGENT
+        );
     }
 }

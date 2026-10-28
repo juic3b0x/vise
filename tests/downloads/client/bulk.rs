@@ -54,7 +54,10 @@ async fn daemon_batches_prevalidate_authenticate_and_keep_single_request_limits(
         .post(format!("{}/api/downloads", daemon.endpoint))
         .bearer_auth(SECRET)
         .header("content-type", "application/json")
-        .body(json!({"url": "a".repeat(17000)}).to_string())
+        .body(
+            json!({"url": "a".repeat(vise::net::credentials::ADMISSION_BODY_BYTES + 1)})
+                .to_string(),
+        )
         .send()
         .await
         .unwrap();

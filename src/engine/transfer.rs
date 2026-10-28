@@ -48,13 +48,22 @@ impl Manager {
     }
 
     async fn refresh_cookies(&self, job: &Job) -> Result<()> {
-        let (path, proxy) = {
+        let (path, proxy, context) = {
             let record = job.record.read().await;
-            (record.cookies_file.clone(), record.proxy_url.clone())
+            (
+                record.cookies_file.clone(),
+                record.proxy_url.clone(),
+                record.request_credentials.clone(),
+            )
         };
-        if let Some(path) = path {
-            let (client, _) =
-                net::client(self.0.config.read_timeout, proxy.as_ref(), Some(&path)).await?;
+        if path.is_some() || context.is_some() {
+            let (client, _) = net::Transport::new(
+                self.0.config.read_timeout,
+                proxy.as_ref(),
+                path.as_deref(),
+                context.as_deref(),
+            )
+            .await?;
             *job.client.write().await = client;
         }
         Ok(())
@@ -199,6 +208,11 @@ impl Manager {
             }
             chunk_at_mut(&mut *job.record.write().await, index)?.status = ChunkStatus::Downloading;
             let result = self.transfer_once(&job, index, cancel).await;
+            let result = if job.record.read().await.request_credentials.is_some() {
+                result.map_err(Error::without_request_details)
+            } else {
+                result
+            };
             match result {
                 Ok(()) => {
                     chunk_at_mut(&mut *job.record.write().await, index)?.status =
@@ -534,6 +548,7 @@ mod tests {
                     .join(format!("{id}.part")),
                 proxy_url: None,
                 cookies_file: None,
+                request_credentials: None,
                 status: Status::Downloading,
                 total_bytes: Some(3),
                 ranged: true,

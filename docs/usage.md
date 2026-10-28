@@ -84,6 +84,9 @@ Stop a session with Ctrl+C; a service manager can send SIGTERM. Vise stops worke
 | `--expected-md5 <HEX>` | Expected 32-digit MD5 for exactly one URL |
 | `--proxy <URL>` | Default HTTP/HTTPS/SOCKS5/SOCKS5h route for new tasks |
 | `--cookies <FILE>` | Netscape cookie file for new tasks |
+| `--header <NAME:VALUE>` | Repeatable custom request header; local CLI defaults only |
+| `--referer <URL>` | HTTP(S) referer; local CLI defaults only |
+| `--user-agent <STRING>` | User agent for new tasks; overrides TOML |
 | `--resume-all` | Resume eligible unfinished tasks from the global journal |
 | `-i, --interactive` | Keep the command queue open, including with URL arguments |
 | `--batch` | Disable interactive input |
@@ -191,3 +194,24 @@ vise --resume-all
 The journal is always `~/.vise/state.sqlite3`; `-o` does not create a separate task history. Previously saved absolute destinations and staging paths remain unchanged. A crash may require downloading bytes since the last durable checkpoint again. Missing disks, changed remote content, or expired cookie files fail explicitly rather than silently relocating or authenticating a task incorrectly.
 
 Use the [native remote CLI](remote.md), [daemon API clients](daemon.md#rest-api), or the [dashboard](webui.md) to inspect the same history while the daemon owns the engine.
+
+## Request headers and referer
+
+```sh
+vise --header "Authorization: Bearer $DOWNLOAD_TOKEN" \
+  --header 'X-Client: vise' --referer https://downloads.example.com/releases \
+  --user-agent 'MyDownloader/1.0' https://downloads.example.com/file.zip
+vise --header "Authorization: Bearer $DOWNLOAD_TOKEN" --input urls.txt
+```
+
+These startup flags configure new tasks, including later interactive additions. Existing `add URL [FILENAME]` and bare-URL commands retain their syntax and inherit these defaults; there is no inline interactive header syntax. Saved tasks use their journaled values after pause, retry, or restart, independently of new process defaults. An optional `[downloads].user_agent` sets the file default. Explicit `--user-agent`, including the built-in text or an empty string, overrides it. An empty user-agent flag selects the built-in Vise agent. Default custom headers are intentionally not accepted in TOML.
+
+In `--daemon` and `--webui`, process-wide `--header` and `--referer` are rejected without echoing their values. Use [per-task API admission](daemon.md#request-credentials). User-agent defaults remain permitted. Headers, a referer, or supplied cookies require every URL in one positional/input-file batch to share an origin: scheme, normalized host, and effective port. A mixed-origin batch fails before any task is added. User agent alone is exempt.
+
+Header names must be HTTP tokens of at most 128 bytes. Values cannot contain control characters. Limits are 32 entries, 8 KiB per value, and 32 KiB combined custom headers. Referers are absolute HTTP(S) URLs without embedded credentials, at most 8 KiB; fragments are removed. Custom user agents are limited to 512 bytes. Supplying User-Agent or Referer through both a header and its dedicated flag is an error; a User-Agent header alone overrides the TOML agent.
+
+Vise rejects Host, range/conditional headers, framing and hop-by-hop headers, content/accept encoding, proxy authentication, and its digest negotiation header. Raw Cookie and Set-Cookie headers are always rejected: use `--cookies FILE` or structured API cookies so domain/path/secure scope is retained.
+
+On the new transport, same-origin redirects retain settings. A host, scheme, or effective-port change strips custom headers, custom user agent, and all jar cookies, and sends only the origin of a supplied referer. Credentials remain disabled for the rest of that redirect chain, even if it returns to the starting origin. HTTPS-to-HTTP redirects are refused. New settings combined with a cookie file pin the combined jar to the initial origin. Tasks without new settings keep the existing Reqwest redirect and automatic referer behavior.
+
+Credentials are saved in plaintext private task state, not returned by inspection commands. Unix journal mode must be exactly `0600`; Windows users must protect the home directory with account ACLs. The binary logger suppresses credential-bearing cookie-store events even with global trace/debug logging or explicit cookie-store directives. This does not protect shell history or process listings, where CLI credentials can still be exposed. See [security](https://github.com/juic3b0x/vise/blob/main/SECURITY.md#per-task-request-credentials) and [remote commands](remote.md#request-credentials).

@@ -124,6 +124,9 @@ pub(crate) struct Record {
     /// Local source path only; cookie values never enter journal snapshots.
     #[serde(default)]
     pub cookies_file: Option<std::path::PathBuf>,
+    // Only the private SQLite codec may serialize these values. Legacy imports default to None.
+    #[serde(skip)]
+    pub request_credentials: Option<std::sync::Arc<crate::net::credentials::TaskRequestContext>>,
     pub status: Status,
     pub total_bytes: Option<u64>,
     pub ranged: bool,
@@ -154,6 +157,11 @@ impl Record {
                 .proxy_url
                 .as_ref()
                 .map(crate::proxy::ProxyUrl::redacted),
+            request: self
+                .request_credentials
+                .as_ref()
+                .map(|v| v.summary())
+                .unwrap_or_default(),
             proxy_authenticated: self
                 .proxy_url
                 .as_ref()
@@ -191,6 +199,8 @@ impl Record {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Download {
+    #[serde(default, flatten)]
+    pub request: crate::net::credentials::RequestSummary,
     pub id: Uuid,
     pub url: String,
     pub filename: String,

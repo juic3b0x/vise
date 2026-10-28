@@ -112,7 +112,12 @@ fn router(state: AppState) -> Router {
         .route("/assets/dashboard-input.mjs", get(input_javascript))
         .route("/api/telemetry", get(telemetry))
         .route("/api/config", get(configuration).post(set_configuration))
-        .route("/api/downloads", get(list).post(add))
+        .route(
+            "/api/downloads",
+            get(list).merge(post(add).layer(DefaultBodyLimit::max(
+                crate::net::credentials::ADMISSION_BODY_BYTES,
+            ))),
+        )
         .route(
             "/api/downloads/batch",
             post(batch::add).layer(DefaultBodyLimit::max(crate::input::MAX_BATCH_BODY_BYTES)),
@@ -257,11 +262,14 @@ struct AddRequest {
     expected_sha256: Option<String>,
     expected_md5: Option<String>,
     proxy_url: Option<String>,
+    #[serde(flatten)]
+    request: crate::net::credentials::RequestOverrides,
 }
 async fn add(
     State(state): State<AppState>,
-    Json(input): Json<AddRequest>,
+    input: std::result::Result<Json<AddRequest>, axum::extract::rejection::JsonRejection>,
 ) -> Result<(StatusCode, Json<Download>), ApiError> {
+    let input = admission_json(input)?;
     let options = TransferOptions {
         expected: ExpectedChecksums::new(
             input.expected_sha256.as_deref(),
@@ -275,6 +283,7 @@ async fn add(
             .transpose()
             .inspect_err(|error| rejected_action(&state.manager, "add", error))?,
         cookies_file: None,
+        request: input.request,
     };
     Ok((
         StatusCode::CREATED,
@@ -394,6 +403,21 @@ async fn stream(mut socket: WebSocket, state: AppState, with_configuration: bool
     let _ = tokio::time::timeout(Duration::from_secs(1), socket.close()).await;
 }
 
+// Serde/JSON rejection strings may echo an offending credential or unknown key.
+fn admission_json<T>(
+    input: std::result::Result<Json<T>, axum::extract::rejection::JsonRejection>,
+) -> Result<T, ApiError> {
+    input.map(|Json(value)| value).map_err(|error| {
+        if error.status() == StatusCode::PAYLOAD_TOO_LARGE {
+            ApiError(Error::PayloadTooLarge)
+        } else {
+            ApiError(Error::Invalid(
+                "invalid download admission JSON; check field names and types".into(),
+            ))
+        }
+    })
+}
+
 struct ApiError(Error);
 impl From<Error> for ApiError {
     fn from(error: Error) -> Self {
@@ -404,6 +428,7 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let status = match &self.0 {
             Error::Invalid(_) => StatusCode::BAD_REQUEST,
+            Error::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             Error::NotFound(_) => StatusCode::NOT_FOUND,
             Error::Conflict(_) => StatusCode::CONFLICT,
             _ => StatusCode::INTERNAL_SERVER_ERROR,

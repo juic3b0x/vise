@@ -39,6 +39,7 @@ First startup creates `~/.vise/config.toml`, including a random persistent 64-ch
 | `downloads.max_concurrent` | `5`; range 1–64 |
 | `downloads.global_speed_limit_kbps` | `0` restores the journal's rate; positive values use 1024 bytes per unit |
 | `downloads.cookies_file` | Unset; optional Netscape cookie-file path for new tasks |
+| `downloads.user_agent` | Unset; optional user agent for new tasks |
 | `proxy.url` | `""`; no explicit default proxy |
 
 CLI options override file settings. `--bind` replaces the full socket address; alternatively, `--host` and `--port` override individual fields. `--bind` cannot be combined with those two options. `VISE_API_TOKEN` in the environment overrides the configured token. The older `auth_token` key is an alias; configure only one token key.
@@ -100,7 +101,7 @@ vise --interactive
 
 ## REST API
 
-All URLs below use the initial loopback listener. API task controls require the full download UUID returned by queue admission or listing. Mutation requests require `Content-Type: application/json`, including DELETE. JSON request bodies are limited to 16 KiB except the batch route, which accepts up to 2 MiB.
+All URLs below use the initial loopback listener. API task controls require the full download UUID returned by queue admission or listing. Mutation requests require `Content-Type: application/json`, including DELETE. JSON request bodies are limited to 16 KiB except single-download admission (128 KiB) and batch admission (2 MiB).
 
 | Method | Path | Result |
 | --- | --- | --- |
@@ -184,6 +185,9 @@ Admission reuses the engine's ordinary SQLite transactions and worker semaphore.
 | `expected_sha256` | Optional 64-digit hexadecimal digest |
 | `expected_md5` | Optional 32-digit hexadecimal digest |
 | `proxy_url` | Optional supported proxy URL; omitted/null inherits the process default |
+| `headers` | Optional list of `{name, value}` records |
+| `referer`, `user_agent` | Optional private strings |
+| `cookies` | Optional structured cookie records; see below |
 
 Unknown fields are rejected. The API has no cookie-file upload field: new tasks inherit the daemon's configured `downloads.cookies_file` or `--cookies` default. See [cookie sessions](architecture.md#cookie-sessions).
 
@@ -223,3 +227,32 @@ Connections receive an initial snapshot, then updates on state changes and at le
 Native WebSocket clients can supply the bearer header during upgrade. Browser WebSocket APIs cannot set arbitrary authorization headers, which is why the bundled dashboard uses the authenticated same-origin browser session. Preserve upgrades and avoid proxy buffering when operating behind HTTPS.
 
 Continue with [WebUI operation](webui.md), [extension setup](extension.md), or the [engine architecture](architecture.md).
+
+## Request credentials
+
+Both `POST /api/downloads` and `POST /api/downloads/batch` accept common request credentials. A batch uses either `urls` or `content`, with shared credential fields alongside it. New tasks inherit the server's user-agent and cookie-file defaults. Server startup rejects `--header`/`--referer` defaults; authenticated clients supply them per admission. Never reuse the daemon token as a download credential.
+
+```json
+{
+  "url": "https://downloads.example.com/archive.zip",
+  "headers": [{"name": "Authorization", "value": "Bearer publisher-session"}],
+  "referer": "https://downloads.example.com/releases",
+  "user_agent": "MyDownloader/1.0",
+  "cookies": [{
+    "name": "session", "value": "publisher-cookie", "domain": "downloads.example.com",
+    "hostOnly": true, "path": "/", "secure": true, "expires": null, "httpOnly": true
+  }]
+}
+```
+
+Omission or `null` inherits process defaults. A nonempty header list replaces inherited entries with the same case-insensitive name and retains the others; an empty list clears inherited custom headers. Empty `referer` clears it, and empty `user_agent` selects Vise's built-in agent. `cookies: []` clears supplied-cookie defaults, not a configured cookie file. Header User-Agent/Referer entries are normalized into the dedicated settings; duplicates with the dedicated fields are errors.
+
+Cookie domains are normalized; `hostOnly` defaults to true. Expiry is Unix seconds, with `null` for a session cookie. Supplied records must match the original URL's domain, path, and secure scope. File cookies load first, then supplied records override matching name/domain/path keys. An expired supplied record removes that key. Cookie prefixes are validated. Response cookies update the per-task in-memory jar only.
+
+A credentialed batch (custom headers, referer, or supplied cookies) must have one scheme/host/effective-port origin; otherwise HTTP 400 asks the caller to split it, before any entry is admitted. User agent alone is exempt. No credential values appear in validation or JSON rejection errors.
+
+Limits: 32 headers, 128-byte names, 8 KiB per value, 32 KiB combined headers; 8 KiB referer; 512-byte user agent; 128 cookies, 4 KiB each and 32 KiB combined. The total decoded credential budget is 64 KiB. Single admission accepts 128 KiB of JSON; batch admission retains 2 MiB and existing URL-list limits. Other routes retain 16 KiB. Oversized bodies return HTTP 413. See [forbidden headers](usage.md#request-headers-and-referer).
+
+Snapshots and both WebSocket streams add only `header_names`, `header_count`, `has_custom_headers`, `has_referer`, `has_user_agent`, and `has_cookies`. The agent itself, cookie metadata, referer, and header values are never returned. These flags describe configured inputs, not session validity. The existing dashboard does not yet include credential-entry controls; use CLI/remote/API admission.
+
+Schema 6 persists effective settings privately before starting network I/O. Restart never applies new defaults to saved tasks. Unix writes require a journal and existing WAL/SHM files with mode exactly `0600`. Windows emits a one-time non-secret warning: protect the home directory with account ACLs. The database, WAL, and backups contain plaintext credentials. See [transport and recovery](architecture.md#private-request-contexts).

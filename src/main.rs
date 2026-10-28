@@ -9,6 +9,7 @@ use vise::{checksum::ExpectedChecksums, cli, engine::Manager, rate_limiter::Rate
 
 mod app;
 mod client;
+mod logging;
 mod startup;
 
 #[derive(Parser)]
@@ -80,6 +81,15 @@ struct Args {
     /// Netscape cookies.txt file for new downloads; saved tasks retain their file
     #[arg(long, value_name = "FILE")]
     cookies: Option<PathBuf>,
+    /// Custom request header for new downloads (repeatable; per-task API only in server modes)
+    #[arg(long, value_name = "NAME: VALUE")]
+    header: Vec<String>,
+    /// Referer for new downloads (per-task API only in server modes)
+    #[arg(long, value_name = "URL")]
+    referer: Option<String>,
+    /// User agent for new downloads; empty selects Vise's built-in value
+    #[arg(long, value_name = "STRING")]
+    user_agent: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -90,13 +100,7 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "vise=warn".into()),
-        )
-        .init();
+    logging::init();
     match run(Args::parse()).await {
         Ok(code) => ExitCode::from(code),
         Err(error) => {

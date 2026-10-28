@@ -1,16 +1,17 @@
 use super::{Manager, Metadata};
+use crate::net::Transport;
 use crate::{
     checksum::{self, ExpectedChecksums},
     error::{Error, Result},
 };
-use reqwest::{Client, Response, StatusCode, header};
+use reqwest::{Response, StatusCode, header};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 impl Manager {
     pub(super) async fn probe(
         &self,
-        client: &Client,
+        client: &Transport,
         url: &str,
         cancel: &CancellationToken,
     ) -> Result<Metadata> {
@@ -78,21 +79,13 @@ impl Manager {
 
     pub(super) async fn request(
         &self,
-        client: &Client,
+        client: &Transport,
         url: &str,
         range: Option<&str>,
         validator: Option<&str>,
         cancel: &CancellationToken,
     ) -> Result<Response> {
-        let mut request = client.get(url).header(header::ACCEPT_ENCODING, "identity");
-        request = request.header("want-repr-digest", "sha-256=10, md5=1");
-        if let Some(range) = range {
-            request = request.header(header::RANGE, range);
-        }
-        if let Some(validator) = validator {
-            request = request.header(header::IF_RANGE, validator);
-        }
-        tokio::select! { biased; _ = cancel.cancelled() => Err(Error::Cancelled), response = request.send() => Ok(response?) }
+        client.request(url, range, validator, cancel).await
     }
 
     pub(super) async fn backoff(
@@ -166,5 +159,5 @@ pub(super) fn content_range(response: &Response) -> Result<(u64, u64, u64)> {
         );
         (start <= end && end < total).then_some((start, end, total))
     })();
-    parsed.ok_or_else(|| Error::Protocol(format!("malformed Content-Range: {value}")))
+    parsed.ok_or_else(|| Error::Protocol("malformed Content-Range".into()))
 }

@@ -25,6 +25,7 @@ use tokio_util::sync::CancellationToken;
 impl Manager {
     pub async fn open(mut config: Config) -> Result<Self> {
         validate_config(&config)?;
+        config.request.resolve(&Default::default())?;
         if let Some(path) = config.cookies_file.take() {
             config.cookies_file = Some(net::cookies::load(path).await?.path);
         }

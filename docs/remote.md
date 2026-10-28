@@ -123,8 +123,22 @@ Ctrl+C or SIGTERM on Unix exits with 130; Windows supports Ctrl+C. Interrupting 
 
 ## Failure and credential handling
 
-The API client bypasses environment proxies, has no download cookie jar, preserves TLS certificate validation, and refuses redirects. Tokens are marked sensitive in request headers and never copied into diagnostic output. Responses are bounded to 32 MiB; ordinary request bodies retain the API's 16 KiB limit, and batch bodies allow up to 2 MiB. Human-readable server text is escaped before terminal display.
+The API client bypasses environment proxies, has no download cookie jar, preserves TLS certificate validation, and refuses redirects. Tokens are marked sensitive in request headers and never copied into diagnostic output. Responses are bounded to 32 MiB; single-download admission allows 128 KiB, batch admission allows 2 MiB, and unrelated request bodies retain the 16 KiB limit. Human-readable server text is escaped before terminal display.
 
 Requests are not automatically retried. If a submission loses its response, it might already have been admitted: inspect `vise remote list` before repeating it. The client never falls back to starting a local engine after authentication or connection failure.
 
 Use [daemon configuration and API details](daemon.md) for server setup, [WebUI controls](webui.md) for browser management, and [architecture](architecture.md) for durable worker behavior.
+
+## Request credentials
+
+```sh
+vise remote add --header "Authorization: Bearer $DOWNLOAD_TOKEN" \
+  --referer https://downloads.example.com/releases --user-agent 'MyDownloader/1.0' \
+  --input urls.txt --wait
+```
+
+Repeat `--header` as needed. These options are serialized explicitly into the admission body for **every URL** in the invocation. They never configure headers, referer, user agent, cookies, or proxies on the daemon API connection. The daemon's Bearer token remains separate and is not copied into task credentials. The client never opens a local journal or starts an engine.
+
+Headers or a referer require one origin across positional and file URLs; the client validates this before POST, and the daemon validates again. User agent alone is exempt. Missing options inherit daemon defaults; a remote client's local `downloads.user_agent` does not replace daemon defaults. Duplicate User-Agent/Referer sources and invalid or engine-owned headers fail without echoing values. See [validation and redirects](usage.md#request-headers-and-referer).
+
+Single admission and batches return public summaries only: normalized header names, entry count, and `has_custom_headers`, `has_referer`, `has_user_agent`, and `has_cookies`. Values cannot be retrieved with `list`, `get`, `watch`, or JSON output. Saved values survive daemon restart in its private journal. Do not automatically replay a POST after a lost response; inspect task history first.

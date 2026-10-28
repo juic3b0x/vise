@@ -28,6 +28,7 @@ default_dir = "~/Downloads/Vise"
 max_concurrent = 5
 global_speed_limit_kbps = 0 # restore saved cap; initially unlimited
 # cookies_file = "~/cookies.txt" # optional Netscape cookie file
+# user_agent = "CustomDownloader/1.0" # optional user agent for new tasks
 
 [proxy]
 url = "" # optional default proxy
@@ -71,6 +72,7 @@ pub struct Downloads {
     /// KiB per second; zero restores the journal cap (initially unlimited).
     pub global_speed_limit_kbps: u64,
     pub cookies_file: Option<PathBuf>,
+    pub user_agent: Option<String>,
 }
 
 impl Default for Downloads {
@@ -80,6 +82,7 @@ impl Default for Downloads {
             max_concurrent: 5,
             global_speed_limit_kbps: 0,
             cookies_file: None,
+            user_agent: None,
         }
     }
 }

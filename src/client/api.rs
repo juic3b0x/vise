@@ -92,6 +92,8 @@ impl Api {
             let bytes = serde_json::to_vec(body)?;
             let maximum = if path == "api/downloads/batch" {
                 vise::input::MAX_BATCH_BODY_BYTES
+            } else if path == "api/downloads" {
+                vise::net::credentials::ADMISSION_BODY_BYTES
             } else {
                 16 * 1024
             };

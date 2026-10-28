@@ -110,7 +110,7 @@ The database module uses bundled SQLite through `rusqlite`. An `Arc<Mutex<Connec
 
 | Table | Stored fields |
 | --- | --- |
-| `downloads` | UUID `id`, `url`, `filename`, absolute `output_path` and `part_path`, nullable `proxy_url`, nullable `cookies_file`, nullable `total_size`, `status`, `created_at`, `updated_at`, `ranged`, `validator`, nullable `error`, expected/actual SHA-256 and MD5, nullable `verified_at` |
+| `downloads` | UUID `id`, `url`, `filename`, absolute `output_path` and `part_path`, nullable `proxy_url`, nullable `cookies_file`, nullable private `request_credentials`, nullable `total_size`, `status`, `created_at`, `updated_at`, `ranged`, `validator`, nullable `error`, expected/actual SHA-256 and MD5, nullable `verified_at` |
 | `chunks` | `download_id`, zero-based `chunk_index`, `start_byte`, nullable `end_byte`, `downloaded_bytes`, `status` |
 | `metadata` | Per-source legacy-import completion markers and global `limit_rate` setting |
 
@@ -182,7 +182,7 @@ The test suite uses local authenticated HTTP and SOCKS proxies, remote-DNS fixtu
 
 `--cookies FILE` overrides optional `downloads.cookies_file` in the TOML configuration. `Manager::open` validates and canonicalizes this default before creating the journal. Queue admission imports a separate jar and saves the effective absolute UTF-8 path in the task record. REST/interactive additions inherit the process default, while library callers can supply `TransferOptions.cookies_file`. Cookie paths and values are not part of public download snapshots.
 
-At the start of each run, the engine reloads the task's saved file and rebuilds its client with the saved proxy route. All requests in that run share the jar, including server cookie updates. Recovered tasks retain their saved authentication source independently of new CLI defaults. Missing or malformed saved files fail only their task before HTTP requests, preserving offsets. No cookie values or response cookie changes are written to SQLite or back to the source file; refresh that file when authentication expires. The engine client lock is held only to swap or clone the client, never across HTTP I/O.
+At the start of each run, the engine reloads the task's saved file and rebuilds its client with the saved proxy route. All requests in that run share the jar, including server cookie updates. Recovered tasks retain their saved authentication source independently of new CLI defaults. Missing or malformed saved files fail only their task before HTTP requests, preserving offsets. No imported file-cookie values or response cookie changes are written to SQLite or back to the source file; refresh that file when authentication expires. The engine client lock is held only to swap or clone the client, never across HTTP I/O.
 
 ## Global journal ownership and imports
 
@@ -199,3 +199,19 @@ The API and interactive queue show the entire global history. The CLI separately
 The site is built from `mkdocs.yml` and these Markdown sources using Material for MkDocs. Python dependencies are isolated from the Rust executable. See the [documentation development instructions](https://github.com/juic3b0x/vise/blob/main/CONTRIBUTING.md#documentation-site) for local preview, strict validation, and GitHub Pages setup.
 
 Engine changes must follow [AGENTS.md](https://github.com/juic3b0x/vise/blob/main/AGENTS.md) and the [contribution standards](https://github.com/juic3b0x/vise/blob/main/CONTRIBUTING.md). Report security issues privately using the [security policy](https://github.com/juic3b0x/vise/security/policy).
+
+## Private request contexts
+
+`net::credentials` owns validated `RequestOverrides`, immutable `TaskRequestContext` shared by journal snapshots through `Arc`, private secret wrappers, and `RequestSummary`. Debug/Display and ordinary serialization cannot reveal request values. Explicit codecs alone produce private journal JSON and outbound admission JSON. Engine code depends on these shared types, never Clap, Axum, remote-client, or dashboard types.
+
+Admission resolves process defaults once, validates the entire credentialed batch's origin, checks journal permissions, and checkpoints the task before starting workers. Shared headers/referer/supplied cookies require a single scheme/normalized-host/effective-port origin; user agent alone does not. Daemon/WebUI startup disallows process header/referer defaults, while local interactive tasks may inherit them. The daemon's administrative token never enters request defaults or the task model.
+
+Schema 6 adds nullable `downloads.request_credentials` with an internally versioned private JSON envelope. Version-5 databases receive only an additive column migration. NULL rows retain legacy behavior; newly configured rows save their effective user agent, headers, referer, and supplied cookies. Legacy schema/path conversion and read-only backup imports remain supported, with missing request context defaulting to NULL. File-cookie values and response-cookie changes are never included in the envelope.
+
+`net::Transport` chooses behavior from the saved context. NULL uses the existing `net::client` and Reqwest limited redirects, including automatic referer handling. Configured tasks disable automatic redirects/referers and use an explicit GET redirect loop, up to ten hops. Every hop retains the saved proxy route, range request, identity encoding, digest negotiation, cancellation, and existing validator/response checks. HTTPS-to-HTTP downgrade and invalid/credential-bearing targets are rejected.
+
+Same-origin hops carry saved settings and the per-task jar. Crossing scheme, host, or effective port permanently disables credentials for that chain: no custom headers, custom user agent, or cookies; a supplied referer is reduced to its origin. Returning to the initial origin does not restore credentials. Trailing-dot hostnames remain distinct origins: `example.com.` and `example.com` do not share credentials, even when DNS resolves them to the same server. A fresh probe/chunk/retry starts again at the original task URL. The transport explicitly selects cookies rather than installing an unconditional cookie provider that could bypass origin checks.
+
+At each run, the saved file is reloaded first, supplied cookies overlay exact name/domain/path keys, and same-origin response cookies update the shared in-memory jar. Requests clone the client/context; no async worker holds a lock over network I/O. Restart rebuilds from original saved inputs rather than saving rotated response sessions. File-only legacy tasks retain normal cookie scope across redirects; mixing a file with new request settings confines the combined jar to the initial origin.
+
+The private envelope is plaintext. Every credential-bearing persistence operation checks Unix journal and existing WAL/SHM file modes `0600`, including unchanged checkpoints and imports. Windows emits one warning and relies on protected home-directory ACLs. Public `Download` snapshots flatten only `RequestSummary`; REST, WebSocket, events, CLI and terminal monitoring share that contract. Admission JSON rejections and transport failures discard unsafe underlying diagnostic strings while retaining bounded retry classification.

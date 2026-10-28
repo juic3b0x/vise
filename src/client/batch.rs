@@ -15,14 +15,12 @@ pub(super) async fn submit(
     output: &Output,
     urls: Vec<String>,
     proxy: Option<String>,
+    request: vise::net::credentials::RequestOverrides,
     wait: bool,
 ) -> Result<u8> {
-    let mut result: BatchResult = api
-        .post(
-            "api/downloads/batch",
-            &serde_json::json!({"urls": urls, "proxy_url": proxy}),
-        )
-        .await?;
+    let mut body = serde_json::json!({"urls":urls,"proxy_url":proxy});
+    request.encode_admission(&mut body)?;
+    let mut result: BatchResult = api.post("api/downloads/batch", &body).await?;
     if wait && !result.accepted.is_empty() {
         wait_for_all(api, output, &mut result).await?;
     }

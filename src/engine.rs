@@ -1,5 +1,6 @@
 //! Shared download manager and its configuration. Controllers use this API while
 //! recovery, queue control, persistence, and transfer I/O remain separate modules.
+use crate::net::{Transport, credentials::RequestOverrides};
 use crate::{
     checksum::ExpectedChecksums,
     database::Database,
@@ -8,7 +9,6 @@ use crate::{
     proxy::ProxyUrl,
     rate_limiter::{RateLimit, RateLimiter},
 };
-use reqwest::Client;
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
@@ -51,6 +51,7 @@ pub struct Config {
     pub proxy_url: Option<ProxyUrl>,
     /// Default Netscape file for new tasks; saved tasks retain their own file.
     pub cookies_file: Option<PathBuf>,
+    pub request: RequestOverrides,
 }
 
 impl Default for Config {
@@ -65,6 +66,7 @@ impl Default for Config {
             limit_rate: None,
             proxy_url: None,
             cookies_file: None,
+            request: RequestOverrides::default(),
         }
     }
 }
@@ -79,7 +81,7 @@ struct Job {
     record: RwLock<Record>,
     // Readers must not observe provisional terminal state during its journal commit.
     settlement: RwLock<()>,
-    client: RwLock<Client>,
+    client: RwLock<Transport>,
     control: Mutex<()>,
     run: Mutex<Option<Run>>,
     removed: AtomicBool,
@@ -90,13 +92,13 @@ impl Job {
         self.record.read().await.snapshot()
     }
 
-    fn new(record: Record, client: Client) -> Self {
+    fn new(record: Record, client: impl Into<Transport>) -> Self {
         Self {
             output_path: record.output_path.clone(),
             part_path: record.part_path.clone(),
             record: RwLock::new(record),
             settlement: RwLock::new(()),
-            client: RwLock::new(client),
+            client: RwLock::new(client.into()),
             control: Mutex::new(()),
             run: Mutex::new(None),
             removed: AtomicBool::new(false),
@@ -137,4 +139,5 @@ pub struct TransferOptions {
     pub expected: ExpectedChecksums,
     pub proxy_url: Option<ProxyUrl>,
     pub cookies_file: Option<PathBuf>,
+    pub request: RequestOverrides,
 }

@@ -65,7 +65,7 @@ fn legacy_downloads(
     let proxy = if version >= 3 { "proxy_url" } else { "NULL" };
     let cookies = if version >= 4 { "cookies_file" } else { "NULL" };
     let query = format!(
-        "SELECT id,url,output_path,total_size,status,created_at,ranged,validator,error,{checksums},{proxy},{cookies},'','' FROM downloads ORDER BY id"
+        "SELECT id,url,output_path,total_size,status,created_at,ranged,validator,error,{checksums},{proxy},{cookies},'','',NULL FROM downloads ORDER BY id"
     );
     let mut statement = tx.prepare(&query)?;
     let mut rows = statement.query([])?;
@@ -92,7 +92,11 @@ impl Database {
         records: Vec<Record>,
         rate: Option<RateLimit>,
     ) -> Result<()> {
+        let path = self.path.clone();
         self.call(move |state| {
+            if records.iter().any(|r| r.request_credentials.is_some()) {
+                super::setup::credentials_permissions(&path)?;
+            }
             if imported(&state.connection, &source)? {
                 return Ok(());
             }
