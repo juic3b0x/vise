@@ -142,52 +142,80 @@ pub(super) async fn checkpoint(path: std::path::PathBuf) -> (uuid::Uuid, u64) {
     }).await.unwrap()
 }
 
-fn journal_rows(path: &std::path::Path) -> Vec<Vec<Vec<rusqlite::types::Value>>> {
-    let connection =
-        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+async fn seeded_journal(url: String) -> (tempfile::TempDir, uuid::Uuid) {
+    tokio::task::spawn_blocking(move || {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
             .unwrap();
-    [
-        "SELECT * FROM downloads ORDER BY id",
-        "SELECT * FROM chunks ORDER BY download_id,chunk_index",
-        "SELECT * FROM metadata ORDER BY key",
-    ]
-    .iter()
-    .map(|sql| {
-        let mut query = connection.prepare(sql).unwrap();
-        let columns = query.column_count();
-        query
-            .query_map([], |row| {
-                (0..columns)
-                    .map(|index| row.get(index))
-                    .collect::<rusqlite::Result<Vec<_>>>()
+        let id = runtime.block_on(async {
+            let owner = vise::engine::Manager::open(vise::engine::Config {
+                output_dir: root.path().join("downloads"),
+                home_dir: Some(root.path().join("test-home")),
+                concurrent_downloads: 1,
+                connections_per_download: 2,
+                retries: 2,
+                ..Default::default()
             })
-            .unwrap()
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .unwrap()
+            .await
+            .unwrap();
+            owner.set_rate_limit("64M".parse().unwrap()).await.unwrap();
+            let existing = owner.add(&url, None).await.unwrap();
+            assert_eq!(
+                crate::fixture::terminal(&owner, existing.id).await.status,
+                Status::Completed
+            );
+            owner.shutdown().await.unwrap();
+            drop(owner);
+            existing.id
+        });
+        // Database::Shared::drop schedules connection close on this runtime's
+        // blocking pool. Dropping the runtime joins that cleanup; awaiting this
+        // outer task also leaves the HTTP fixtures' runtime free to serve data.
+        drop(runtime);
+        (root, id)
     })
-    .collect()
+    .await
+    .unwrap()
+}
+
+fn output_entries(root: &std::path::Path) -> std::collections::BTreeSet<std::path::PathBuf> {
+    fn visit(root: &std::path::Path, entries: &mut std::collections::BTreeSet<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(root).unwrap() {
+            let entry = entry.unwrap();
+            entries.insert(entry.path());
+            if entry.file_type().unwrap().is_dir() {
+                visit(&entry.path(), entries);
+            }
+        }
+    }
+    let mut entries = Default::default();
+    visit(root, &mut entries);
+    entries
 }
 
 #[tokio::test]
 async fn rejected_batch_preserves_existing_journal_and_sends_no_requests() {
-    use crate::fixture::{manager, terminal};
+    use super::journal::snapshot;
     let first = Capture::start(Mode::Ranges).await;
     let second = Capture::start(Mode::Ranges).await;
-    let root = tempfile::tempdir().unwrap();
-    let owner = manager(&root, 2).await;
-    owner.set_rate_limit("64M".parse().unwrap()).await.unwrap();
-    let existing = owner.add(&first.url, None).await.unwrap();
-    assert_eq!(
-        terminal(&owner, existing.id).await.status,
-        Status::Completed
-    );
-    owner.shutdown().await.unwrap();
-    drop(owner);
+    let (root, existing_id) = seeded_journal(first.url.clone()).await;
+    // Ignore seeding traffic; every request from a rejected invocation is a bug.
+    first.requests.lock().unwrap().clear();
+    second.requests.lock().unwrap().clear();
+    let output_dir = root.path().join("downloads");
     let path = root.path().join("test-home/.vise/state.sqlite3");
     for from_file in [false, true] {
-        let rows = journal_rows(&path);
-        let bytes = std::fs::read(&path).unwrap();
-        let count = first.requests.lock().unwrap().len() + second.requests.lock().unwrap().len();
+        let before = snapshot(&path);
+        let files = output_entries(&output_dir);
+        assert_eq!(before.download_ids, [existing_id.to_string()]);
+        assert!(
+            before
+                .row_counts()
+                .get("chunks")
+                .is_some_and(|count| *count > 0)
+        );
         let mut command = crate::fixture::command(root.path());
         command.args([
             "--batch",
@@ -195,6 +223,7 @@ async fn rejected_batch_preserves_existing_journal_and_sends_no_requests() {
             "--header",
             &format!("X-Secret: {SECRET}"),
         ]);
+        command.arg("--output").arg(&output_dir);
         if from_file {
             let input = root.path().join("urls.txt");
             std::fs::write(&input, format!("{}\n{}\n", first.url, second.url)).unwrap();
@@ -203,13 +232,29 @@ async fn rejected_batch_preserves_existing_journal_and_sends_no_requests() {
             command.args([&first.url, &second.url]);
         }
         let result = output(command).await;
-        assert!(!result.status.success());
+        assert_eq!(result.status.code(), Some(1));
         assert!(String::from_utf8_lossy(&result.stderr).contains("split"));
-        assert_eq!(journal_rows(&path), rows);
-        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        // output() has joined the child after process exit. Compare SQLite's
+        // logical contents, never main-file bytes or WAL/SHM physical state.
+        let after = snapshot(&path);
+        assert_eq!(
+            after.download_ids, before.download_ids,
+            "download IDs changed"
+        );
+        assert_eq!(
+            after.row_counts(),
+            before.row_counts(),
+            "journal row counts changed"
+        );
+        assert_eq!(
+            after, before,
+            "journal contents changed after rejected admission"
+        );
+        assert_eq!(output_entries(&output_dir), files, "output entries changed");
         assert_eq!(
             first.requests.lock().unwrap().len() + second.requests.lock().unwrap().len(),
-            count
+            0,
+            "rejected batch sent a download request"
         );
     }
     first.close().await;
