@@ -141,3 +141,77 @@ pub(super) async fn checkpoint(path: std::path::PathBuf) -> (uuid::Uuid, u64) {
         }
     }).await.unwrap()
 }
+
+fn journal_rows(path: &std::path::Path) -> Vec<Vec<Vec<rusqlite::types::Value>>> {
+    let connection =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    [
+        "SELECT * FROM downloads ORDER BY id",
+        "SELECT * FROM chunks ORDER BY download_id,chunk_index",
+        "SELECT * FROM metadata ORDER BY key",
+    ]
+    .iter()
+    .map(|sql| {
+        let mut query = connection.prepare(sql).unwrap();
+        let columns = query.column_count();
+        query
+            .query_map([], |row| {
+                (0..columns)
+                    .map(|index| row.get(index))
+                    .collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    })
+    .collect()
+}
+
+#[tokio::test]
+async fn rejected_batch_preserves_existing_journal_and_sends_no_requests() {
+    use crate::fixture::{manager, terminal};
+    let first = Capture::start(Mode::Ranges).await;
+    let second = Capture::start(Mode::Ranges).await;
+    let root = tempfile::tempdir().unwrap();
+    let owner = manager(&root, 2).await;
+    owner.set_rate_limit("64M".parse().unwrap()).await.unwrap();
+    let existing = owner.add(&first.url, None).await.unwrap();
+    assert_eq!(
+        terminal(&owner, existing.id).await.status,
+        Status::Completed
+    );
+    owner.shutdown().await.unwrap();
+    drop(owner);
+    let path = root.path().join("test-home/.vise/state.sqlite3");
+    for from_file in [false, true] {
+        let rows = journal_rows(&path);
+        let bytes = std::fs::read(&path).unwrap();
+        let count = first.requests.lock().unwrap().len() + second.requests.lock().unwrap().len();
+        let mut command = crate::fixture::command(root.path());
+        command.args([
+            "--batch",
+            "--resume-all",
+            "--header",
+            &format!("X-Secret: {SECRET}"),
+        ]);
+        if from_file {
+            let input = root.path().join("urls.txt");
+            std::fs::write(&input, format!("{}\n{}\n", first.url, second.url)).unwrap();
+            command.arg("--input").arg(input);
+        } else {
+            command.args([&first.url, &second.url]);
+        }
+        let result = output(command).await;
+        assert!(!result.status.success());
+        assert!(String::from_utf8_lossy(&result.stderr).contains("split"));
+        assert_eq!(journal_rows(&path), rows);
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert_eq!(
+            first.requests.lock().unwrap().len() + second.requests.lock().unwrap().len(),
+            count
+        );
+    }
+    first.close().await;
+    second.close().await;
+}

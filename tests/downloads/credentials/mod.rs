@@ -145,6 +145,8 @@ async fn redirect_back_does_not_restore_credentials() {
     for (path, headers) in source.requests.lock().unwrap().iter() {
         if path == "/file" {
             assert!(headers.get("x-secret").is_none() && headers.get("cookie").is_none());
+            assert!(headers.get("authorization").is_none());
+            assert_ne!(headers.get("user-agent").unwrap(), SECRET);
             assert_eq!(headers.get("referer").unwrap(), "http://source.example/");
         }
     }
@@ -268,12 +270,14 @@ async fn redirect_limit_and_invalid_locations_fail_without_echoing_values() {
     let root = tempfile::tempdir().unwrap();
     let manager = manager(&root, 2).await;
     let url = source.url.replace("/file", "/redirect");
+    let location_secret = "distinct-redirect-location-sentinel";
     for location in [
-        url.clone(),
-        format!("http://user:{SECRET}@127.0.0.1/file"),
-        format!("file:///{SECRET}"),
+        format!("{url}?secret={location_secret}"),
+        format!("http://user:{location_secret}@127.0.0.1/file"),
+        format!("file:///{location_secret}"),
+        format!("http://[{location_secret}"),
     ] {
-        *source.redirect.lock().unwrap() = Some(location);
+        *source.redirect.lock().unwrap() = Some(location.clone());
         let before = source.requests.lock().unwrap().len();
         let task = manager
             .add_with_options(&url, None, options())
@@ -281,7 +285,12 @@ async fn redirect_limit_and_invalid_locations_fail_without_echoing_values() {
             .unwrap();
         let done = terminal(&manager, task.id).await;
         assert_eq!(done.status, Status::Failed);
-        assert!(!done.error.unwrap().contains(SECRET));
+        let error = done.error.unwrap();
+        assert!(
+            !error.contains(SECRET)
+                && !error.contains(location_secret)
+                && !error.contains(&location)
+        );
         assert!(source.requests.lock().unwrap().len() - before <= 11);
     }
     manager.shutdown().await.unwrap();

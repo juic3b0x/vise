@@ -156,3 +156,61 @@ async fn abrupt_restart_restores_saved_request_credentials() {
     manager.shutdown().await.unwrap();
     source.close().await;
 }
+
+#[tokio::test]
+async fn expired_supplied_cookie_removes_file_cookie_after_restart() {
+    use crate::fixture::{Fixture, manager};
+    let source = Capture::start(Mode::Ranges).await;
+    let blocker_source = Fixture::start(Mode::Stalled).await;
+    let root = tempfile::tempdir().unwrap();
+    let file = root.path().join("cookies.txt");
+    let old = "old-file-cookie-must-not-revive";
+    std::fs::write(
+        &file,
+        format!("127.0.0.1\tFALSE\t/\tFALSE\t0\tsession\t{old}\n"),
+    )
+    .unwrap();
+    let first = manager(&root, 2).await;
+    let blocker = first.add(&blocker_source.url, None).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while first.get(blocker.id).await.unwrap().status != Status::Downloading {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let request=serde_json::from_value(serde_json::json!({"cookies":[{"name":"session","value":"expired-cookie-value","domain":"127.0.0.1","path":"/","secure":false,"expires":1,"httpOnly":true}]})).unwrap();
+    let task = first
+        .add_with_options(
+            &source.url,
+            None,
+            vise::engine::TransferOptions {
+                cookies_file: Some(file),
+                request,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    first.pause(task.id).await.unwrap();
+    first.delete(blocker.id).await.unwrap();
+    first.shutdown().await.unwrap();
+    drop(first);
+    assert!(source.requests.lock().unwrap().is_empty());
+    let restored = manager(&root, 2).await;
+    assert!(restored.get(task.id).await.unwrap().request.has_cookies);
+    restored.resume(task.id).await.unwrap();
+    assert_eq!(terminal(&restored, task.id).await.status, Status::Completed);
+    let requests = source.requests.lock().unwrap().clone();
+    assert!(requests.len() >= 2);
+    for (_, headers) in requests {
+        let value = headers
+            .get("cookie")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        assert!(!value.contains(old) && !value.contains("expired-cookie-value"));
+    }
+    restored.shutdown().await.unwrap();
+    source.close().await;
+    blocker_source.close().await;
+}

@@ -93,7 +93,8 @@ impl Transport {
         let mut current = initial.clone();
         let mut credentials_enabled = true;
         for hop in 0..=10 {
-            credentials_enabled &= current.origin() == initial.origin();
+            credentials_enabled =
+                redirect_credentials_allowed(&initial, &current, !credentials_enabled);
             let request =
                 self.private_request(private, &current, range, validator, credentials_enabled)?;
             let response = tokio::select! {biased; _=cancel.cancelled()=>return Err(Error::Cancelled), response=request.send()=>response.map_err(Error::private_transport)?};
@@ -171,6 +172,11 @@ impl Transport {
         Ok(request)
     }
 }
+/// An origin change permanently disables credentials for the current chain.
+fn redirect_credentials_allowed(initial: &Url, next: &Url, already_stripped: bool) -> bool {
+    !already_stripped && next.origin() == initial.origin()
+}
+
 fn validate_redirect(previous: &Url, next: &Url) -> Result<()> {
     if !matches!(next.scheme(), "http" | "https")
         || next.host_str().is_none()
@@ -186,3 +192,6 @@ fn validate_redirect(previous: &Url, next: &Url) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

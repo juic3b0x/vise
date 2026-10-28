@@ -239,3 +239,64 @@ fn aggregate_limits_and_single_origin_rules_cover_every_credential_kind() {
     cli.encode_admission(&mut wire).unwrap();
     assert_eq!(wire["user_agent"], "explicit");
 }
+
+#[test]
+fn origin_equivalence_matrix() {
+    let context = RequestOverrides::from_cli(&["X-Test: synthetic".into()], None, None)
+        .unwrap()
+        .resolve(&Default::default())
+        .unwrap()
+        .unwrap();
+    for (name, first, second, equal) in [
+        (
+            "https default port",
+            "https://example.com/a",
+            "https://example.com:443/b",
+            true,
+        ),
+        (
+            "http default port",
+            "http://example.com/a",
+            "http://example.com:80/b",
+            true,
+        ),
+        (
+            "hostname case",
+            "https://EXAMPLE.Com/a",
+            "https://example.com/b",
+            true,
+        ),
+        (
+            "IPv6 literals",
+            "https://[0:0:0:0:0:0:0:1]/a",
+            "https://[::1]:443/b",
+            true,
+        ),
+        (
+            "IDN/punycode",
+            "https://bücher.example/a",
+            "https://xn--bcher-kva.example:443/b",
+            true,
+        ),
+        (
+            "scheme despite equal port",
+            "http://example.com:443/a",
+            "https://example.com:443/b",
+            false,
+        ),
+        (
+            "trailing dot",
+            "https://example.com./a",
+            "https://example.com/b",
+            false,
+        ),
+    ] {
+        assert_eq!(
+            context
+                .validate_urls(&[first.into(), second.into()])
+                .is_ok(),
+            equal,
+            "{name}"
+        );
+    }
+}
