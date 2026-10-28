@@ -1,6 +1,7 @@
 mod api;
 mod clients;
 mod fixture;
+mod logging;
 mod recovery;
 use crate::fixture::{Mode, manager, terminal};
 use fixture::{Capture, SECRET, options};

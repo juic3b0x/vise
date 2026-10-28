@@ -16,6 +16,8 @@ All notable changes to Vise are documented here. The format follows [Keep a Chan
 
 ### Security
 
+- Fix pre-existing plaintext cookie exposure in CLI and daemon dependency debug/trace logs, affecting Netscape cookie-file imports and response cookies, and also affecting supplied task cookies in this update. Always suppress the audited cookie-store target, including `log`-bridged events, regardless of `RUST_LOG`; retain other networking diagnostics. Reproduced the legacy file-cookie leak on `main` before applying the fix.
+
 - Centrally redact private request values in formatting and ordinary serialization; sanitize admission JSON and transport errors. Reject injection, forbidden headers, duplicate user-agent/referer sources, and oversized credentials.
 - Reject process-wide header/referer defaults in daemon/WebUI modes and mixed-origin credentialed batches. Require Unix journal mode `0600` before credential persistence; warn once on Windows to protect home-directory ACLs.
 - Add local-fixture regressions for redirects, proxy routing, cookie merging, abrupt termination, migrations, API/WebSocket/monitor/trace redaction, and daemon-token separation. Frontend and extension forwarding changes are deferred.

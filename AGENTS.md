@@ -22,6 +22,7 @@ Tokio (async runtime), Reqwest (streaming + range requests), Axum (API/WebSocket
 - Keep the core download engine decoupled from the CLI loop, the daemon, and the Axum/WebUI telemetry bridge. The engine must not depend on UI or HTTP-server types.
 - Repository map:
   - `src/lib.rs` -> public library module exports (`pub mod` declarations).
+  - `src/logging.rs`, `src/logging/tests.rs` -> binary logging policy, immutable credential-target filter, log-bridge handling and regressions (`init`, `CredentialGuard`).
   - `src/main.rs` -> Clap arguments, early remote dispatch and local startup (`Args`, `Command`, `run`).
   - `src/startup.rs` -> CLI-over-TOML/environment precedence and controller configuration (`Startup`, `load`, `resolve`).
   - `src/app.rs` -> queue seeding, controller supervision, signals and ordered shutdown (`Controller`, `Background`, `run_session`).
