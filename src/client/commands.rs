@@ -23,7 +23,7 @@ pub(super) async fn execute(args: Args) -> Result<u8> {
     let api = Api::new(settings, args.request_timeout)?;
     let output = Output::new(args.json)?;
     match args.command {
-        Command::Add(add) => add_download(&api, &output, add).await,
+        Command::Add(add) => add_download(&api, &output, *add).await,
         Command::List => list_downloads(&api, &output).await,
         Command::Get { id } => task(&api, &output, &id, None).await,
         Command::Pause { id } => task(&api, &output, &id, Some("pause")).await,

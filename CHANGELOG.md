@@ -4,6 +4,10 @@ All notable changes to Vise are documented here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+### Fixed
+
+- Box the remote add command arguments to avoid Windows Clippy's `large_enum_variant` warning without changing command-line behavior.
+
 ### Added
 
 - Private per-task custom headers, referer, user agent, and scoped API cookies, persisted in schema 6 for authenticated retry and restart-safe resume. Add local and remote `--header`, `--referer`, and `--user-agent`, plus optional `downloads.user_agent` configuration.

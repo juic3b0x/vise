@@ -26,7 +26,7 @@ pub(super) struct Args {
 #[derive(Subcommand)]
 enum Command {
     /// Queue a URL in the daemon (paths and cookies use daemon-side defaults)
-    Add(Add),
+    Add(Box<Add>),
     /// List the daemon's saved and active downloads
     List,
     /// Inspect one download (full UUID or unique prefix of at least 4 characters)
