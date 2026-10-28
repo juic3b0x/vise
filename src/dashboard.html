@@ -49,6 +49,17 @@
               <label for="filename">Filename <span class="muted">(optional)</span><input id="filename" name="filename" maxlength="200" placeholder="Use source filename" autocomplete="off"></label>
               <button id="add-button" class="button primary" type="submit">Add transfers</button>
             </div>
+            <details class="request-options" id="request-options">
+              <summary>Advanced request settings <span class="muted">(optional, write-only)</span></summary>
+              <p>Private credentials are saved in Vise’s plaintext journal for resume. Inputs are cleared after each submission, including errors. They are never restored from task history or saved in browser storage.</p>
+              <label for="request-headers">Custom headers <span class="muted">— one Name: value per line</span><textarea id="request-headers" rows="3" autocomplete="off" spellcheck="false" autocapitalize="off" maxlength="40000" placeholder="Authorization: Bearer …"></textarea></label>
+              <div class="checksum-fields">
+                <label for="request-referer">Referer<input id="request-referer" type="url" autocomplete="off" spellcheck="false" maxlength="8192" placeholder="https://example.com/releases"></label>
+                <label for="request-user-agent">User agent<input id="request-user-agent" autocomplete="off" spellcheck="false" maxlength="512" placeholder="Use the daemon default"></label>
+              </div>
+              <label for="request-cookies">Structured cookies <span class="muted">— JSON array</span><textarea id="request-cookies" rows="3" autocomplete="off" spellcheck="false" autocapitalize="off" maxlength="50000" placeholder='[{"name":"session","value":"…","domain":"example.com","path":"/","secure":true,"expires":null,"httpOnly":true,"hostOnly":true}]'></textarea></label>
+              <p>Raw Cookie / Set-Cookie headers are rejected. A credentialed batch must share one origin; split other batches by scheme, host and port. Credentials stay disabled after a cross-origin redirect. Leave fields blank to use defaults.</p>
+            </details>
             <details class="checksum-options">
               <summary>Checksum verification <span class="muted">(optional)</span></summary>
               <p>Verify before publishing the file. Both hashes must match when both are provided.</p>
@@ -129,7 +140,7 @@
       <div class="progress-track" role="progressbar" aria-label="Download progress" aria-valuemin="0" aria-valuemax="100"><div class="progress-fill"></div></div>
       <div class="download-bottom"><span class="download-eta mono"></span><div class="actions"><button type="button" class="button compact toggle"></button><button type="button" class="button compact danger cancel"></button></div></div>
       <details class="chunk-details"><summary class="chunk-summary"></summary><div class="chunk-grid" role="group" aria-label="Chunk progress"></div><div class="chunk-legend"><span><i data-state="downloading"></i>Active</span><span><i data-state="completed"></i>Done</span><span><i data-state="queued"></i>Pending</span></div></details>
-      <p class="checksum-status" hidden></p><p class="download-error" hidden></p>
+      <p class="request-summary" hidden></p><p class="checksum-status" hidden></p><p class="download-error" hidden></p>
     </article>
   </template>
 </body>

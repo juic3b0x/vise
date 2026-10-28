@@ -9,18 +9,28 @@ Right-click an HTTP(S) link and select **Send to Vise** to queue it in your loca
 3. Click the Vise toolbar icon, enter the daemon URL (initially `http://127.0.0.1:8080`), and paste `daemon.VISE_API_TOKEN` from `~/.vise/config.toml`. If you launched Vise with an environment token, use that value instead.
 4. Select **Test connection**, then **Save settings**. Right-click a link to send it.
 
-The options page accepts a base URL or its `/api/downloads` endpoint, with any nonzero port. This first version deliberately connects only to `http://127.0.0.1` and `http://localhost`, matching its narrow host permissions. Configure a local tunnel if your daemon runs elsewhere. Browser host/site permissions must be enabled for the selected loopback host.
+The options page accepts a base URL or its `/api/downloads` endpoint, with any nonzero port. The extension connects only to `http://127.0.0.1` and `http://localhost`, matching its narrow host permissions. Configure a local tunnel if your daemon runs elsewhere. Browser host/site permissions must be enabled for the selected loopback host.
 
 ## Privacy and failure handling
 
 - Address/token settings use `chrome.storage.local` (also supported by Firefox's Chrome-compatible API), never sync storage. This storage is not encrypted: protect your browser profile. No content scripts or externally accessible message handlers are installed. Chromium storage access is restricted to trusted extension contexts where that API is available.
-- Only the clicked link URL is sent, as `POST /api/downloads` with JSON and an explicit Bearer token. Cookies, page content, and page referrers are omitted. Embedded URL credentials and non-HTTP(S) links are rejected.
+- Only the clicked link URL is sent, as `POST /api/downloads` with JSON and an explicit Bearer token. Cookie and referer forwarding have independent opt-in switches, both off by default. Page content is never read. An explicit **Send URL only to Vise** menu action bypasses both switches. Embedded URL credentials and non-HTTP(S) links are rejected.
 - Endpoint validation is repeated before each request. Remote hosts, redirects, query strings, and embedded endpoint credentials are rejected to keep the token on loopback.
 - Notifications report queue acceptance or a readable failure without displaying tokens, link query strings, or raw server error bodies. A success notification means queued, not finished.
 - Failed or timed-out POSTs are never retried automatically. A timed-out request may already be queued; check Vise before sending the link again.
-- Sites that require browser cookies, expiring sessions, `blob:` URLs, or special request headers may not provide a directly downloadable link. The extension does not transfer browser sessions to Vise.
+- `blob:` URLs and page-generated downloads are unsupported. Forwarded cookies are a one-time snapshot, not a live browser session; expired or refreshed sessions need a new admission.
 
 The daemon permits serialized Chrome/Firefox extension origins only when an explicit Bearer token is valid. Unauthenticated local WebUI origins, cached Basic credentials, and unrelated website origins do not receive this exception. No permissive website CORS policy is enabled.
+
+## Optional cookie and referer forwarding
+
+In settings, enable each preference separately. Enter the download site and press **Grant site access** to request its exact scheme/host permission during the button gesture; no wildcard site grant is requested. Browser match patterns cover all ports and paths of that host. Cookie permission is requested only when its switch is checked. Then save preferences. **Revoke forwarded-site access** removes optional site/cookie access while preserving the required loopback connection. Preferences alone do not grant permission, and grants alone do not enable forwarding.
+
+On each context-menu click, the extension revalidates permissions and reads cookies only for that link URL in the clicked tab’s identified cookie store and frame partition. `hostOnly`, domain, path, secure, expiry/session, and httpOnly are preserved. Referer comes from the click’s page URL, with its fragment removed. Capture failures stop the credentialed send and offer **Send URL only to Vise**, without automatically submitting or retrying. That fallback sends no browser credentials but does not disable daemon-side defaults.
+
+A trustworthy `cookies.getPartitionKey` lookup is required: Chrome 132+ exposes it; Chrome 121–131 and current Firefox cannot satisfy this capture path, so cookie forwarding is refused there. Firefox URL-only and independent referer forwarding continue to work. Ambiguous container/private stores, missing partitions, and first-party-isolation results are never guessed. See the [full compatibility and privacy guide](../docs/extension.md#browser-compatibility-and-safe-fallback).
+
+Cookies and referers go only in admission JSON, never the daemon Authorization header. Storage contains connection settings, forwarding booleans, and explicit site-consent patterns; the browser maintains actual grants. Both consent and a current grant are required, even for loopback download sites. Captured values are never saved in extension storage, logs, notifications, or URLs. The daemon **does** persist supplied credentials in its private plaintext SQLite journal for resume, including WAL/SHM and backups. Protect the journal and browser profile. Network inspectors may show the outbound request body. Redirects use the daemon’s initial-origin policy and cannot restore credentials after a cross-origin hop.
 
 ## Development
 

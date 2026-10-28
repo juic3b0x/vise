@@ -1,4 +1,4 @@
-import {parseUrls, readUrlFile} from '/assets/dashboard-input.mjs';
+import {parseUrls, readUrlFile, requestFields, clearRequestFields, requestSummary} from '/assets/dashboard-input.mjs';
 
 'use strict';
 
@@ -6,6 +6,7 @@ import {parseUrls, readUrlFile} from '/assets/dashboard-input.mjs';
 // by the current queue; only changed attributes/text are patched on updates.
 (() => {
   const $ = id => document.getElementById(id);
+  const requestInputs = {headers: $('request-headers'), referer: $('request-referer'), userAgent: $('request-user-agent'), cookies: $('request-cookies')};
   const active = state => ['queued', 'probing', 'downloading', 'verifying'].includes(state);
   const states = new Set(['queued', 'probing', 'downloading', 'verifying', 'paused', 'completed', 'failed', 'corrupt']);
   const inCategory = (d, category) => category === 'all' || (category === 'active' ? active(d.status) : category === 'failed' ? ['failed', 'corrupt'].includes(d.status) : d.status === category);
@@ -194,7 +195,7 @@ import {parseUrls, readUrlFile} from '/assets/dashboard-input.mjs';
       size: select('.download-size'), rate: select('.download-speed'), percent: select('.download-percent'),
       track: select('.progress-track'), fill: select('.progress-fill'), summary: select('.chunk-summary'),
       grid: select('.chunk-grid'), eta: select('.download-eta'),
-      toggle: select('.toggle'), cancel: select('.cancel'), error: select('.download-error'), checksum: select('.checksum-status'), spark: select('.sparkline path'), tiles: [] };
+      toggle: select('.toggle'), cancel: select('.cancel'), error: select('.download-error'), checksum: select('.checksum-status'), request: select('.request-summary'), spark: select('.sparkline path'), tiles: [] };
     card.toggle.addEventListener('click', () => action(id, active(card.download.status) ? 'pause' : ['corrupt','failed'].includes(card.download.status) ? 'retry' : 'resume'));
     card.cancel.addEventListener('click', () => action(id, 'delete'));
     return card;
@@ -219,6 +220,8 @@ import {parseUrls, readUrlFile} from '/assets/dashboard-input.mjs';
     text(c.eta, d.status === 'completed' ? 'Complete' : d.status === 'paused' ? 'Paused' : ['failed', 'corrupt'].includes(d.status) ? 'Needs attention' : fresh ? eta(d.eta_seconds) : 'Telemetry unavailable');
     c.error.hidden = !d.error; text(c.error, d.error || '');
     const algorithms = [d.expected_sha256 && 'SHA-256', d.expected_md5 && 'MD5'].filter(Boolean).join(' + ');
+    const summary = requestSummary(d.request);
+    c.request.hidden = !summary; text(c.request, summary);
     c.checksum.hidden = !algorithms;
     text(c.checksum, d.status === 'corrupt' ? `${algorithms} mismatch. File retained; re-download retries every chunk.` : d.status === 'verifying' ? `Verifying ${algorithms} before publication…` : d.verified_at != null ? `${algorithms} verified · ${new Date(d.verified_at).toLocaleString()}` : `${algorithms} · Verification required before publication`);
     attr(c.checksum, 'title', [d.actual_sha256 && `SHA-256: ${d.actual_sha256}`, d.actual_md5 && `MD5: ${d.actual_md5}`].filter(Boolean).join(' / '));
@@ -306,7 +309,7 @@ import {parseUrls, readUrlFile} from '/assets/dashboard-input.mjs';
     }
     filter = 'all'; updateFilters(); $('search').value = ''; scheduleRender();
   }
-  async function submitUrls(urls) {
+  async function submitUrls(urls, credentials) {
     const filename = $('filename').value.trim() || null;
     const expected_sha256 = $('expected-sha256').value.trim() || null;
     const expected_md5 = $('expected-md5').value.trim() || null;
@@ -314,11 +317,11 @@ import {parseUrls, readUrlFile} from '/assets/dashboard-input.mjs';
       throw Error('Filename and checksum fields require exactly one URL. Clear these fields to submit a batch.');
     }
     if (urls.length === 1) {
-      const item = await api('/api/downloads', {url: urls[0], filename, expected_sha256, expected_md5});
+      const item = await api('/api/downloads', {url: urls[0], filename, expected_sha256, expected_md5, ...credentials});
       added([item]); $('add-form').reset(); inputFeedback('Transfer queued.');
       return;
     }
-    const result = await api('/api/downloads/batch', {urls});
+    const result = await api('/api/downloads/batch', {urls, ...credentials});
     added(result.accepted.map(entry => entry.download));
     if (result.rejected.length) {
       // Keep only rejected entries for inspection; never automatically retry a
@@ -334,10 +337,13 @@ import {parseUrls, readUrlFile} from '/assets/dashboard-input.mjs';
     event.preventDefault();
     const button = $('add-button'); button.disabled = true; text(button, 'Adding…');
     try {
-      await submitUrls(parseUrls($('url').value)); $('url').focus();
+      const urls = parseUrls($('url').value);
+      const credentials = requestFields(requestInputs, urls);
+      clearRequestFields(requestInputs);
+      await submitUrls(urls, credentials); $('url').focus();
       await poll(true);
     } catch (error) { inputFeedback(error.message, true); showError(error.message); }
-    finally { button.disabled = false; text(button, 'Add transfers'); }
+    finally { clearRequestFields(requestInputs); button.disabled = false; text(button, 'Add transfers'); }
   });
   function updateFilters() {
     for (const button of document.querySelectorAll('[data-filter]')) {
@@ -497,9 +503,9 @@ import {parseUrls, readUrlFile} from '/assets/dashboard-input.mjs';
     current.onerror = () => current.close();
   }
   document.addEventListener('visibilitychange', () => { if (!document.hidden) { scheduleRender(); poll(); } });
-  window.addEventListener('pagehide', () => { stopped = true; clearTimeout(reconnectTimer); socket?.close(); });
+  window.addEventListener('pagehide', () => { clearRequestFields(requestInputs); stopped = true; clearTimeout(reconnectTimer); socket?.close(); });
   // Restore connections when returning from the browser's back/forward cache.
-  window.addEventListener('pageshow', () => { if (stopped) { stopped = false; connect(); poll(); } });
+  window.addEventListener('pageshow', () => { clearRequestFields(requestInputs); if (stopped) { stopped = false; connect(); poll(); } });
   poll(); connect();
   setInterval(sample, 1000);
   setInterval(poll, 2000);
