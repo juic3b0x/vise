@@ -1,6 +1,7 @@
 mod api;
 mod clients;
 mod fixture;
+mod journal;
 mod logging;
 mod recovery;
 use crate::fixture::{Mode, manager, terminal};
