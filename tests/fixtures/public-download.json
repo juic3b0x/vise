@@ -1,0 +1,39 @@
+{
+  "actual_md5": null,
+  "actual_sha256": null,
+  "bytes_per_second": 0.0,
+  "chunks": [
+    {
+      "downloaded_bytes": 256,
+      "end_byte": 1024,
+      "index": 0,
+      "start_byte": 0,
+      "status": "paused"
+    }
+  ],
+  "created_at": 1700000000000,
+  "downloaded_bytes": 256,
+  "error": null,
+  "eta_seconds": null,
+  "expected_md5": null,
+  "expected_sha256": null,
+  "filename": "archive.zip",
+  "has_cookies": true,
+  "has_custom_headers": true,
+  "has_referer": true,
+  "has_user_agent": true,
+  "header_count": 2,
+  "header_names": [
+    "authorization",
+    "x-session"
+  ],
+  "id": "11111111-2222-4333-8444-555555555555",
+  "output_path": "downloads/archive.zip",
+  "part_path": "downloads/.vise/11111111-2222-4333-8444-555555555555.part",
+  "proxy_authenticated": false,
+  "proxy_url": null,
+  "status": "paused",
+  "total_bytes": 1024,
+  "url": "https://downloads.example.com/archive.zip",
+  "verified_at": null
+}

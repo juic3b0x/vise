@@ -242,3 +242,6 @@ pub(crate) struct LegacyJournal {
     pub version: u32,
     pub downloads: Vec<Record>,
 }
+
+#[cfg(test)]
+mod tests;

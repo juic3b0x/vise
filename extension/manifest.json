@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Vise — Send to download manager",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Send an HTTP(S) link to your local Vise daemon from its context menu.",
   "minimum_chrome_version": "121",
   "permissions": ["contextMenus", "storage", "notifications"],

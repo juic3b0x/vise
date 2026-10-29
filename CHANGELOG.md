@@ -4,25 +4,35 @@ All notable changes to Vise are documented here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
-### Fixed
-
-- Box the remote add command arguments to avoid Windows Clippy's `large_enum_variant` warning without changing command-line behavior.
+## [0.7.0] - 2026-10-28
 
 ### Added
 
-- Write-only WebUI advanced request controls for headers, referer, user agent, and structured cookies, plus redacted task summaries and preflight guidance for mixed-origin credentialed batches. Clear credentials after submission and page navigation without browser storage or activity/console output.
-- Independent opt-in extension cookie/referer forwarding with per-site runtime permission grants, explicit tab-store/frame-partition checks, scoped cookie metadata, and a URL-only context-menu fallback. Refuse cookie capture when a trustworthy partition lookup is unavailable (including current Firefox), rather than guessing. Keep daemon endpoints loopback-only and captured credentials out of extension storage, notifications, logs, and authentication headers.
-- Private per-task custom headers, referer, user agent, and scoped API cookies, persisted in schema 6 for authenticated retry and restart-safe resume. Add local and remote `--header`, `--referer`, and `--user-agent`, plus optional `downloads.user_agent` configuration.
-- Shared request settings for positional/input-file/remote/API batches, with complete origin validation before admission. Public task summaries expose only header names/counts and credential-presence flags.
-- Origin-aware transport for newly configured tasks: retain credentials on same-origin redirects, strip them after crossing origins, reduce supplied referers to origin only, and keep credentials disabled for the remaining chain. Preserve task proxy routes, range checks, checksums, and legacy NULL-context redirect behavior.
+- Private per-task custom headers, referer, user agent, and structured API cookies, persisted in SQLite schema 6 for authenticated retries and restart-safe resume. Add repeatable local and remote `--header`, `--referer`, and `--user-agent`, plus optional `[downloads].user_agent` configuration. Explicit CLI values, including an empty user agent selecting the built-in value, override TOML.
+- Shared request settings for positional, input-file, remote, and API batches. Validate all credentialed URLs against one origin before admitting tasks or starting download requests. Public snapshots expose validated header names/counts and credential-presence flags only.
+- Write-only WebUI advanced request controls for headers, referer, user agent, and structured cookies. Clear inputs after submission attempts and navigation, show redacted task summaries, and explain mixed-origin batch rejection without exposing values in browser storage, activity, or console output.
+- Browser extension 0.3.0: independent cookie/referer forwarding switches, both off by default; per-site consent and optional runtime permissions; explicit tab-store/frame-partition checks; preserved hostOnly/domain/path/secure/expiry/httpOnly cookie metadata; and a separate **Send URL only to Vise** fallback. Refuse cookie capture without a trustworthy partition lookup, including on current Firefox; retain URL-only and independent referer forwarding.
+
+### Changed
+
+- Newly configured tasks use an initial-origin-aware transport for probes, chunks, retries, and resume. Same-origin response cookies update the task's in-memory jar; supplied cookies override matching imported-file cookies, including removal by expired records. Legacy NULL-context tasks retain their existing Reqwest redirects and automatic referer behavior.
+- Expand single-download admission and remote-client JSON bodies to 128 KiB for bounded credentials; batch admission remains 2 MiB, and unrelated routes retain 16 KiB. Return sanitized HTTP 400/413 admission errors.
+- Refresh compatible dependencies without changing requirements or Rust 1.88 support: `unicode-width` 0.2.2 → 0.2.3. Retain `uuid` 1.26.1 because newer available compatible-range releases require Rust 1.89.
+- Align API, architecture, security, and installation guidance with the shipped credential controls and extension permissions.
+
+### Fixed
+
+- Box remote add arguments to avoid Windows Clippy's `large_enum_variant` warning without changing command-line behavior.
+- Remove WAL-layout-dependent comparisons from the rejected-batch journal regression. Join seeding connection cleanup and compare complete logical contents while preserving zero-request and no-new-output assertions, eliminating a macOS-sensitive false failure.
+- Render WebUI request summaries from the API's flattened public fields instead of an absent nested object. Add a Rust-verified golden public snapshot and a controller regression proving that summaries remain visible without exposing values or refilling write-only inputs.
 
 ### Security
 
-- Fix pre-existing plaintext cookie exposure in CLI and daemon dependency debug/trace logs, affecting Netscape cookie-file imports and response cookies, and also affecting supplied task cookies in this update. Always suppress the audited cookie-store target, including `log`-bridged events, regardless of `RUST_LOG`; retain other networking diagnostics. Reproduced the legacy file-cookie leak on `main` before applying the fix.
-
-- Centrally redact private request values in formatting and ordinary serialization; sanitize admission JSON and transport errors. Reject injection, forbidden headers, duplicate user-agent/referer sources, and oversized credentials.
-- Reject process-wide header/referer defaults in daemon/WebUI modes and mixed-origin credentialed batches. Require Unix journal mode `0600` before credential persistence; warn once on Windows to protect home-directory ACLs.
-- Add local-fixture regressions for redirects, proxy routing, cookie merging, abrupt termination, migrations, API/WebSocket/monitor/trace redaction, and daemon-token separation. Frontend/extension regressions additionally cover write-only submission, permission grants/revocation, cookie context failures, and sentinel leak sinks.
+- Fix pre-existing plaintext cookie exposure in CLI and daemon dependency debug/trace logs, affecting Netscape cookie-file imports and response cookies in earlier versions. Protect newly supplied task cookies too. Always suppress the audited `cookie_store::cookie_store` target, including `log`-bridged events, regardless of global or targeted `RUST_LOG` directives; retain other networking diagnostics. The legacy file-cookie exposure was reproduced on the pre-fix main branch.
+- Centrally redact private request values in formatting and ordinary serialization, and sanitize admission JSON and transport errors. Reject injection, engine-owned headers, raw Cookie/Set-Cookie headers, duplicate user-agent/referer sources, and oversized credentials.
+- Strip custom headers, custom user agents, and cookies after a cross-origin redirect; reduce a supplied referer to its origin and never restore credentials later in the chain. Reject HTTPS downgrades and invalid or credential-bearing redirect targets; preserve the task's proxy route without direct fallback.
+- Reject process-wide header/referer defaults in daemon/WebUI modes and mixed-origin credentialed batches. Keep daemon API tokens out of task credentials. Require Unix journal and existing WAL/SHM files to be exactly `0600` before credential persistence; warn once on Windows to protect home-directory ACLs. Supplied credentials persist as plaintext; file-imported cookie values and response-cookie updates do not.
+- Keep extension endpoints loopback-only and captured credentials exclusively in admission JSON, separate from daemon authentication. Store preferences/site consent rather than captured cookies or referers; use generic capture-failure notifications and an explicit URL-only fallback. Add local-fixture and mocked-browser regressions for redirect, recovery, proxy, permission, and credential-leak boundaries.
 
 ## [0.6.0] - 2026-10-26
 
@@ -208,6 +218,7 @@ Initial release.
 - **Local WebUI safeguards:** Loopback-only binding, host and browser-origin validation, JSON-only mutations, and a Content Security Policy constrain browser access.
 - **Safe publication:** Existing output files are never overwritten, and configured checksum verification must succeed before final publication. SHA-256 from a trusted source is preferred for security-sensitive verification; MD5 supports legacy compatibility and accidental-corruption detection.
 
+[0.7.0]: https://github.com/juic3b0x/vise/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/juic3b0x/vise/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/juic3b0x/vise/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/juic3b0x/vise/compare/v0.4.4...v0.5.0
@@ -221,4 +232,4 @@ Initial release.
 [0.1.1]: https://github.com/juic3b0x/vise/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/juic3b0x/vise/releases/tag/v0.1.0
 
-[Unreleased]: https://github.com/juic3b0x/vise/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/juic3b0x/vise/compare/v0.7.0...HEAD

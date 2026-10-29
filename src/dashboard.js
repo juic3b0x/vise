@@ -220,7 +220,7 @@ import {parseUrls, readUrlFile, requestFields, clearRequestFields, requestSummar
     text(c.eta, d.status === 'completed' ? 'Complete' : d.status === 'paused' ? 'Paused' : ['failed', 'corrupt'].includes(d.status) ? 'Needs attention' : fresh ? eta(d.eta_seconds) : 'Telemetry unavailable');
     c.error.hidden = !d.error; text(c.error, d.error || '');
     const algorithms = [d.expected_sha256 && 'SHA-256', d.expected_md5 && 'MD5'].filter(Boolean).join(' + ');
-    const summary = requestSummary(d.request);
+    const summary = requestSummary(d);
     c.request.hidden = !summary; text(c.request, summary);
     c.checksum.hidden = !algorithms;
     text(c.checksum, d.status === 'corrupt' ? `${algorithms} mismatch. File retained; re-download retries every chunk.` : d.status === 'verifying' ? `Verifying ${algorithms} before publication…` : d.verified_at != null ? `${algorithms} verified · ${new Date(d.verified_at).toLocaleString()}` : `${algorithms} · Verification required before publication`);

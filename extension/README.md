@@ -1,5 +1,7 @@
 # Vise browser extension
 
+Version **0.3.0**, bundled with Vise **0.7.0**. Use the matching daemon for the request-credential API.
+
 Right-click an HTTP(S) link and select **Send to Vise** to queue it in your local download manager. Clicking the toolbar icon opens settings. There is no automatic download interception, page scraping, analytics, or third-party service.
 
 ## Setup
@@ -14,7 +16,7 @@ The options page accepts a base URL or its `/api/downloads` endpoint, with any n
 ## Privacy and failure handling
 
 - Address/token settings use `chrome.storage.local` (also supported by Firefox's Chrome-compatible API), never sync storage. This storage is not encrypted: protect your browser profile. No content scripts or externally accessible message handlers are installed. Chromium storage access is restricted to trusted extension contexts where that API is available.
-- Only the clicked link URL is sent, as `POST /api/downloads` with JSON and an explicit Bearer token. Cookie and referer forwarding have independent opt-in switches, both off by default. Page content is never read. An explicit **Send URL only to Vise** menu action bypasses both switches. Embedded URL credentials and non-HTTP(S) links are rejected.
+- By default, only the clicked link URL is sent, as `POST /api/downloads` with JSON and an explicit Bearer token. Cookie and referer forwarding have independent opt-in switches, both off by default. Page content is never read. An explicit **Send URL only to Vise** menu action bypasses both switches. Embedded URL credentials and non-HTTP(S) links are rejected.
 - Endpoint validation is repeated before each request. Remote hosts, redirects, query strings, and embedded endpoint credentials are rejected to keep the token on loopback.
 - Notifications report queue acceptance or a readable failure without displaying tokens, link query strings, or raw server error bodies. A success notification means queued, not finished.
 - Failed or timed-out POSTs are never retried automatically. A timed-out request may already be queued; check Vise before sending the link again.

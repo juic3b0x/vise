@@ -2,6 +2,8 @@
 
 Return to the [README](README.md) for features and usage, or continue to the [quick start](README.md#quick-start) after installation.
 
+This checkout contains **Vise 0.7.0** and **extension 0.3.0**. The commands below use a local checkout or GitHub’s default branch; they do not assume that the new tag has been published.
+
 ## System requirements
 
 Install a Rust toolchain with Cargo. Vise declares Rust **1.88 or newer** as its minimum version. Git is also required to clone the repository. A working C build toolchain is needed for bundled SQLite; no separate SQLite installation or database server is required.
@@ -33,7 +35,7 @@ By default, Cargo places the executable in `~/.cargo/bin/` (`%USERPROFILE%\.carg
 
 ## Verify installation
 
-Confirm the installation:
+For the prepared release, `vise --version` reports `vise 0.7.0`; `vise --help` lists the per-task request flags. Confirm the installation:
 
 ```sh
 vise --version
@@ -77,6 +79,10 @@ The source includes a dependency-free Manifest V3 extension in [extension/](exte
 Temporary Firefox add-ons are removed when Firefox closes. Persistent distribution requires a signed package; this repository does not claim a published Chrome Web Store or Mozilla Add-ons listing.
 
 If your browser requests host/site access, allow it for the configured `127.0.0.1` or `localhost` address. Copy the token from `daemon.VISE_API_TOKEN` in `~/.vise/config.toml`, or use the `VISE_API_TOKEN` environment override used to launch the daemon. Right-click an HTTP(S) link and select **Send to Vise**. Credential forwarding is off by default. To opt in, independently enable cookie/referer forwarding, grant the download site with **Grant site access**, and save preferences. Runtime host grants cover that scheme/host on all ports; cookie permission is optional. Cookie forwarding requires an identifiable tab store and partition (Chrome 132+ lookup); current Firefox safely refuses this path. **Send URL only to Vise** always bypasses browser credential capture. The daemon journals supplied credentials as plaintext, so protect `~/.vise/`, its WAL/SHM files, and backups. See the [extension guide](extension/README.md) for permissions, privacy, and troubleshooting.
+
+## Upgrading to 0.7.0
+
+Stop Vise and make a SQLite-consistent backup of `~/.vise/`, including its configuration, WAL/SHM where applicable, and credentials, before upgrading. First startup upgrades schema 5 to schema 6 additively. Existing tasks retain their legacy request behavior; newly supplied request credentials are saved privately for resume. Older binaries cannot read schema 6: restore the pre-upgrade backup before rolling back rather than opening the upgraded journal with an older executable.
 
 ## Upgrading from per-directory journals
 
