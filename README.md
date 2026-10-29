@@ -383,7 +383,7 @@ See [architecture, recovery behavior, and API documentation](docs/architecture.m
 
 ## Development
 
-Use the independent [benchmark harness and methodology](docs/benchmarking.md) for controlled Vise/aria2 comparisons and an optional curl C=1 cohort. Smoke results validate the harness and are not publishable performance evidence.
+Use the independent [benchmark harness and methodology](docs/benchmarking.md) for controlled Vise/aria2 comparisons and an optional curl C=1 cohort. Reports record resolved executable paths, versions and SHA-256 hashes. Smoke results validate the harness and are not publishable performance evidence.
 
 ```sh
 cargo build --release --locked

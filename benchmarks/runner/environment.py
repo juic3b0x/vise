@@ -68,7 +68,8 @@ def collect(root, output, executables, storage):
                 tool_version = "vise-bench-fixture " + tomllib.load(manifest)["package"]["version"]
         else:
             tool_version = version([executable, "--version"], output)
-        metadata["tools"][name] = {"version": tool_version, "sha256": digest}
+        metadata["tools"][name] = {"path": str(Path(executable).resolve()),
+                                   "version": tool_version, "sha256": digest}
     if os.name == "posix":
         import resource
         metadata["file_descriptor_limit"] = list(resource.getrlimit(resource.RLIMIT_NOFILE))
@@ -88,4 +89,4 @@ def tools(vise, fixture, curl):
             result["curl"] = found
         else:
             print("curl unavailable: C=1 curl cohort skipped.")
-    return result
+    return {name: str(Path(executable).resolve()) for name, executable in result.items()}
