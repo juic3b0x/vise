@@ -1,4 +1,5 @@
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -12,13 +13,51 @@ from benchmarks.runner import adapters, environment, metrics, report, measuremen
 
 
 class RunnerTests(unittest.TestCase):
+    def test_environment_records_executed_absolute_paths_and_hashes(self):
+        with tempfile.TemporaryDirectory(dir="target") as temporary:
+            directory = Path(os.path.relpath(temporary))
+            paths = {name: directory / name for name in ("vise", "fixture", "aria2", "curl")}
+            for name, path in paths.items():
+                path.write_bytes(name.encode())
+            with patch("shutil.which", side_effect=lambda name: str(paths["aria2" if name == "aria2c" else name])):
+                tools = environment.tools(paths["vise"], paths["fixture"], True)
+            with patch.object(environment, "version", return_value="test version"), \
+                    patch.object(environment, "filesystem", return_value="testfs"), \
+                    patch("subprocess.check_output", return_value="test"):
+                metadata = environment.collect(Path.cwd(), directory, tools, "real-disk")
+            for name, path in paths.items():
+                expected = str(path.resolve())
+                self.assertEqual(tools[name], expected)
+                entry = metadata["tools"][name]
+                self.assertEqual(entry["path"], expected)
+                self.assertTrue(Path(entry["path"]).is_absolute())
+                self.assertEqual(entry["sha256"], hashlib.sha256(name.encode()).hexdigest())
+                if name != "fixture":
+                    profile = "aria2-matched" if name == "aria2" else name
+                    command, _ = adapters.command(profile, tools[name],
+                                                  ["http://127.0.0.1:1/file/0.bin"],
+                                                  directory, directory, 1, 1, 5, 30, False)
+                    self.assertEqual(entry["path"], command[0])
+
     def test_missing_comparison_tools_is_a_clear_skip(self):
         output = io.StringIO()
-        with patch("shutil.which", return_value=None), contextlib.redirect_stdout(output):
-            tools = environment.tools(Path("vise"), Path("fixture"), True)
+        with tempfile.TemporaryDirectory(dir="target") as temporary:
+            directory = Path(temporary)
+            paths = {name: directory / name for name in ("vise", "fixture")}
+            for path in paths.values():
+                path.write_bytes(b"test executable")
+            with patch("shutil.which", return_value=None), contextlib.redirect_stdout(output):
+                tools = environment.tools(paths["vise"], paths["fixture"], True)
+            with patch.object(environment, "version", return_value="test version"), \
+                    patch.object(environment, "filesystem", return_value="testfs"), \
+                    patch("subprocess.check_output", return_value="test"):
+                metadata = environment.collect(Path.cwd(), directory, tools, "real-disk")
         self.assertEqual(set(tools), {"vise", "fixture"})
-        self.assertIn("aria2c unavailable", output.getvalue())
-        self.assertIn("curl unavailable", output.getvalue())
+        self.assertNotIn("aria2", metadata["tools"])
+        self.assertNotIn("curl", metadata["tools"])
+        self.assertTrue(all(entry["path"] for entry in metadata["tools"].values()))
+        self.assertIn("aria2 profiles skipped", output.getvalue())
+        self.assertIn("curl cohort skipped", output.getvalue())
 
     def test_invalid_configuration_is_rejected_without_values(self):
         from types import SimpleNamespace

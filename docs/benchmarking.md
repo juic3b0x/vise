@@ -32,7 +32,7 @@ python benchmarks/run.py --curl --runs 6 --connections 4 --jobs 5 --storage real
 
 The full profile discards one warm-up per tool/scenario/cohort and defaults to six measured runs; fewer than five are rejected. Smoke substitutes an 8 MiB large file and twelve 64–128 KiB small files, retains all six scenarios, discards warm-ups, and measures exactly three runs. Tool order rotates and reverses between rounds; seeds and file sizes match across tools in each round. Six full rounds balance positions for the three main profiles. Warm-ups are recorded but excluded from aggregates. Failed attempts are never replaced with extra successes.
 
-Build the optimized binaries before timing. `--vise PATH` and `--fixture PATH` select existing binaries; hashes of both executables, the Vise commit and dirty flag, tool versions, CPU/OS, filesystem, storage declaration and POSIX file descriptor limits appear in `results.json`. Keep that metadata with any report. A dirty checkout or unknown storage deserves investigation before publication.
+Build the optimized binaries before timing. `--vise PATH` and `--fixture PATH` select existing binaries. The environment block's `tools` entries record `path` (the resolved absolute executable actually used), `version`, and `sha256` for Vise, the fixture, and each available aria2/curl tool. Missing optional tools are explicitly reported as skipped and omitted from `tools`, never represented by an empty path. The Vise commit and dirty flag, CPU/OS, filesystem, storage declaration and POSIX file descriptor limits also appear in `results.json`. Keep that metadata with any report. A dirty checkout or unknown storage deserves investigation before publication.
 
 ## Controlled scenarios
 
