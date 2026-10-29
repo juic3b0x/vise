@@ -1,0 +1,19 @@
+{
+  "seed": 424242,
+  "connections": 4,
+  "jobs": 5,
+  "retries": 5,
+  "timeout": 30,
+  "run_timeout": 600,
+  "large_bytes": 536870912,
+  "small_count": 2000,
+  "small_min_bytes": 65536,
+  "small_max_bytes": 1048576,
+  "rate_bytes_per_second": 8388608,
+  "slow_every": 4,
+  "slow_divisor": 10,
+  "latency_ms": 80,
+  "faults_per_file": 2,
+  "scenarios": ["large", "capped", "heterogeneous", "small", "latency", "flaky"],
+  "smoke": {"large_bytes": 8388608, "small_count": 12, "small_min_bytes": 65536, "small_max_bytes": 131072}
+}
