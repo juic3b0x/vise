@@ -13,7 +13,7 @@ mod logging;
 mod startup;
 
 #[derive(Parser)]
-#[command(version, about = "Vise — concurrent, resumable downloads", long_about = None)]
+#[command(version = env!("VISE_BUILD_VERSION"), about = "Vise — concurrent, resumable downloads", long_about = None)]
 #[command(group(clap::ArgGroup::new("server").args(["webui", "daemon"])))]
 #[command(args_conflicts_with_subcommands = true)]
 struct Args {
