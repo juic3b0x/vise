@@ -6,6 +6,7 @@ All notable changes to Vise are documented here. The format follows [Keep a Chan
 
 ### Fixed
 
+- Render WebUI request summaries from the API's flattened public fields instead of an absent nested object. Add a Rust-verified golden public snapshot and a controller regression proving that summaries remain visible without exposing values or refilling write-only inputs.
 - Box the remote add command arguments to avoid Windows Clippy's `large_enum_variant` warning without changing command-line behavior.
 
 ### Added
