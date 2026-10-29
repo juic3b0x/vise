@@ -2,6 +2,8 @@
 
 Install Vise from source with Cargo, verify the executable, then choose a [terminal](usage.md), [dashboard](webui.md), or [daemon](daemon.md) workflow. This guide expands the repository's [INSTALL.md](https://github.com/juic3b0x/vise/blob/main/INSTALL.md).
 
+This checkout pairs **Vise 0.7.0** with **extension 0.3.0** and retains Rust **1.88** support. Default-branch installation commands are not pinned to an unpublished tag.
+
 ## System requirements
 
 - Rust **1.88 or newer**, including Cargo. Use a current stable toolchain for normal builds.
@@ -54,7 +56,7 @@ vise --version
 vise --help
 ```
 
-These checks do not create configuration or journal files. If the command is unavailable, reopen the terminal after installing Rust and verify the Cargo binary directory is on `PATH`.
+The prepared binary reports `vise 0.7.0`; its help includes `--header`, `--referer`, and `--user-agent`. These checks do not create configuration or journal files. If the command is unavailable, reopen the terminal after installing Rust and verify the Cargo binary directory is on `PATH`.
 
 ## First startup
 
@@ -98,6 +100,8 @@ The repository includes an unpacked Manifest V3 extension for Chrome/Chromium an
 ## Upgrade and recover existing transfers
 
 Stop Vise before replacing its executable. Back up `~/.vise/` after a clean shutdown, including the configuration and journal, and retain staging files in each output directory. Do not copy only `state.sqlite3` while the process is running: committed data may still be in its WAL file.
+
+Upgrading from 0.6.0 adds schema 6’s nullable `request_credentials` column. Existing tasks retain legacy redirect behavior. Supplied credentials become private plaintext journal data; protect backups too. Older binaries reject schema 6, so rollback requires restoring a consistent pre-upgrade backup.
 
 For older per-output-directory journals, stop all older binaries and visit each old directory once. This shell example imports the previous default destination:
 

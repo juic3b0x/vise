@@ -8,6 +8,8 @@
 
 Vise is a high-performance HTTP(S) download manager built in Rust. Multi-threaded chunked downloads run on Tokio's async runtime, while Indicatif keeps the CLI clear with live progress, speed, and ETA. Prefer a dashboard? Launch the lightweight, embedded Axum WebUI with `--webui`.
 
+**Vise 0.7.0** includes **browser extension 0.3.0**. See the [release notes](RELEASE_NOTES.md) and [changelog](CHANGELOG.md#070---2026-10-28). Rust 1.88 remains the minimum supported toolchain.
+
 ## Features
 
 - **Parallel transfers:** Split eligible files into chunks and download them concurrently, with configurable connection and queue limits.

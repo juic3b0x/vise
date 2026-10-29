@@ -213,7 +213,7 @@ Send `{"limit_rate":"off"}` to clear it. Unlimited is returned as `{"limit_rate"
 
 ### Errors
 
-Engine errors return an `error` JSON field with HTTP 400 for invalid input, 404 for a missing task, 409 for a state conflict, or 500 for an internal failure. Authentication/Origin guards can return 401/403; invalid mutation media types return 415, and oversized bodies return 413. Malformed JSON and invalid UUID path extraction use Axum's rejection responses. Clients must check HTTP status before decoding a successful snapshot.
+Engine errors return an `error` JSON field with HTTP 400 for invalid input, 404 for a missing task, 409 for a state conflict, or 500 for an internal failure. Authentication/Origin guards can return 401/403; invalid mutation media types return 415, and oversized bodies return 413. Download-admission JSON errors are sanitized JSON responses with HTTP 400 or 413; unrelated malformed JSON and invalid UUID path extraction use Axum’s rejection responses. Clients must check HTTP status before decoding a successful snapshot.
 
 ## WebSocket telemetry
 
@@ -253,6 +253,6 @@ A credentialed batch (custom headers, referer, or supplied cookies) must have on
 
 Limits: 32 headers, 128-byte names, 8 KiB per value, 32 KiB combined headers; 8 KiB referer; 512-byte user agent; 128 cookies, 4 KiB each and 32 KiB combined. The total decoded credential budget is 64 KiB. Single admission accepts 128 KiB of JSON; batch admission retains 2 MiB and existing URL-list limits. Other routes retain 16 KiB. Oversized bodies return HTTP 413. See [forbidden headers](usage.md#request-headers-and-referer).
 
-Snapshots and both WebSocket streams add only `header_names`, `header_count`, `has_custom_headers`, `has_referer`, `has_user_agent`, and `has_cookies`. The agent itself, cookie metadata, referer, and header values are never returned. These flags describe configured inputs, not session validity. The existing dashboard does not yet include credential-entry controls; use CLI/remote/API admission.
+Snapshots and both WebSocket streams add only `header_names`, `header_count`, `has_custom_headers`, `has_referer`, `has_user_agent`, and `has_cookies`. The agent itself, cookie metadata, referer, and header values are never returned. These flags describe configured inputs, not session validity. The dashboard’s collapsed [Advanced request settings](webui.md#advanced-request-settings) controls submit values once and show only these top-level public summary fields on task rows.
 
 Schema 6 persists effective settings privately before starting network I/O. Restart never applies new defaults to saved tasks. Unix writes require a journal and existing WAL/SHM files with mode exactly `0600`. Windows emits a one-time non-secret warning: protect the home directory with account ACLs. The database, WAL, and backups contain plaintext credentials. See [transport and recovery](architecture.md#private-request-contexts).
