@@ -4,3 +4,7 @@
 *.part
 /site/
 
+/benchmarks/fixture/target/
+__pycache__/
+*.pyc
+

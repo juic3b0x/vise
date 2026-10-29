@@ -4,6 +4,11 @@ All notable changes to Vise are documented here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+### Added
+
+- Developer-only reproducible benchmark harness with an independent, locked Rust HTTP fixture and Python 3.11+ standard-library runner. Compare Vise with matched/default aria2 profiles and optional single-connection curl across large-file, connection-capped, heterogeneous, small-file, delayed-response and seeded-reset scenarios without changing Vise's runtime or dependencies.
+- Mandatory output hashes, corruption self-tests, isolated homes, alternating repeated runs, JSON/Markdown reports, CPU/memory/request/connection/wasted-byte metrics, serving-tail measurements and heterogeneous connection accounting. Label smoke output non-publishable and exclude flaky recovery from throughput comparisons. Document methodology, platform limits and benchmark source isolation.
+
 ## [0.7.0] - 2026-10-28
 
 ### Added

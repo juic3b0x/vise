@@ -39,6 +39,7 @@ nav:
   - WebUI: webui.md
   - Browser extension: extension.md
   - Architecture: architecture.md
+  - Benchmarking: benchmarking.md
 
 plugins:
   - search
