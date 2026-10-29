@@ -6,6 +6,7 @@ All notable changes to Vise are documented here. The format follows [Keep a Chan
 
 ### Added
 
+- Embed the build commit and committer date in `vise --version` and `-V`, with a dirty marker scoped to build inputs. Support compile-time packager overrides, worktrees, detached HEAD and shallow clones using only std and Git; retain a package-version-only fallback when Git metadata is unavailable. Version output requires no runtime Git access and preserves the `vise X.Y.Z` prefix.
 - Developer-only reproducible benchmark harness with an independent, locked Rust HTTP fixture and Python 3.11+ standard-library runner. Compare Vise with matched/default aria2 profiles and optional single-connection curl across large-file, connection-capped, heterogeneous, small-file, delayed-response and seeded-reset scenarios without changing Vise's runtime or dependencies.
 - Mandatory output hashes, corruption self-tests, isolated homes, alternating repeated runs, JSON/Markdown reports, CPU/memory/request/connection/wasted-byte metrics, serving-tail measurements and heterogeneous connection accounting. Label smoke output non-publishable and exclude flaky recovery from throughput comparisons. Document methodology, platform limits and benchmark source isolation.
 

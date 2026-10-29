@@ -35,12 +35,42 @@ By default, Cargo places the executable in `~/.cargo/bin/` (`%USERPROFILE%\.carg
 
 ## Verify installation
 
-For the prepared release, `vise --version` reports `vise 0.7.0`; `vise --help` lists the per-task request flags. Confirm the installation:
+For the prepared release, version output starts with `vise 0.7.0` and includes build provenance when available; `vise --help` lists the per-task request flags. Confirm the installation:
 
 ```sh
 vise --version
 vise --help
 ```
+
+### Build identification
+
+`--version` and `-V` produce the same line:
+
+```text
+vise 0.7.0 (a1b2c3d 2026-10-28)
+vise 0.7.0 (a1b2c3d-dirty 2026-10-28)
+```
+
+These are examples: the seven lowercase hexadecimal characters identify the commit actually built. The date is that commit's **committer date**, using its stored timezone, never the build time. Dirty means staged, unstaged, or untracked non-ignored changes within `src/`, `Cargo.toml`, `Cargo.lock`, `build.rs`, or `build_support.rs`. Editing docs, benchmarks, or extension files alone neither marks the build dirty nor reruns the build script; a new commit still refreshes the embedded commit ID.
+
+The information is embedded at compile time. Running the installed binary needs no Git checkout or Git executable and creates no local state. Builds without Git, without a checkout rooted at the package directory, or with failed Git discovery fall back to `vise 0.7.0`. This includes source archives and container builds that do not copy Git metadata. Detached HEAD and shallow checkouts retain the checked-out commit and its date, including ordinary tagged CI builds. Git ownership/safe-directory failures also fall back safely.
+
+Packagers can supply these build-time environment variables without Git:
+
+| Variable | Meaning |
+| --- | --- |
+| `VISE_GIT_COMMIT` | 7–64 hexadecimal characters; output uses the first seven in lowercase. Setting this selects authoritative override mode and bypasses Git entirely. An empty value selects package-version-only output. |
+| `VISE_GIT_DATE` | Optional valid `YYYY-MM-DD` committer date. In override mode, no date is inferred when omitted. Otherwise it overrides the discovered date. |
+| `VISE_GIT_DIRTY` | Optional `true`/`false` or `1`/`0`. Overrides discovered dirty state; defaults to false in authoritative override mode. |
+
+Invalid override values produce package-version-only output without failing the build or echoing values. For example, in a POSIX shell:
+
+```sh
+VISE_GIT_COMMIT=deadbee VISE_GIT_DATE=2026-01-02 cargo install --path . --locked
+# Installed output: vise 0.7.0 (deadbee 2026-01-02)
+```
+
+These variables affect compilation, not runtime settings. No machine paths, usernames, hostnames, or build timestamps are embedded in the version string. The `vise X.Y.Z` prefix remains stable; tools should allow an optional provenance suffix.
 
 Local source installation and Git-source installation have been verified in isolated installation directories. The Git check used a local repository; installation from the live GitHub repository has not yet been verified.
 

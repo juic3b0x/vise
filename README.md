@@ -32,6 +32,8 @@ Vise is a high-performance HTTP(S) download manager built in Rust. Multi-threade
 
 See [INSTALL.md](INSTALL.md) for system requirements, Cargo installation, verification, and systemd service setup.
 
+`vise --version` (or `vise -V`) identifies the package and build commit, for example `vise 0.7.0 (a1b2c3d 2026-10-28)`. The date is the committer date; `-dirty` marks changes in build inputs. Builds without usable Git metadata report `vise 0.7.0`. See [build identification and packager overrides](INSTALL.md#build-identification).
+
 ## Documentation
 
 Browse the [documentation site](https://juic3b0x.github.io/vise/) for installation, CLI usage, daemon/API configuration, WebUI controls, browser extension setup, and engine architecture. The [source guides](docs/index.md) are also readable in this repository.

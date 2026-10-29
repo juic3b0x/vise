@@ -56,7 +56,22 @@ vise --version
 vise --help
 ```
 
-The prepared binary reports `vise 0.7.0`; its help includes `--header`, `--referer`, and `--user-agent`. These checks do not create configuration or journal files. If the command is unavailable, reopen the terminal after installing Rust and verify the Cargo binary directory is on `PATH`.
+The prepared binary's version starts with `vise 0.7.0`; its help includes `--header`, `--referer`, and `--user-agent`. `--version` and `-V` produce identical output. These checks do not create configuration or journal files. If the command is unavailable, reopen the terminal after installing Rust and verify the Cargo binary directory is on `PATH`.
+
+### Build provenance
+
+Git builds include the seven-character commit and its committer date, for example `vise 0.7.0 (a1b2c3d 2026-10-28)`. The date uses the commit's stored timezone, never the build clock. Staged, unstaged, and untracked non-ignored changes within `src/`, `Cargo.toml`, `Cargo.lock`, `build.rs`, and `build_support.rs` add `-dirty` after the commit. Other file edits do not affect this flag. The information is embedded at compile time; the installed binary never invokes Git for version output.
+
+Missing Git, source-only archives, an enclosing unrelated repository, or Git errors produce the clean fallback `vise 0.7.0`. Detached HEAD, linked worktrees, and shallow clones are supported. Tagged builds in the existing release workflow retain the tagged commit and date even with a shallow checkout; no full history is required. A container without `.git`, or a Git safe-directory error, uses the fallback instead.
+
+For builds without Git, set `VISE_GIT_COMMIT` (7–64 hex characters, shortened to seven), optionally `VISE_GIT_DATE` (`YYYY-MM-DD`) and `VISE_GIT_DIRTY` (`true`/`false` or `1`/`0`) during compilation. An explicit commit bypasses Git; an omitted date stays omitted and dirty defaults to false. An empty commit forces package-version-only output. Without a commit override, date/dirty overrides win over successful Git discovery. Invalid overrides safely fall back without failing compilation or echoing values.
+
+```sh
+VISE_GIT_COMMIT=deadbee VISE_GIT_DATE=2026-01-02 cargo install --path . --locked
+# vise --version: vise 0.7.0 (deadbee 2026-01-02)
+```
+
+These are build variables, not daemon configuration keys. The output never includes build-host names, paths, usernames, or build timestamps. Consumers should accept the stable `vise X.Y.Z` prefix plus an optional suffix.
 
 ## First startup
 

@@ -94,7 +94,7 @@ Stop a session with Ctrl+C; a service manager can send SIGTERM. Vise stops worke
 | `-d, --daemon` | Start the API/dashboard quietly in the foreground |
 | `--bind <IP:PORT>` | Override the whole server address; conflicts with host/port |
 | `--host <IP>` / `--port <PORT>` | Override individual server configuration fields |
-| `-h, --help` / `-V, --version` | Print help/version without creating local state |
+| `-h, --help` / `-V, --version` | Print help/version without creating local state; version includes build commit/date when available |
 
 Bind, host, and port options require `--webui` or `--daemon`. A WebUI bind must be loopback; a non-loopback daemon bind requires authentication. The timeout limits inactivity, so a progressing large download can run longer than 30 seconds.
 
