@@ -7,8 +7,8 @@ use std::{
 use crate::error::{Error, Result};
 use url::Url;
 
-pub const MAX_INPUT_BYTES: usize = 1024 * 1024;
-pub const MAX_URLS: usize = 1000;
+const MAX_INPUT_BYTES: usize = 1024 * 1024;
+const MAX_URLS: usize = 1000;
 pub const MAX_BATCH_BODY_BYTES: usize = 2 * 1024 * 1024;
 
 pub(crate) fn validate_url(input: &str) -> Result<Url> {
@@ -31,7 +31,7 @@ pub(crate) fn validate_url(input: &str) -> Result<Url> {
 }
 
 /// Preserve ordering and duplicate URLs; the engine assigns collision-safe names.
-pub fn validate_urls(urls: Vec<String>) -> Result<Vec<String>> {
+pub(crate) fn validate_urls(urls: Vec<String>) -> Result<Vec<String>> {
     if urls.is_empty() || urls.len() > MAX_URLS {
         return Err(Error::Invalid(format!(
             "provide between 1 and {MAX_URLS} URLs"
@@ -49,7 +49,7 @@ pub fn validate_urls(urls: Vec<String>) -> Result<Vec<String>> {
     Ok(urls)
 }
 
-pub fn parse(content: &str) -> Result<Vec<String>> {
+pub(crate) fn parse(content: &str) -> Result<Vec<String>> {
     parse_reader(Cursor::new(content.as_bytes()))
 }
 
@@ -94,7 +94,7 @@ fn parse_reader(reader: impl Read) -> Result<Vec<String>> {
     Ok(urls)
 }
 
-pub async fn read_file(path: PathBuf) -> Result<Vec<String>> {
+async fn read_file(path: PathBuf) -> Result<Vec<String>> {
     tokio::task::spawn_blocking(move || {
         read_regular_file(&path)
             .map_err(|error| Error::Invalid(format!("input file {}: {error}", path.display())))

@@ -27,7 +27,7 @@ impl Manager {
         validate_config(&config)?;
         config.request.resolve(&Default::default())?;
         if let Some(path) = config.cookies_file.take() {
-            config.cookies_file = Some(net::cookies::load(path).await?.path);
+            config.cookies_file = Some(net::load_cookies(path).await?.path);
         }
         let (state_dir, lock) = super::storage::prepare(&mut config).await?;
         let mut output_locks =

@@ -53,12 +53,12 @@ impl Checksums {
             md5: self.expected_md5.clone(),
         }
     }
-    pub fn clear_result(&mut self) {
+    pub(crate) fn clear_result(&mut self) {
         self.actual_sha256 = None;
         self.actual_md5 = None;
         self.verified_at = None;
     }
-    pub fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         ExpectedChecksums::new(
             self.expected_sha256.as_deref(),
             self.expected_md5.as_deref(),
@@ -74,7 +74,7 @@ impl Checksums {
         }
         Ok(())
     }
-    pub fn mismatch(&self) -> Option<String> {
+    pub(crate) fn mismatch(&self) -> Option<String> {
         let mut errors = Vec::new();
         for (name, expected, actual) in [
             ("SHA-256", &self.expected_sha256, &self.actual_sha256),
@@ -108,7 +108,7 @@ fn normalize(value: &str, digits: usize, name: &str) -> Result<String> {
 /// Hash only requested algorithms, in one sequential pass on Tokio's blocking
 /// pool. Cancellation is cooperative between 1 MiB reads; the caller joins the
 /// hash worker before any other operation can mutate or delete its staging file.
-pub async fn hash_file(
+pub(crate) async fn hash_file(
     path: PathBuf,
     expected: ExpectedChecksums,
     cancel: CancellationToken,
@@ -151,7 +151,7 @@ pub async fn hash_file(
 /// Repr-Digest always describes the selected representation. Message-content
 /// digests are usable only for complete HTTP 200 bodies, never range fragments.
 /// Trailer-only digests and the ambiguous obsolete Digest field are not used.
-pub fn from_headers(headers: &HeaderMap, full_body: bool) -> Result<ExpectedChecksums> {
+fn from_headers(headers: &HeaderMap, full_body: bool) -> Result<ExpectedChecksums> {
     let mut expected = ExpectedChecksums::default();
     for field in ["repr-digest", "content-digest"] {
         if field == "content-digest" && !full_body {
@@ -199,7 +199,7 @@ pub fn from_headers(headers: &HeaderMap, full_body: bool) -> Result<ExpectedChec
     }
     Ok(expected)
 }
-pub fn from_response(response: &reqwest::Response) -> Result<ExpectedChecksums> {
+pub(crate) fn from_response(response: &reqwest::Response) -> Result<ExpectedChecksums> {
     let mut headers = response.headers().clone();
     // Content-Location can bind Repr-Digest to a different resource. A full-body
     // Content-Digest still describes the output in that case.

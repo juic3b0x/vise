@@ -1,7 +1,8 @@
 //! Per-transfer HTTP clients. Cookie jars and proxy routes never cross tasks.
-pub mod cookies;
+mod cookies;
 pub mod credentials;
 mod request;
+pub(crate) use cookies::load as load_cookies;
 pub(crate) use request::Transport;
 
 use crate::{error::Result, proxy::ProxyUrl};

@@ -11,7 +11,7 @@ mod storage;
 #[cfg(test)]
 mod tests;
 
-pub fn default_contents() -> String {
+fn default_contents() -> String {
     let token = format!(
         "{}{}",
         uuid::Uuid::new_v4().simple(),
@@ -108,7 +108,7 @@ pub async fn load() -> Result<LoadedConfig> {
 }
 
 /// Explicit home injection keeps embedding applications and tests isolated.
-pub async fn load_from_home(home: PathBuf) -> Result<LoadedConfig> {
+async fn load_from_home(home: PathBuf) -> Result<LoadedConfig> {
     anyhow::ensure!(
         home.is_absolute(),
         "home directory must be an absolute path"
@@ -141,7 +141,7 @@ pub fn expand_home(path: &Path, home: &Path) -> Result<PathBuf> {
     })
 }
 
-pub fn home_directory() -> Result<PathBuf> {
+pub(crate) fn home_directory() -> Result<PathBuf> {
     #[cfg(windows)]
     let home = std::env::var_os("USERPROFILE")
         .filter(|v| !v.is_empty())

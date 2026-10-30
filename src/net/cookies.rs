@@ -15,14 +15,14 @@ use std::{
 const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_LINE_BYTES: usize = 64 * 1024;
 
-pub struct LoadedCookies {
+pub(crate) struct LoadedCookies {
     /// Canonical, UTF-8 path suitable for the SQLite journal.
-    pub path: PathBuf,
-    pub jar: Arc<Jar>,
+    pub(crate) path: PathBuf,
+    pub(super) jar: Arc<Jar>,
 }
 
 /// File I/O and parsing run on the blocking pool, never on a transfer worker.
-pub async fn load(path: PathBuf) -> Result<LoadedCookies> {
+pub(crate) async fn load(path: PathBuf) -> Result<LoadedCookies> {
     tokio::task::spawn_blocking(move || load_file(path))
         .await
         .map_err(|_| Error::Worker("cookie loader task failed".into()))?
@@ -69,7 +69,7 @@ fn load_file(path: PathBuf) -> Result<LoadedCookies> {
 
 /// Import tab-separated records. Expired cookies are ignored; expiration 0
 /// denotes a session cookie. #HttpOnly_ lines are records, not comments.
-pub fn parse(contents: &str) -> Result<Jar> {
+fn parse(contents: &str) -> Result<Jar> {
     let jar = Jar::default();
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
