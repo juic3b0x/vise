@@ -217,6 +217,7 @@ async fn retry_uses_revised_end() {
     let done = terminal(&manager, item.id).await;
     assert_eq!(done.status, Status::Completed, "{:?}", done.error);
     assert!(done.tail_splits > 0);
+    assert!(!fixture.state.fail_once.load(Ordering::SeqCst));
     let original_start = fixture.state.data.len() * 3 / 4;
     let donor = done
         .chunks
