@@ -277,8 +277,17 @@ fn metrics(download: &Download) -> String {
         .eta_seconds
         .map(|n| format!("{:.0}s", n.ceil()))
         .unwrap_or_else(|| "—".into());
+    let adaptive = if download.tail_splits > 0 {
+        format!(
+            " · {} tail splits · {} discarded",
+            download.tail_splits,
+            bytes(download.split_discarded_bytes as f64)
+        )
+    } else {
+        String::new()
+    };
     format!(
-        "{} · {percentage} · {}/{} · {}/s · ETA {eta}",
+        "{} · {percentage} · {}/{} · {}/s · ETA {eta}{adaptive}",
         state(download.status),
         bytes(download.downloaded_bytes as f64),
         total,
@@ -349,6 +358,8 @@ mod tests {
     #[test]
     fn events_are_timestamped_colorized_and_terminal_safe() {
         let download = Download {
+            tail_splits: 0,
+            split_discarded_bytes: 0,
             request: Default::default(),
             id: Uuid::nil(),
             url: String::new(),

@@ -11,7 +11,7 @@ use crate::{
     model::{Chunk, ChunkStatus, Record, Status, timestamp_millis},
     net,
 };
-use bytes::BytesMut;
+use bytes::{Buf, Bytes, BytesMut};
 use futures_util::StreamExt;
 use reqwest::{Response, StatusCode};
 use std::{
@@ -22,9 +22,9 @@ use std::{
 use tokio::{
     fs,
     io::{AsyncSeekExt, AsyncWriteExt},
-    task::JoinSet,
 };
 use tokio_util::sync::CancellationToken;
+#[cfg(test)]
 use uuid::Uuid;
 
 const BUFFER_SIZE: usize = 256 * 1024;
@@ -42,6 +42,8 @@ impl Manager {
         let client = job.client.read().await.clone();
         let metadata = self.probe(&client, &url, &cancel).await?;
         let (file, path) = self.prepare_partial(&job, metadata).await?;
+        job.adaptive
+            .reset(&*job.record.read().await, self.0.rate_limiter.limit());
         self.transition(&job, Status::Downloading).await?;
         self.run_chunks(&job, &cancel).await?;
         self.publish_file(&job, file, path, &cancel).await
@@ -95,36 +97,6 @@ impl Manager {
             file.set_len(total).await?;
         }
         Ok((file, path))
-    }
-
-    async fn run_chunks(&self, job: &Arc<Job>, cancel: &CancellationToken) -> Result<()> {
-        let mut workers = JoinSet::new();
-        let worker_cancel = cancel.child_token();
-        let count = job.record.read().await.chunks.len();
-        for index in 0..count {
-            let manager = self.clone();
-            let job = job.clone();
-            let cancel = worker_cancel.clone();
-            workers.spawn(async move { manager.transfer_chunk(job, index, &cancel).await });
-        }
-        let mut failure = None;
-        while let Some(result) = workers.join_next().await {
-            let result = result.unwrap_or_else(|e| Err(Error::Worker(e.to_string())));
-            if let Err(error) = result
-                && failure.is_none()
-            {
-                failure = Some(error);
-                worker_cancel.cancel();
-            }
-        }
-        // Do not abort tasks: cancellation waits for file writes and offset updates.
-        if let Some(error) = failure {
-            return Err(error);
-        }
-        if cancel.is_cancelled() {
-            return Err(Error::Cancelled);
-        }
-        Ok(())
     }
 
     async fn publish_file(
@@ -198,7 +170,7 @@ impl Manager {
     pub(super) async fn transfer_chunk(
         &self,
         job: Arc<Job>,
-        index: usize,
+        index: u64,
         cancel: &CancellationToken,
     ) -> Result<()> {
         let mut attempt = 0;
@@ -206,8 +178,13 @@ impl Manager {
             if cancel.is_cancelled() {
                 return Err(Error::Cancelled);
             }
+            job.adaptive.resolved(index, cancel).await?;
             chunk_at_mut(&mut *job.record.write().await, index)?.status = ChunkStatus::Downloading;
             let result = self.transfer_once(&job, index, cancel).await;
+            if let Err(error) = &result {
+                job.adaptive.refused(error);
+            }
+            job.adaptive.stopped(index);
             let result = if job.record.read().await.request_credentials.is_some() {
                 result.map_err(Error::without_request_details)
             } else {
@@ -215,15 +192,23 @@ impl Manager {
             };
             match result {
                 Ok(()) => {
+                    job.adaptive.resolved(index, cancel).await?;
                     chunk_at_mut(&mut *job.record.write().await, index)?.status =
                         ChunkStatus::Completed;
                     return Ok(());
                 }
                 Err(error) if error.retryable() && attempt < self.0.config.retries => {
-                    tracing::warn!(chunk = index, retry = attempt + 1, %error, "retrying transfer");
+                    let position = job
+                        .record
+                        .read()
+                        .await
+                        .chunks
+                        .binary_search_by_key(&index, |c| c.start)
+                        .map_err(|_| missing_chunk(index))?;
+                    tracing::warn!(chunk = position, retry = attempt + 1, %error, "retrying transfer");
                     self.publish_job(
                         EventKind::Retrying {
-                            chunk: index,
+                            chunk: position,
                             attempt: attempt + 1,
                             error: error.to_string(),
                         },
@@ -249,7 +234,7 @@ impl Manager {
     pub(super) async fn transfer_once(
         &self,
         job: &Arc<Job>,
-        index: usize,
+        index: u64,
         cancel: &CancellationToken,
     ) -> Result<()> {
         let (url, ranged, validator, chunk) = {
@@ -300,11 +285,17 @@ impl Manager {
             self.reset_stream(job, index, &response).await?;
         }
         self.learn_checksums(job, &response).await?;
-        self.stream_chunk(job, index, response, offset, cancel)
+        let request_end = if ranged {
+            chunk.end
+        } else {
+            chunk_at(&*job.record.read().await, index)?.end
+        };
+        job.adaptive.begin_body(index, offset);
+        self.stream_chunk(job, index, response, offset, request_end, cancel)
             .await
     }
 
-    async fn reset_stream(&self, job: &Job, index: usize, response: &Response) -> Result<()> {
+    async fn reset_stream(&self, job: &Job, index: u64, response: &Response) -> Result<()> {
         validate_size(response.content_length())?;
         let _checkpoint = self.0.checkpoint.lock().await;
         let mut record = job.record.write().await;
@@ -312,6 +303,7 @@ impl Manager {
         chunk.end = response.content_length();
         chunk.written = 0;
         record.total_bytes = response.content_length();
+        job.adaptive.reset(&record, self.0.rate_limiter.limit());
         drop(record);
         self.checkpoint_locked().await?;
         fs::OpenOptions::new()
@@ -344,109 +336,258 @@ impl Manager {
         Ok(())
     }
 
-    async fn stream_chunk(
+    pub(super) async fn stream_chunk(
         &self,
         job: &Job,
-        index: usize,
+        key: u64,
         response: Response,
         offset: u64,
+        request_end: Option<u64>,
         cancel: &CancellationToken,
     ) -> Result<()> {
-        let expected = chunk_at(&*job.record.read().await, index)?
-            .end
-            .map(|end| end - offset);
+        let mut body = ChunkBody::open(self, job, key, offset, request_end).await?;
+        let result = body.receive(response, cancel).await;
+        body.account_discarded();
+        result
+    }
+}
+
+/// One response's file buffer and offsets; the HTTP request end remains fixed
+/// while the job's owned end may shrink during streaming.
+struct ChunkBody<'a> {
+    manager: &'a Manager,
+    job: &'a Job,
+    key: u64,
+    file: fs::File,
+    pending: BytesMut,
+    last_flush: Instant,
+    offset: u64,
+    request_end: Option<u64>,
+    received: u64,
+    position: u64,
+}
+
+impl<'a> ChunkBody<'a> {
+    async fn open(
+        manager: &'a Manager,
+        job: &'a Job,
+        key: u64,
+        offset: u64,
+        request_end: Option<u64>,
+    ) -> Result<Self> {
         let mut file = fs::OpenOptions::new()
             .write(true)
             .open(&job.part_path)
             .await?;
         file.seek(std::io::SeekFrom::Start(offset)).await?;
-        let mut stream = self
-            .0
-            .rate_limiter
-            .throttle(response.bytes_stream(), cancel.clone())
-            .boxed();
-        let mut pending = BytesMut::with_capacity(BUFFER_SIZE);
-        let mut last_flush = Instant::now();
-        let mut received = 0u64;
+        Ok(Self {
+            manager,
+            job,
+            key,
+            file,
+            pending: BytesMut::with_capacity(BUFFER_SIZE),
+            last_flush: Instant::now(),
+            offset,
+            request_end,
+            received: 0,
+            position: offset,
+        })
+    }
+
+    async fn receive(&mut self, response: Response, cancel: &CancellationToken) -> Result<()> {
+        // Keep the raw frame visible: throttle's private pending frame cannot be
+        // counted or charged when a shortened response is dropped.
+        let mut stream = response.bytes_stream().boxed();
         loop {
-            let next = tokio::select! { biased; _ = cancel.cancelled() => return Err(Error::Cancelled), value = stream.next() => value };
+            let next = tokio::select! { biased;
+                _ = cancel.cancelled() => return Err(Error::Cancelled),
+                value = stream.next() => value,
+            };
             match next {
-                Some(Ok(bytes)) => {
-                    received = received
-                        .checked_add(bytes.len() as u64)
-                        .ok_or_else(|| Error::Protocol("response is too large".into()))?;
-                    if expected.is_some_and(|length| received > length) {
-                        return Err(Error::Protocol("response exceeds requested length".into()));
-                    }
-                    // Bound the write buffer even when a peer sends very large frames.
-                    let mut remaining = bytes.as_ref();
-                    while !remaining.is_empty() {
-                        let size = remaining.len().min(BUFFER_SIZE - pending.len());
-                        let (piece, rest) = remaining.split_at_checked(size).ok_or_else(|| {
-                            Error::Worker("response buffer split exceeds frame length".into())
-                        })?;
-                        pending.extend_from_slice(piece);
-                        remaining = rest;
-                        if pending.len() == BUFFER_SIZE {
-                            write_pending(&mut file, job, index, &mut pending).await?;
-                            last_flush = Instant::now();
-                        }
-                    }
-                    // Keep low-bandwidth progress/checkpoints responsive without
-                    // forcing tiny disk writes on every token grant.
-                    if last_flush.elapsed() >= Duration::from_millis(250) {
-                        write_pending(&mut file, job, index, &mut pending).await?;
-                        last_flush = Instant::now();
+                Some(Ok(mut bytes)) => {
+                    self.record_frame(bytes.len())?;
+                    if self.write_frame(&mut bytes, cancel).await? {
+                        // Close upstream before flushing or charging the frame
+                        // remainder; never drain the abandoned HTTP suffix.
+                        drop(stream);
+                        return self.finish_split(bytes, cancel).await;
                     }
                 }
                 Some(Err(error)) => {
-                    write_pending(&mut file, job, index, &mut pending).await?;
-                    return Err(error);
+                    self.flush().await?;
+                    return Err(error.into());
                 }
-                None => break,
+                None => return self.finish_stream().await,
             }
         }
-        write_pending(&mut file, job, index, &mut pending).await?;
-        if expected.is_some_and(|length| received != length) {
+    }
+
+    fn record_frame(&mut self, size: usize) -> Result<()> {
+        self.received = self
+            .received
+            .checked_add(size as u64)
+            .ok_or_else(|| Error::Protocol("response is too large".into()))?;
+        if self
+            .request_end
+            .is_some_and(|end| self.received > end - self.offset)
+        {
+            return Err(Error::Protocol("response exceeds requested length".into()));
+        }
+        self.job
+            .adaptive
+            .received(self.key, self.offset + self.received);
+        Ok(())
+    }
+
+    // Returns true as soon as a shortened ownership boundary is reached.
+    async fn write_frame(&mut self, bytes: &mut Bytes, cancel: &CancellationToken) -> Result<bool> {
+        while !bytes.is_empty() {
+            let wait = tokio::time::Instant::now();
+            let grant = self
+                .manager
+                .0
+                .rate_limiter
+                .acquire(bytes.len(), cancel)
+                .await?;
+            let piece = bytes.split_to(grant);
+            let end = self.job.adaptive.end(self.key);
+            let useful = end.map_or(grant, |end| {
+                end.saturating_sub(self.position).min(grant as u64) as usize
+            });
+            self.job
+                .adaptive
+                .observe(self.key, useful as u64, wait.elapsed());
+            let useful_bytes = piece
+                .get(..useful)
+                .ok_or_else(|| Error::Worker("body slice exceeds frame length".into()))?;
+            buffer_body(
+                &mut self.file,
+                self.job,
+                self.key,
+                &mut self.pending,
+                useful_bytes,
+                &mut self.last_flush,
+            )
+            .await?;
+            self.position += useful as u64;
+            if end.is_some_and(|end| self.position == end && Some(end) != self.request_end) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    async fn finish_split(&mut self, mut bytes: Bytes, cancel: &CancellationToken) -> Result<()> {
+        self.flush().await?;
+        // Charge only bytes already fetched, keeping cancellation responsive.
+        while !bytes.is_empty() {
+            let count = self
+                .manager
+                .0
+                .rate_limiter
+                .acquire(bytes.len(), cancel)
+                .await?;
+            bytes.advance(count);
+        }
+        self.job.adaptive.resolved(self.key, cancel).await
+    }
+
+    async fn finish_stream(&mut self) -> Result<()> {
+        self.flush().await?;
+        if self
+            .request_end
+            .is_some_and(|end| self.received != end - self.offset)
+        {
             return Err(Error::Protocol("unexpected end of response body".into()));
         }
         Ok(())
     }
+
+    async fn flush(&mut self) -> Result<()> {
+        write_pending(&mut self.file, self.job, self.key, &mut self.pending).await
+    }
+
+    fn account_discarded(&self) {
+        if let Some(end) = self.job.adaptive.end(self.key)
+            && Some(end) != self.request_end
+        {
+            self.job
+                .adaptive
+                .discard((self.offset + self.received).saturating_sub(end));
+        }
+    }
+}
+
+async fn buffer_body(
+    file: &mut fs::File,
+    job: &Job,
+    key: u64,
+    pending: &mut BytesMut,
+    mut bytes: &[u8],
+    last_flush: &mut Instant,
+) -> Result<()> {
+    while !bytes.is_empty() {
+        let size = bytes.len().min(BUFFER_SIZE - pending.len());
+        let (piece, rest) = bytes
+            .split_at_checked(size)
+            .ok_or_else(|| Error::Worker("body buffer split exceeds frame length".into()))?;
+        pending.extend_from_slice(piece);
+        bytes = rest;
+        if pending.len() == BUFFER_SIZE {
+            write_pending(file, job, key, pending).await?;
+            *last_flush = Instant::now();
+        }
+    }
+    if last_flush.elapsed() >= Duration::from_millis(250) {
+        write_pending(file, job, key, pending).await?;
+        *last_flush = Instant::now();
+    }
+    Ok(())
 }
 
 pub(super) async fn write_pending(
     file: &mut fs::File,
     job: &Job,
-    index: usize,
+    key: u64,
     buffer: &mut BytesMut,
 ) -> Result<()> {
     if !buffer.is_empty() {
-        file.write_all(buffer).await?;
-        // Tokio files buffer the blocking write; flush ensures it finished before accounting.
+        // Validate the stable key BEFORE writing, including the error path.
+        chunk_at(&*job.record.read().await, key)?;
+        let size = job.adaptive.reserve(key, buffer.len())?;
+        let bytes = buffer
+            .get(..size)
+            .ok_or_else(|| Error::Worker("write reservation exceeds buffer length".into()))?;
+        file.write_all(bytes).await?;
         file.flush().await?;
-        chunk_at_mut(&mut *job.record.write().await, index)?.written += buffer.len() as u64;
+        // Keep the reservation visible through the awaited progress update.
+        chunk_at_mut(&mut *job.record.write().await, key)?.written += size as u64;
+        job.adaptive.written(key, size);
+        #[cfg(test)]
+        if job.adaptive.is_child(key) {
+            super::adaptive::tests::hook("after-child-write");
+        }
         buffer.clear();
     }
     Ok(())
 }
-
-fn chunk_at(record: &Record, index: usize) -> Result<&Chunk> {
+fn chunk_at(record: &Record, key: u64) -> Result<&Chunk> {
     record
         .chunks
-        .get(index)
-        .ok_or_else(|| missing_chunk(record.id, index))
+        .binary_search_by_key(&key, |c| c.start)
+        .ok()
+        .and_then(|i| record.chunks.get(i))
+        .ok_or_else(|| missing_chunk(key))
 }
-
-fn chunk_at_mut(record: &mut Record, index: usize) -> Result<&mut Chunk> {
-    let id = record.id;
-    record
+fn chunk_at_mut(record: &mut Record, key: u64) -> Result<&mut Chunk> {
+    let i = record
         .chunks
-        .get_mut(index)
-        .ok_or_else(|| missing_chunk(id, index))
+        .binary_search_by_key(&key, |c| c.start)
+        .map_err(|_| missing_chunk(key))?;
+    record.chunks.get_mut(i).ok_or_else(|| missing_chunk(key))
 }
-
-fn missing_chunk(id: Uuid, index: usize) -> Error {
-    Error::Worker(format!("missing chunk {index} for download {id}"))
+fn missing_chunk(key: u64) -> Error {
+    Error::Worker(format!("missing chunk at byte {key}"))
 }
 
 fn validate_size(total: Option<u64>) -> Result<()> {
@@ -573,7 +714,7 @@ mod tests {
     async fn missing_chunks_fail_workers_and_do_not_commit_progress() {
         let (_dir, manager, job) = staged_job().await;
         let cancel = CancellationToken::new();
-        for index in [1, usize::MAX] {
+        for index in [1, u64::MAX] {
             assert!(
                 matches!(manager.transfer_chunk(job.clone(), index, &cancel).await, Err(Error::Worker(message)) if message.contains("missing chunk"))
             );

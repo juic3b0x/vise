@@ -26,6 +26,7 @@ VISE_API_TOKEN = "{token}"
 [downloads]
 default_dir = "~/Downloads/Vise"
 max_concurrent = 5
+min_split_size = 1048576 # bytes per unfinished portion; 0 disables tail splitting
 global_speed_limit_kbps = 0 # restore saved cap; initially unlimited
 # cookies_file = "~/cookies.txt" # optional Netscape cookie file
 # user_agent = "CustomDownloader/1.0" # optional user agent for new tasks
@@ -69,6 +70,7 @@ impl Default for Daemon {
 pub struct Downloads {
     pub default_dir: PathBuf,
     pub max_concurrent: u16,
+    pub min_split_size: u64,
     /// KiB per second; zero restores the journal cap (initially unlimited).
     pub global_speed_limit_kbps: u64,
     pub cookies_file: Option<PathBuf>,
@@ -80,6 +82,7 @@ impl Default for Downloads {
         Self {
             default_dir: "~/Downloads/Vise".into(),
             max_concurrent: 5,
+            min_split_size: 1024 * 1024,
             global_speed_limit_kbps: 0,
             cookies_file: None,
             user_agent: None,

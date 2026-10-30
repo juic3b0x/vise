@@ -41,7 +41,7 @@ impl Manager {
             };
             record.speed = 0.0;
             normalize_chunks(&mut record);
-            (kind, record.snapshot())
+            (kind, job.adaptive.decorate(record.snapshot()))
         };
         let committed = if let Err(error) = self.checkpoint_locked().await {
             tracing::error!(%id, %error, "cannot persist download state");
@@ -53,7 +53,7 @@ impl Manager {
             if event.0 == EventKind::Completed {
                 event.0 = EventKind::Failed;
             }
-            event.1 = record.snapshot();
+            event.1 = job.adaptive.decorate(record.snapshot());
             drop(record);
             self.publish(
                 EventKind::Warning {

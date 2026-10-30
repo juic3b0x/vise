@@ -78,6 +78,7 @@ fn resolve(
         )?,
         concurrent_downloads: jobs as usize,
         connections_per_download: args.connections as usize,
+        min_split_size: args.min_split_size.unwrap_or(file.downloads.min_split_size),
         retries: args.retries,
         read_timeout: Duration::from_secs(args.timeout),
         limit_rate: (args.limit_rate.is_some() || file.downloads.global_speed_limit_kbps != 0)
@@ -203,6 +204,25 @@ mod tests {
         assert!(
             matches!(resolve(&args, &loaded(home.path()), None).unwrap().controller, Controller::WebUi(bind) if bind.to_string()=="[::1]:8282")
         );
+    }
+
+    #[test]
+    fn split_minimum_cli_overrides_toml_even_at_default_or_zero() {
+        let root = tempfile::tempdir().unwrap();
+        let mut file = loaded(root.path());
+        file.values.downloads.min_split_size = 8388608;
+        let args = Args::try_parse_from(["vise"]).unwrap();
+        assert_eq!(
+            resolve(&args, &file, None).unwrap().engine.min_split_size,
+            8388608
+        );
+        for value in ["1048576", "0"] {
+            let args = Args::try_parse_from(["vise", "--min-split-size", value]).unwrap();
+            assert_eq!(
+                resolve(&args, &file, None).unwrap().engine.min_split_size,
+                value.parse::<u64>().unwrap()
+            );
+        }
     }
 
     #[test]

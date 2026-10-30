@@ -34,3 +34,6 @@ mod web;
 
 #[path = "downloads/credentials/mod.rs"]
 mod credentials;
+
+#[path = "downloads/adaptive.rs"]
+mod adaptive;

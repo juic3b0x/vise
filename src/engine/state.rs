@@ -29,6 +29,9 @@ impl Manager {
             }
             manager.0.database.save_rate_limit(rate).await?;
             manager.0.rate_limiter.set_limit(rate);
+            for job in manager.0.jobs.read().await.values() {
+                job.adaptive.reset_speeds(rate);
+            }
             manager.publish(
                 EventKind::RateLimitChanged {
                     bytes_per_second: rate.bytes_per_second(),
@@ -59,7 +62,7 @@ impl Manager {
         let mut record = job.record.write().await;
         let from = record.status;
         record.status = to;
-        let snapshot = record.snapshot();
+        let snapshot = job.adaptive.decorate(record.snapshot());
         drop(record);
         self.checkpoint().await?;
         if from != to {

@@ -105,3 +105,7 @@ Ctrl+C shuts down the server, checkpoints workers, and drains the terminal event
 - **Streaming unavailable:** Check WebSocket proxy support. HTTP telemetry fallback continues to update the view while reconnecting.
 
 See the [REST and WebSocket reference](daemon.md#rest-api) to build another controller, or the [extension guide](extension.md) to queue links from your browser.
+
+## Adaptive chunk telemetry
+
+Chunk tiles grow as idle workers take portions of slow ranges. The array remains in byte order and tile labels reflect current boundaries. A transfer's chunk summary displays nonzero tail-split and discarded-byte counters; WebUI terminal summaries show the same values. Counters describe the current execution attempt and reset on resume/restart. Discarded bytes count only body bytes observed by Vise, including prefetched frame remainders, rather than all bytes the server may have buffered. Tune or disable the behavior through [startup options](usage.md#adaptive-range-tails); the connection limit and live global cap retain their existing controls.

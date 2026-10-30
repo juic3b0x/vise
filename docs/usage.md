@@ -27,6 +27,21 @@ vise -o ./downloads -n rust-logo.svg \
 
 `-o` selects a **directory**; `-n` selects a plain filename. Vise refuses explicit filename collisions. Automatically derived names receive numeric suffixes when necessary. URL arguments normally run until the newly scheduled queue settles; `--interactive` keeps it open.
 
+## Adaptive range tails
+
+When a worker finishes and no queued ranges remain, Vise can assign it part of the largest remaining active range. With reliable speed samples, shares reflect the donor and idle workers' throughputs; otherwise Vise halves the remainder. The configured connection count stays fixed. Known-length range support and an existing non-weak ETag or Last-Modified validator are required; unsupported or unknown-length streams stay single-stream.
+
+`--min-split-size BYTES` overrides `downloads.min_split_size` in `config.toml`, including explicit default and zero values. The default is **1048576 bytes (1 MiB)** per unfinished portion, plus a 256 KiB donor safety margin; boundaries use 64 KiB alignment. Zero disables tail splitting. This is startup tuning, not a live API setting; it does not rewrite saved ownership or credentials. Tasks have at most 1,024 chunks from adaptive splitting, and resumed layouts use the current connection budget even when they contain more chunks.
+
+```sh
+vise --connections 4 --min-split-size 1048576 --input urls.txt
+vise --min-split-size 0 --input urls.txt
+```
+
+HTTP 429/503 or a refused/reset connection suppresses further splits for 30 seconds, extended by numeric Retry-After up to 60 seconds. Already-assigned ranges retain their ownership and bounded retry policy. Existing requests are not reconnected when the global rate changes. Speed observations reset on retry, resume, and cap changes; short, stale, bursty, or limiter-dominated measurements fall back to halving.
+
+`tail_splits` and `split_discarded_bytes` are numeric per-execution counters, omitted at zero and reset on resume/restart. Discarded bytes are response-body bytes observed by Vise beyond a shortened range end, including prefetched frame remainders. They exclude bytes still hidden in HTTP/socket buffers and differ from the benchmark server's wasted-byte count. The abandoned response closes without draining its remaining range; already-fetched discarded bytes share the global token bucket.
+
 ## Input files
 
 ```sh

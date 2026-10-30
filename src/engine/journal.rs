@@ -51,28 +51,53 @@ impl Manager {
 
     // Caller holds the checkpoint mutex, including around destructive resets.
     pub(super) async fn checkpoint_locked(&self) -> Result<()> {
-        let jobs: Vec<_> = self.0.jobs.read().await.values().cloned().collect();
-        let mut downloads = Vec::with_capacity(jobs.len());
-        for job in &jobs {
-            downloads.push(job.record.read().await.clone());
-        }
-        // Capture offsets BEFORE syncing files: every saved offset refers to durable bytes.
-        let (downloads, directories) =
-            tokio::task::spawn_blocking(move || sync_partials(downloads))
-                .await
-                .map_err(|error| Error::Worker(error.to_string()))??;
-        for directory in directories {
-            // Missing removable output volumes must not block unrelated tasks.
-            match sync_directory(directory).await {
-                Err(crate::error::Error::Io(error))
-                    if error.kind() == std::io::ErrorKind::NotFound => {}
-                result => result?,
-            }
-        }
+        let downloads = self.capture_snapshots(None).await?;
+        let downloads = sync_snapshots(downloads).await?;
         self.0.database.persist(downloads).await?;
         sync_directory(super::storage::parent(self.0.database.path())?.to_path_buf()).await?;
         Ok(())
     }
+
+    pub(super) async fn capture_snapshots(
+        &self,
+        replacement: Option<Record>,
+    ) -> Result<Vec<Record>> {
+        let jobs: Vec<_> = self.0.jobs.read().await.values().cloned().collect();
+        let mut downloads = Vec::with_capacity(jobs.len());
+        for job in &jobs {
+            if job
+                .journal_blocked
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                return Err(Error::Worker(
+                    "cannot checkpoint an unresolved split transaction; reopen the engine".into(),
+                ));
+            }
+            let record = job.record.read().await;
+            downloads.push(
+                replacement
+                    .as_ref()
+                    .filter(|r| r.id == record.id)
+                    .unwrap_or(&record)
+                    .clone(),
+            );
+        }
+        Ok(downloads)
+    }
+}
+
+// Snapshot offsets must be captured before entering this durability barrier.
+pub(super) async fn sync_snapshots(downloads: Vec<Record>) -> Result<Vec<Record>> {
+    let (downloads, directories) = tokio::task::spawn_blocking(move || sync_partials(downloads))
+        .await
+        .map_err(|error| Error::Worker(error.to_string()))??;
+    for directory in directories {
+        match sync_directory(directory).await {
+            Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {}
+            result => result?,
+        }
+    }
+    Ok(downloads)
 }
 
 fn sync_partials(
