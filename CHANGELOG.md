@@ -14,6 +14,12 @@ All notable changes to Vise are documented here. The format follows [Keep a Chan
 - Developer-only reproducible benchmark harness with an independent, locked Rust HTTP fixture and Python 3.11+ standard-library runner. Compare Vise with matched/default aria2 profiles and optional single-connection curl across large-file, connection-capped, heterogeneous, small-file, delayed-response and seeded-reset scenarios without changing Vise's runtime or dependencies.
 - Mandatory output hashes, corruption self-tests, isolated homes, alternating repeated runs, JSON/Markdown reports, CPU/memory/request/connection/wasted-byte metrics, serving-tail measurements and heterogeneous connection accounting. Label smoke output non-publishable and exclude flaky recovery from throughput comparisons. Document methodology, platform limits and benchmark source isolation.
 
+### Changed
+
+- Tighten the internal Rust library surface used by the binary and tests; retain public items required by existing binary/integration callers and keep `Download.url` and `Download.split_discarded_bytes` public. Runtime behavior, serialized snapshots, dependencies, and adaptive tail splitting are unchanged. The entire Rust surface remains internal and unstable throughout 0.x, without a supported embedding API.
+- Compile the existing credential logging policy once in the library and use its shared initializer from the binary at the same startup point. Expose only `logging::init` and `logging::CredentialGuard`; preserve native/log-bridge filtering and existing logging tests. The initializer protects its own output, without extending that guarantee to independently configured host sinks.
+- Keep cookie import implementation private to `net`, with a crate-only loader re-export for engine recovery. Compile the unchanged stream-throttling helper only for its existing unit tests; production transfer throttling continues through the shared token bucket.
+
 ### Fixed
 
 - Include each available benchmark tool's resolved absolute executable path alongside its version and SHA-256 in report environment metadata; retain explicit skips for missing optional tools.

@@ -26,6 +26,69 @@ The CLI, daemon, and WebUI call the same manager rather than maintaining indepen
 
 See the [CLI and interactive reference](usage.md), [daemon REST and WebSocket reference](daemon.md#rest-api), and [WebUI guide](webui.md) for controller commands, authentication, endpoint schemas, and runnable examples.
 
+## Library and binary boundaries
+
+One package contains the library and binary targets. The entire Rust library surface is **internal and unstable throughout 0.x**, including public modules, types, fields, variants, constants, functions, methods, and trait implementations. These exports exist for Vise's binary and tests, not as a supported embedding API. Narrowing their Rust visibility does not change JSON fields or the daemon REST/WebSocket contracts.
+
+`src/lib.rs` owns the engine, shared helpers, logging policy, and the CLI/web/telemetry adapters. `src/main.rs` owns only `app`, `client`, and `startup`: argument parsing, early remote dispatch, configuration precedence, controller supervision, OS signals, and exit codes stay in the binary. Each production module belongs to one target; test builds naturally compile their own test artifacts. The independent benchmark fixture invokes no Rust library API, and its runner selects an executable path.
+
+Engine and shared data/transport modules do not import Clap, Axum, or controller types. Telemetry consumes manager snapshots and lifecycle events through an asynchronous writer, without CLI or Axum types. Axum references in `engine/adaptive/tests.rs` are contained in the parent's `cfg(test)` module and serve local fixtures only. CLI, web, and telemetry remain library adapters; this layout does not remove their dependencies from library compilation or introduce feature gates.
+
+The binary calls `vise::logging::init()` before argument parsing, at its existing startup point. That initializer retains its stderr formatter, environment-selected verbosity, default filter, and immutable credential-target guard. `CredentialGuard` handles both native targets and bridged `log.target` records without formatting secret fields. Target matching and the bridge visitor remain private. The guarantee covers the shared initializer's own output; independently configured host sinks require their own protection. `Manager::open` never initializes tracing. The two logging unit tests retain their names and assertions and run in the library test executable; the real-binary CLI/daemon sentinel scenarios are unchanged.
+
+### Visibility decisions
+
+The following table records every reduced item. Existing binary and integration-test callers were checked before narrowing; unrelated identifiers in frontend code, benchmark fixture types, or JSON do not require public Rust access.
+
+| Items | Final visibility | Library use |
+| --- | --- | --- |
+| `Checksums::{clear_result, validate, mismatch}`, `checksum::{hash_file, from_response}` | `pub(crate)` | Engine verification, recovery, and record validation |
+| `checksum::from_headers` | Private | Response digest decoding and checksum unit tests |
+| `config::{default_contents, load_from_home}` | Private | Configuration storage/loading and its unit tests |
+| `config::home_directory` | `pub(crate)` | Configuration and engine storage |
+| `input::{MAX_INPUT_BYTES, MAX_URLS, read_file}` | Private | Bounded input loading and unit tests |
+| `input::{validate_urls, parse}` | `pub(crate)` | Engine and web batch admission |
+| `net::cookies` | Private module | Cookie import implementation |
+| `cookies::{load, LoadedCookies}`, `LoadedCookies::path` | `pub(crate)`; loader re-exported as crate-only `net::load_cookies` | Default cookie-file validation in engine recovery and per-task transports |
+| `LoadedCookies::jar` | `pub(super)` | Only `net` transports need the imported jar |
+| `cookies::parse` | Private | Cookie loader and its unit tests |
+| `RequestOverrides::resolve`, `TaskRequestContext`, `TaskRequestContext::{summary, validate_urls}` | `pub(crate)` | Engine, transport, journal, and redacted snapshots |
+| `RequestSummary::{header_count, has_custom_headers}` | `pub(crate)` | Summary construction; unchanged public JSON fields |
+| `ProxyUrl::{redacted, authenticated}` | `pub(crate)` | Snapshot and formatting helpers |
+| `RateLimiter`, `RateLimiter::{new, limit, set_limit, acquire}` | `pub(crate)` | Shared production body-byte budget |
+| `RateLimiter::throttle` | `pub(crate)`, `cfg(test)` only | Existing stream-wrapper unit tests; body and signature unchanged apart from visibility |
+| `ChunkStatus::as_str` | `pub(crate)` | Journal encoding |
+| `Event::timestamp` | `pub(crate)` | Terminal telemetry; event timestamp creation unchanged |
+| `database::FILE_NAME`, `Database::path` | `pub(crate)` | Engine/journal paths |
+| `Manager::{subscribe, server_started, add_batch_with_options}` | `pub(crate)` | CLI/web adapters and engine batch admission |
+
+Retained public exports serve the following consumers. Their existing public fields, enum variants, and trait implementations remain available except for the explicit reductions above.
+
+| Public surface | Binary/test requirement |
+| --- | --- |
+| `checksum::{ExpectedChecksums, Checksums}`, `ExpectedChecksums::{new, is_empty}`, `Checksums::expected` | Argument validation, remote admission, and checksum integration assertions |
+| `config::{FileConfig, Daemon, Downloads, Proxy, LoadedConfig, load, read_existing, expand_home}` | Binary startup and read-only remote settings |
+| `engine::{Config, Manager, TransferOptions, Accepted, Rejected, BatchResult}` | Binary orchestration, remote batch DTOs, and integration fixtures |
+| `Manager::{open, add, add_with_checksums, add_with_options, add_batch, validate_request_batch, resume, retry, pause, delete, resume_all, shutdown, monitor, database_path, list, get, rate_configuration, set_rate_limit, subscribe_events, server_stopped, publish_shutdown_error}` | Existing binary or integration-test callers; `monitor` and ordered shutdown remain explicit application responsibilities |
+| `database::Database`, `Database::{open, list}` | Durable-state, recovery, bulk, adaptive, and path-security integration checks |
+| `error::{Error, Result}`, `events::{Event, EventKind}`, `model::{Download, ChunkProgress, Status, ChunkStatus}`, `Status::{as_str, active}` | Public results, owned snapshots, and event/state assertions |
+| `input::{load, MAX_BATCH_BODY_BYTES}` | Local/remote input loading and remote request bounds |
+| `net::credentials::{RequestOverrides, RequestSummary, ADMISSION_BODY_BYTES, BUILTIN_USER_AGENT}`, `RequestOverrides::{from_cli, with_user_agent_default, validate_urls, encode_admission}` | Startup, remote admission, public snapshot types, and credential integration tests |
+| `proxy::ProxyUrl`, `ProxyUrl::apply`, `rate_limiter::{RateLimit, RateConfiguration}`, `RateLimit::{UNLIMITED, from_bytes_per_second, bytes_per_second}` | Configuration field types, direct proxy integration tests, and binary/rate controls |
+| `cli::{run, stdin_is_terminal, ProgressDisplay}`, `ProgressDisplay::{messages, render, finish}` | Local controller and remote progress rendering |
+| `telemetry::{Options, run, run_with_writer}` | WebUI session orchestration and monitor credential-exclusion integration tests |
+| `web::{DaemonConfig, run, run_daemon}`, `DaemonConfig::new` | Startup validation, server orchestration, and in-process integration fixtures |
+| `logging::{init, CredentialGuard}` | Shared binary logging initialization and compile-only integration reachability checks |
+
+### Inventory corrections
+
+| Item | Original audit plan | Final decision and reason |
+| --- | --- | --- |
+| `Checksums::expected` | Narrow to `pub(crate)` | Keep `pub`: integration calls in `tests/downloads/checksums.rs` (three) and `tests/downloads/web.rs` (one) require it. Those tests are unchanged. |
+| `Download::{url, split_discarded_bytes}` | Narrow to `pub(crate)` | Keep `pub` by explicit scope decision; preserve their serialized representation. |
+| `cookies::{load, LoadedCookies}`, `LoadedCookies::path` | Restrict to `net` | Keep `pub(crate)` for the existing recovery caller, using crate-only `net::load_cookies` while `net::cookies` itself stays private. `jar` remains restricted to `net`. |
+| `RateLimiter::throttle` | Compile normally as `pub(crate)` | Compile only under `cfg(test)`: only `stream_wrapper_accounts_for_every_byte_and_preserves_content` and `stream_configuration_changes_preserve_the_pending_upstream_frame` call it. Preserve the helper and its tests without suppressing dead-code warnings. |
+
 ## Transfers and recovery
 
 
@@ -66,6 +129,8 @@ src/cli/progress.rs       Shared snapshot-only Indicatif renderer
 src/app.rs                Controller supervision, signals, ordered shutdown
 src/startup.rs            CLI/config precedence and validated startup settings
 src/lib.rs                Public library modules
+src/logging.rs            Shared library-owned credential logging policy
+src/logging/tests.rs      Native/log-bridge filter regressions
 src/config.rs             Typed persistent user preferences and home resolution
 src/config/storage.rs     Blocking, private, atomic first-run configuration creation
 src/engine.rs             Shared manager types and configuration

@@ -14,6 +14,7 @@ use tracing_subscriber::{
 #[cfg(test)]
 mod tests;
 
+/// Install Vise's stderr logger with its immutable credential-target filter.
 pub fn init() {
     tracing_subscriber::registry()
         .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| "vise=warn".into()))
@@ -37,6 +38,8 @@ fn credential_target(target: &str) -> bool {
     })
 }
 
+/// Internal filter for audited credential-bearing native and bridged targets.
+/// Independently configured output layers need their own protection.
 pub struct CredentialGuard;
 impl<S: Subscriber> Filter<S> for CredentialGuard {
     fn enabled(&self, metadata: &Metadata<'_>, _: &Context<'_, S>) -> bool {
