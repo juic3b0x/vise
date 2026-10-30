@@ -75,6 +75,7 @@ pub(super) struct ServerState {
     pub(super) version: AtomicUsize,
     pub(super) ranges: Mutex<Vec<(usize, usize)>>,
     pub(super) if_ranges: Mutex<Vec<Option<String>>>,
+    split_requested: CancellationToken,
     bodies: AtomicUsize,
     pub(super) active: AtomicUsize,
     pub(super) peak: AtomicUsize,
@@ -110,6 +111,7 @@ impl Fixture {
             version: AtomicUsize::new(0),
             ranges: Mutex::new(vec![]),
             if_ranges: Mutex::new(vec![]),
+            split_requested: CancellationToken::new(),
             bodies: AtomicUsize::new(0),
             active: AtomicUsize::new(0),
             peak: AtomicUsize::new(0),
@@ -322,6 +324,9 @@ type Frame = (std::io::Result<Bytes>, FrameState);
 
 fn transfer_body(state: Arc<ServerState>, range: TransferRange, version: usize) -> Body {
     state.ranges.lock().unwrap().push((range.start, range.end));
+    if matches!(state.mode, Mode::SplitDonorRetry) && range.start > state.data.len() * 3 / 4 {
+        state.split_requested.cancel();
+    }
     let active = state.active.fetch_add(1, Ordering::SeqCst) + 1;
     state.peak.fetch_max(active, Ordering::SeqCst);
     let truncated = matches!(state.mode, Mode::Truncated | Mode::TruncatedNoValidator)
@@ -376,11 +381,14 @@ async fn next_frame(
         6
     };
     tokio::time::sleep(Duration::from_millis(delay)).await;
+    let retry_donor = slow && pieces == 16 && matches!(guard.0.mode, Mode::SplitDonorRetry);
+    if retry_donor {
+        // Keep the original response alive until the split child actually
+        // requests its tail. Frame delays cannot guarantee worker ordering.
+        guard.0.split_requested.cancelled().await;
+    }
     if (truncated && pieces == 6)
-        || (slow
-            && pieces == 16
-            && matches!(guard.0.mode, Mode::SplitDonorRetry)
-            && guard.0.fail_once.swap(false, Ordering::SeqCst))
+        || (retry_donor && guard.0.fail_once.swap(false, Ordering::SeqCst))
     {
         return Some((
             Err(std::io::Error::new(
@@ -396,6 +404,58 @@ async fn next_frame(
         .map(|b| b.wrapping_add(version as u8))
         .collect();
     Some((Ok(Bytes::from(bytes)), (next, pieces + 1, slow, guard)))
+}
+
+#[tokio::test(start_paused = true)]
+async fn donor_retry_waits_for_a_split_request() {
+    let fixture = Fixture::start(Mode::SplitDonorRetry).await;
+    let state = &fixture.state;
+    let donor_start = state.data.len() * 3 / 4;
+    state.active.fetch_add(1, Ordering::SeqCst);
+    let mut frame = Box::pin(next_frame(
+        (
+            donor_start + 16 * 64 * 1024,
+            16,
+            true,
+            Active(state.clone()),
+        ),
+        state.data.len() - 1,
+        false,
+        0,
+    ));
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), &mut frame)
+            .await
+            .is_err(),
+        "the donor must stay open until another worker requests its split tail"
+    );
+    assert!(state.fail_once.load(Ordering::SeqCst));
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::RANGE,
+        format!(
+            "bytes={}-{}",
+            donor_start + 4 * 1024 * 1024,
+            state.data.len() - 1
+        )
+        .parse()
+        .unwrap(),
+    );
+    let child = serve(State(state.clone()), headers).await;
+    assert_eq!(child.status(), StatusCode::PARTIAL_CONTENT);
+    let (result, _) = tokio::time::timeout(Duration::from_secs(1), &mut frame)
+        .await
+        .expect("the split request must release the donor failure")
+        .unwrap();
+    assert_eq!(
+        result.unwrap_err().kind(),
+        std::io::ErrorKind::ConnectionReset
+    );
+    assert!(!state.fail_once.load(Ordering::SeqCst));
+    drop(frame);
+    drop(child);
+    fixture.close().await;
 }
 
 pub(super) async fn manager(dir: &tempfile::TempDir, connections: usize) -> Manager {
