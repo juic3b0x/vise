@@ -40,6 +40,7 @@ First startup creates `~/.vise/config.toml`, including a random persistent 64-ch
 | `downloads.global_speed_limit_kbps` | `0` restores the journal's rate; positive values use 1024 bytes per unit |
 | `downloads.cookies_file` | Unset; optional Netscape cookie-file path for new tasks |
 | `downloads.user_agent` | Unset; optional user agent for new tasks |
+| `downloads.min_split_size` | `1048576` bytes per unfinished split portion; `0` disables tail splitting; `--min-split-size` overrides it |
 | `proxy.url` | `""`; no explicit default proxy |
 
 CLI options override file settings. `--bind` replaces the full socket address; alternatively, `--host` and `--port` override individual fields. `--bind` cannot be combined with those two options. `VISE_API_TOKEN` in the environment overrides the configured token. The older `auth_token` key is an alias; configure only one token key.
@@ -191,7 +192,7 @@ Admission reuses the engine's ordinary SQLite transactions and worker semaphore.
 
 Unknown fields are rejected. The API has no cookie-file upload field: new tasks inherit the daemon's configured `downloads.cookies_file` or `--cookies` default. See [cookie sessions](architecture.md#cookie-sessions).
 
-Snapshots include `id`, `url`, `filename`, absolute `output_path` and `part_path`, `status`, `downloaded_bytes`, nullable `total_bytes`, `bytes_per_second`, nullable `eta_seconds`, nullable `error`, checksum fields, and `chunks`. Each chunk has an index, start offset, exclusive end offset (nullable for unknown length), downloaded bytes, and state. Proxy credentials and cookie paths/values are excluded from public snapshots; exposed proxy routes are redacted. Timestamps use UTC Unix epoch milliseconds.
+Snapshots include `id`, `url`, `filename`, absolute `output_path` and `part_path`, `status`, `downloaded_bytes`, nullable `total_bytes`, `bytes_per_second`, nullable `eta_seconds`, nullable `error`, checksum fields, and `chunks`. Each chunk has an index, start offset, exclusive end offset (nullable for unknown length), downloaded bytes, and state. Chunk arrays remain in byte order; adaptive insertion may change positional indices, so consumers must reconcile the current array rather than cache an index as permanent identity. Optional numeric `tail_splits` and `split_discarded_bytes` default to zero when absent, are omitted at zero, and reset on resume/restart. The latter counts application-observed abandoned body bytes, not hidden server/socket buffering. No admission fields or live configuration endpoints change. Proxy credentials and cookie paths/values are excluded from public snapshots; exposed proxy routes are redacted. Timestamps use UTC Unix epoch milliseconds.
 
 Download states are `queued`, `probing`, `downloading`, `verifying`, `paused`, `completed`, `failed`, and `corrupt`. A complete byte count is not proof of successful verification/publication. Treat `completed` as the final success state.
 

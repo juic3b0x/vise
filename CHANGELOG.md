@@ -6,6 +6,10 @@ All notable changes to Vise are documented here. The format follows [Keep a Chan
 
 ### Added
 
+- Adaptive HTTP range tail splitting: idle workers steal throughput-weighted portions of unfinished ranges, with conservative halving when observations are unreliable. Preserve validators, proxy/credential transport, shared rate limiting, bounded retries, checksum publication, and atomic SQLite range ownership without a schema migration.
+- `--min-split-size BYTES` and `downloads.min_split_size` (default 1048576; zero disables splitting), a 1,024-chunk task cap, 30–60 second refusal cooldown, and additive per-attempt `tail_splits` / `split_discarded_bytes` telemetry in snapshots, dashboard, and WebUI terminal output.
+- Exhaustive/seeded split tests, process-death recovery barriers, heterogeneous fixture and credential/proxy regressions, and a deterministic developer simulation comparing fixed quarters, halving, weighted tails, and initial 1 MiB pieces.
+
 - Embed the build commit and committer date in `vise --version` and `-V`, with a dirty marker scoped to build inputs. Support compile-time packager overrides, worktrees, detached HEAD and shallow clones using only std and Git; retain a package-version-only fallback when Git metadata is unavailable. Version output requires no runtime Git access and preserves the `vise X.Y.Z` prefix.
 - Developer-only reproducible benchmark harness with an independent, locked Rust HTTP fixture and Python 3.11+ standard-library runner. Compare Vise with matched/default aria2 profiles and optional single-connection curl across large-file, connection-capped, heterogeneous, small-file, delayed-response and seeded-reset scenarios without changing Vise's runtime or dependencies.
 - Mandatory output hashes, corruption self-tests, isolated homes, alternating repeated runs, JSON/Markdown reports, CPU/memory/request/connection/wasted-byte metrics, serving-tail measurements and heterogeneous connection accounting. Label smoke output non-publishable and exclude flaky recovery from throughput comparisons. Document methodology, platform limits and benchmark source isolation.

@@ -148,6 +148,8 @@ impl Record {
     pub fn snapshot(&self) -> Download {
         let downloaded = self.downloaded();
         Download {
+            tail_splits: 0,
+            split_discarded_bytes: 0,
             id: self.id,
             url: self.url.clone(),
             filename: self.filename.clone(),
@@ -199,6 +201,12 @@ impl Record {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Download {
+    /// Splits committed in this execution attempt; resets on resume/restart.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub tail_splits: u64,
+    /// Application-observed body bytes discarded beyond a revised boundary.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub split_discarded_bytes: u64,
     #[serde(default, flatten)]
     pub request: crate::net::credentials::RequestSummary,
     pub id: Uuid,
@@ -245,3 +253,7 @@ pub(crate) struct LegacyJournal {
 
 #[cfg(test)]
 mod tests;
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}

@@ -137,3 +137,16 @@ fn expands_only_the_home_path_component() {
     assert_eq!(expand_home(home.path(), home.path()).unwrap(), home.path());
     assert!(expand_home(Path::new(""), home.path()).is_err());
 }
+
+#[tokio::test]
+async fn split_minimum_defaults_and_explicit_zero_are_loaded() {
+    for (contents, expected) in [
+        ("", 1048576),
+        ("[downloads]\nmin_split_size = 0\n", 0),
+        ("[downloads]\nmin_split_size = 65536\n", 65536),
+    ] {
+        let (_home, loaded, saved) = read_existing(contents).await;
+        assert_eq!(loaded.unwrap().values.downloads.min_split_size, expected);
+        assert_eq!(saved, contents);
+    }
+}

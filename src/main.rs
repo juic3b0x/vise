@@ -48,6 +48,9 @@ struct Args {
     /// Maximum parallel connections per download
     #[arg(short = 'c', long, default_value_t = 8, value_parser = clap::value_parser!(u16).range(1..=64))]
     connections: u16,
+    /// Minimum bytes per unfinished split portion; 0 disables tail splitting
+    #[arg(long, value_name = "BYTES")]
+    min_split_size: Option<u64>,
     /// Retries after the initial attempt, per segment
     #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u32).range(0..=20))]
     retries: u32,

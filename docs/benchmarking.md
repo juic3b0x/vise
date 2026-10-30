@@ -141,3 +141,27 @@ The fixture declares an empty `[workspace]` and its own tracked lockfile. Root C
 Only generated output is ignored: root `target/`, `benchmarks/fixture/target/`, `__pycache__/` and `*.pyc`. Benchmark sources, tests, scenario defaults and fixture `Cargo.lock` are tracked. No workflows or security settings are changed. CodeQL default setup is allowed to scan the fixture on the PR; its scan time and alerts cannot be established locally. The root Rust Doctor command remains the one in [AGENTS.md](https://github.com/juic3b0x/vise/blob/main/AGENTS.md).
 
 See [architecture](architecture.md) for why Vise journals and safely publishes files, and [usage](usage.md) for its production connection and retry controls.
+
+## Adaptive tail policy comparison
+
+Run the deterministic, standard-library-only model from the repository root:
+
+```sh
+python -B benchmarks/tail_simulation.py
+python -B -m unittest benchmarks.tests.test_tail_simulation -v
+```
+
+The model uses exactly 512 MiB, four equal initial quarters, three 8 MiB/s workers and one 0.8 MiB/s worker, plus a uniform four-by-8 MiB/s case. It assumes fixed worker capacities, 1 ms per-response setup, a 1 MiB minimum, 256 KiB donor margin, 64 KiB alignment, and **64 KiB duplicate overrun per shortened response**. Several splits of one response still close it once. It excludes journal, disk, hashing, startup and publication costs, TCP reassignment, and actual socket buffering. This is a policy model, not a measured speed claim.
+
+| Policy | Heterogeneous finish / first-drop tail | Splits / body requests | Modeled duplicates | Uniform finish |
+| --- | --- | --- | --- | --- |
+| Fixed quarters | 160.001 / 144.000 s | 0 / 4 | 0 | 16.001 s |
+| Halving largest remainder | 22.189 / 6.188 s | 7 / 11 | 128 KiB | 16.001 s |
+| Throughput-weighted tails | 20.782 / 4.781 s | 3 / 7 | 64 KiB | 16.001 s |
+| Initial 1 MiB pieces | 21.267 / 21.141 s | 0 / 512 | 0 | 16.128 s |
+
+Weighted allocations include all simultaneously idle capacities. Their average modeled duplication is 21.3 KiB per split (64 KiB per closed shortened response), versus 18.3 KiB for halving. These averages are not enforceable network waste bounds. Increasing the assumed overrun to 256 KiB gives weighted finish/tail 21.017/5.016 s approximately; 1 MiB gives 21.954/5.953 s. A response-delay sensitivity of 80 ms yields weighted heterogeneous finish 20.861 s, whereas initial 1 MiB pieces need 33.415 s and uniform pieces need 26.240 s. Frequent request gaps start the first-drop tail early even when serving occupancy later recovers.
+
+For a change comparison, preserve an optimized baseline binary and use `--vise PATH` with separate fresh output directories, the same fixture, seed 424242, connections 4, jobs 5, and profiles. Smoke remains correctness/harness validation only; do not draw performance conclusions from it. On real hardware, retain warm-ups and six measured full runs. The reference targets are heterogeneous median wall time within about 20% of aria2's 25.6 s (30.72 s), tail under 10 s, no consistent regression beyond baseline spread in large/capped/small/latency, and a 320 KiB server-measured waste target. Inspect actual slow-connection count/share. Flaky remains a correctness/recovery comparison, excluded from throughput ranking.
+
+Use `--min-split-size 0` for manual fixed-layout controls. Runtime `split_discarded_bytes` observes only bytes fetched by the client and is not interchangeable with server accepted bytes minus the verified file length. The real hardware run must establish waste and performance; neither the model nor an 8 MiB smoke run can establish them.

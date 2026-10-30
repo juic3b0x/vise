@@ -1,4 +1,4 @@
-use super::fixture::{Fixture, Mode, manager, progress, terminal};
+use super::fixture::{DownloadCase, Fixture, Mode, manager, progress, terminal};
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use vise::engine::Config;
@@ -7,26 +7,16 @@ use vise::model::Status;
 
 #[tokio::test]
 async fn parallel_ranges_are_bounded_and_byte_exact() {
-    let fixture = Fixture::start(Mode::Ranges).await;
-    let dir = tempfile::tempdir().unwrap();
-    let manager = manager(&dir, 4).await;
-    let first = manager.add(&fixture.url, None).await.unwrap();
-    let second = manager.add(&fixture.url, None).await.unwrap();
+    let case = DownloadCase::start(Mode::Ranges, 4).await;
+    let first = case.add().await;
+    let second = case.add().await;
     assert_ne!(first.filename, second.filename);
     for id in [first.id, second.id] {
-        let item = terminal(&manager, id).await;
-        assert_eq!(item.status, Status::Completed, "{:?}", item.error);
-        assert_eq!(
-            tokio::fs::read(dir.path().join(item.filename))
-                .await
-                .unwrap(),
-            fixture.state.data
-        );
+        case.assert_complete_bytes(id).await;
     }
-    assert!(fixture.state.peak.load(Ordering::SeqCst) > 1);
-    assert!(fixture.state.peak.load(Ordering::SeqCst) <= 4);
-    manager.shutdown().await.unwrap();
-    fixture.close().await;
+    assert!(case.fixture.state.peak.load(Ordering::SeqCst) > 1);
+    assert!(case.fixture.state.peak.load(Ordering::SeqCst) <= 4);
+    case.close().await;
 }
 
 #[tokio::test]
@@ -59,20 +49,11 @@ async fn changed_validator_restarts_instead_of_splicing_versions() {
 
 #[tokio::test]
 async fn retries_dropped_ranges_from_written_offset() {
-    let fixture = Fixture::start(Mode::Truncated).await;
-    let dir = tempfile::tempdir().unwrap();
-    let manager = manager(&dir, 1).await;
-    let item = manager.add(&fixture.url, None).await.unwrap();
-    let done = terminal(&manager, item.id).await;
-    assert_eq!(done.status, Status::Completed, "{:?}", done.error);
-    assert_eq!(
-        tokio::fs::read(dir.path().join(done.filename))
-            .await
-            .unwrap(),
-        fixture.state.data
-    );
+    let case = DownloadCase::start(Mode::Truncated, 1).await;
+    let item = case.add().await;
+    case.assert_complete_bytes(item.id).await;
     assert!(
-        fixture
+        case.fixture
             .state
             .ranges
             .lock()
@@ -80,8 +61,7 @@ async fn retries_dropped_ranges_from_written_offset() {
             .iter()
             .any(|(start, _)| *start > 0)
     );
-    manager.shutdown().await.unwrap();
-    fixture.close().await;
+    case.close().await;
 }
 
 #[tokio::test]
@@ -192,6 +172,7 @@ async fn stalled_reads_exhaust_a_bounded_retry_budget() {
         home_dir: Some(dir.path().join("test-home")),
         concurrent_downloads: 1,
         connections_per_download: 1,
+        min_split_size: 1024 * 1024,
         retries: 1,
         read_timeout: Duration::from_millis(100),
         limit_rate: None,

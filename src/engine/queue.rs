@@ -181,6 +181,10 @@ impl Manager {
             *job.record.write().await = previous;
             return Err(error);
         }
+        // A new execution attempt starts here, even if its probe or cookie
+        // refresh subsequently fails before a fresh layout is prepared.
+        job.adaptive
+            .reset(&*job.record.read().await, self.0.rate_limiter.limit());
         self.publish_job(action, &job).await;
         self.0.scheduled.write().await.insert(id);
         let cancel = CancellationToken::new();
@@ -253,7 +257,7 @@ impl Manager {
             run.cancel.cancel();
             run.handle.await.map_err(|e| Error::Worker(e.to_string()))?;
         }
-        let snapshot = job.record.read().await.snapshot();
+        let snapshot = job.adaptive.decorate(job.record.read().await.snapshot());
         let record = job.record.read().await.clone();
         let staging = tokio::task::spawn_blocking(move || paths::staging_files(&record))
             .await

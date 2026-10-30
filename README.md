@@ -12,7 +12,7 @@ Vise is a high-performance HTTP(S) download manager built in Rust. Multi-threade
 
 ## Features
 
-- **Parallel transfers:** Split eligible files into chunks and download them concurrently, with configurable connection and queue limits.
+- **Parallel transfers:** Download eligible ranges concurrently and redistribute slow tails to idle workers, with configurable connection and queue limits. Tune `--min-split-size BYTES` (default 1048576; `0` disables tail splitting), or set `downloads.min_split_size` in TOML.
 - **Clear progress:** Track downloaded bytes, percentage, transfer speed, and ETA in the terminal.
 - **SQLite crash recovery:** Control individual tasks and restore saved chunk offsets from an embedded transactional journal after restarting.
 - **Resilient downloads:** Retry dropped connections and transient HTTP failures with bounded backoff.

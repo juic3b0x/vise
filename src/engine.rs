@@ -22,6 +22,7 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+mod adaptive;
 mod batch;
 pub use batch::{Accepted, BatchResult, Rejected};
 
@@ -43,6 +44,8 @@ pub struct Config {
     pub output_dir: PathBuf,
     pub concurrent_downloads: usize,
     pub connections_per_download: usize,
+    /// Minimum unfinished bytes per half; zero disables tail splitting.
+    pub min_split_size: u64,
     pub retries: u32,
     pub read_timeout: Duration,
     /// None restores the saved setting; Some(UNLIMITED) explicitly disables it.
@@ -61,6 +64,7 @@ impl Default for Config {
             output_dir: "downloads".into(),
             concurrent_downloads: 3,
             connections_per_download: 8,
+            min_split_size: 1024 * 1024,
             retries: 5,
             read_timeout: Duration::from_secs(30),
             limit_rate: None,
@@ -85,15 +89,21 @@ struct Job {
     control: Mutex<()>,
     run: Mutex<Option<Run>>,
     removed: AtomicBool,
+    adaptive: adaptive::Adaptive,
+    journal_blocked: AtomicBool,
 }
 impl Job {
     async fn snapshot(&self) -> crate::model::Download {
         let _settled = self.settlement.read().await;
-        self.record.read().await.snapshot()
+        self.adaptive.decorate(self.record.read().await.snapshot())
     }
 
     fn new(record: Record, client: impl Into<Transport>) -> Self {
+        let adaptive = adaptive::Adaptive::default();
+        adaptive.reset(&record, RateLimit::UNLIMITED);
         Self {
+            adaptive,
+            journal_blocked: AtomicBool::new(false),
             output_path: record.output_path.clone(),
             part_path: record.part_path.clone(),
             record: RwLock::new(record),

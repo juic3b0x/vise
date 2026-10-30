@@ -121,3 +121,22 @@ test('dashboard renders flattened API request summaries without exposing values 
   const sinks = JSON.stringify([summary.textContent, [...rendered.selectors.values()].map(node => node.textContent), app.logs, app.storage, app.get('activity')]);
   for (const sentinel of sentinels) assert.ok(!sinks.includes(sentinel));
 });
+
+test('dashboard handles inserted chunks and additive tail counters', async () => {
+  const app = dashboard(); await new Promise(setImmediate);
+  const task = JSON.parse(fs.readFileSync(new URL('./fixtures/public-download.json', import.meta.url), 'utf8'));
+  app.Socket.last.onmessage({data: JSON.stringify({...app.snapshot, downloads: [task]})}); app.flush();
+  const card = app.get('downloads').children[0];
+  const grid = card.querySelector('.chunk-grid');
+  assert.equal(grid.children.length, 1);
+  task.tail_splits = 1; task.split_discarded_bytes = 65536;
+  task.chunks = [
+    {...task.chunks[0], end_byte: 512},
+    {...task.chunks[0], index: 1, start_byte: 512, end_byte: 1024, downloaded_bytes: 0},
+  ];
+  app.Socket.last.onmessage({data: JSON.stringify({...app.snapshot, downloads: [task]})}); app.flush();
+  assert.equal(grid.children.length, 2);
+  assert.match(card.querySelector('.chunk-summary').textContent, /1 tail split/);
+  assert.match(card.querySelector('.chunk-summary').textContent, /64.0 KiB discarded/);
+  assert.equal(app.logs.length, 0);
+});

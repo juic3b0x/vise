@@ -192,6 +192,12 @@ impl Database {
             if state.saved == records {
                 return Ok(());
             }
+            #[cfg(test)]
+            let _split_hook = SplitHookGuard::new(records.iter().any(|(id, next)| {
+                state.saved.get(id).is_some_and(|old| {
+                    !old.chunks.is_empty() && next.chunks.len() > old.chunks.len()
+                })
+            }));
             let transaction = state
                 .connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -204,6 +210,8 @@ impl Database {
                     .values()
                     .filter(|record| state.saved.get(&record.id) != Some(record)),
             )?;
+            #[cfg(test)]
+            split_test_hook("before-sql-commit");
             transaction.commit()?;
             state.saved = records;
             Ok(())
@@ -299,6 +307,8 @@ fn write_rows<'a>(
             params![id, sql_number(record.chunks.len() as u64)?],
         )?;
         for (index, segment) in record.chunks.iter().enumerate() {
+            #[cfg(test)]
+            let old: Option<(i64, Option<i64>)> = transaction.query_row("SELECT start_byte,end_byte FROM chunks WHERE download_id=?1 AND chunk_index=?2", params![id, index as i64], |row| Ok((row.get(0)?, row.get(1)?))).optional()?;
             chunk.execute(params![
                 id,
                 sql_number(index as u64)?,
@@ -307,8 +317,16 @@ fn write_rows<'a>(
                 sql_number(segment.written)?,
                 segment.status.as_str()
             ])?;
+            #[cfg(test)]
+            if old.is_some_and(|(start, end)| {
+                start == segment.start as i64 && end > segment.end.map(|v| v as i64)
+            }) {
+                split_test_hook("after-sql-donor");
+            }
         }
     }
+    #[cfg(test)]
+    split_test_hook("after-sql-layout");
     Ok(())
 }
 
@@ -827,3 +845,39 @@ mod tests {
 
 #[cfg(test)]
 mod credentials_tests;
+
+// These process-death barriers exist only in the unit-test executable. Never
+// expose crash injection through a shipped CLI, feature flag, or production env.
+#[cfg(test)]
+static SPLIT_HOOK_ARMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+#[cfg(test)]
+struct SplitHookGuard;
+#[cfg(test)]
+impl SplitHookGuard {
+    fn new(armed: bool) -> Self {
+        SPLIT_HOOK_ARMED.store(armed, std::sync::atomic::Ordering::SeqCst);
+        Self
+    }
+}
+#[cfg(test)]
+impl Drop for SplitHookGuard {
+    fn drop(&mut self) {
+        SPLIT_HOOK_ARMED.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+#[cfg(test)]
+pub(crate) fn split_test_hook(phase: &str) {
+    if phase.contains("sql") && !SPLIT_HOOK_ARMED.load(std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    if std::env::var("VISE_TEST_SPLIT_PHASE").as_deref() != Ok(phase) {
+        return;
+    }
+    use std::io::Write;
+    let mut socket =
+        std::net::TcpStream::connect(std::env::var("VISE_TEST_SPLIT_ACK").unwrap()).unwrap();
+    socket.write_all(phase.as_bytes()).unwrap();
+    loop {
+        std::thread::park();
+    }
+}

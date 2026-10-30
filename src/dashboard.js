@@ -236,7 +236,8 @@ import {parseUrls, readUrlFile, requestFields, clearRequestFields, requestSummar
   }
   function updateChunks(c, d) {
     const complete = d.chunks.filter(chunk => chunk.status === 'completed').length;
-    text(c.summary, d.chunks.length ? `Chunks · ${complete} of ${d.chunks.length} complete` : 'Chunks · Checking source');
+    const tail = Number.isSafeInteger(d.tail_splits) && d.tail_splits > 0 ? ` · ${d.tail_splits} tail split${d.tail_splits === 1 ? '' : 's'} · ${bytes(d.split_discarded_bytes || 0)} discarded` : '';
+    text(c.summary, d.chunks.length ? `Chunks · ${complete} of ${d.chunks.length} complete${tail}` : 'Chunks · Checking source');
     if (!d.chunks.length) {
       if (!c.grid.querySelector('.chunk-waiting')) {
         const waiting = document.createElement('span'); waiting.className = 'chunk-waiting';

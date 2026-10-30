@@ -22,7 +22,7 @@ use uuid::Uuid;
 use vise::{
     checksum::ExpectedChecksums,
     engine::{Config, Manager},
-    model::Status,
+    model::{Download, Status},
 };
 
 /// Child binaries must never create or read the developer's real home config.
@@ -40,6 +40,12 @@ pub(super) fn command(root: &std::path::Path) -> std::process::Command {
 #[derive(Clone, Copy)]
 pub(super) enum Mode {
     Ranges,
+    Heterogeneous,
+    SplitValidator,
+    Split429,
+    Split503,
+    SplitRefused,
+    SplitDonorRetry,
     IgnoreRanges,
     UnknownLength,
     BadRange,
@@ -68,6 +74,8 @@ pub(super) struct ServerState {
     pub(super) fail_once: AtomicBool,
     pub(super) version: AtomicUsize,
     pub(super) ranges: Mutex<Vec<(usize, usize)>>,
+    pub(super) if_ranges: Mutex<Vec<Option<String>>>,
+    bodies: AtomicUsize,
     pub(super) active: AtomicUsize,
     pub(super) peak: AtomicUsize,
     pub(super) proxy_auth_leaked: AtomicBool,
@@ -82,13 +90,27 @@ impl Drop for Active {
 impl Fixture {
     pub(super) async fn start(mode: Mode) -> Self {
         let state = Arc::new(ServerState {
-            data: (0..8 * 1024 * 1024 + 137)
+            data: (0..if matches!(
+                mode,
+                Mode::Heterogeneous
+                    | Mode::SplitValidator
+                    | Mode::Split429
+                    | Mode::Split503
+                    | Mode::SplitRefused
+                    | Mode::SplitDonorRetry
+            ) {
+                32 * 1024 * 1024
+            } else {
+                8 * 1024 * 1024 + 137
+            })
                 .map(|i| (i % 251) as u8)
                 .collect(),
             mode,
             fail_once: AtomicBool::new(true),
             version: AtomicUsize::new(0),
             ranges: Mutex::new(vec![]),
+            if_ranges: Mutex::new(vec![]),
+            bodies: AtomicUsize::new(0),
             active: AtomicUsize::new(0),
             peak: AtomicUsize::new(0),
             proxy_auth_leaked: AtomicBool::new(false),
@@ -138,6 +160,36 @@ pub(super) async fn serve(State(state): State<Arc<ServerState>>, headers: Header
             .header(header::RETRY_AFTER, "1")
             .body(Body::empty())
             .unwrap();
+    }
+    if !range.probe {
+        state.if_ranges.lock().unwrap().push(
+            headers
+                .get(header::IF_RANGE)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned),
+        );
+        let body = state.bodies.fetch_add(1, Ordering::SeqCst);
+        if body >= 4 && matches!(state.mode, Mode::SplitValidator) {
+            return Response::builder()
+                .status(200)
+                .header(header::ETAG, "\"version-1\"")
+                .body(Body::empty())
+                .unwrap();
+        }
+        if body >= 4
+            && matches!(state.mode, Mode::Split429 | Mode::Split503)
+            && state.fail_once.swap(false, Ordering::SeqCst)
+        {
+            return Response::builder()
+                .status(if matches!(state.mode, Mode::Split429) {
+                    429
+                } else {
+                    503
+                })
+                .header(header::RETRY_AFTER, "1")
+                .body(Body::empty())
+                .unwrap();
+        }
     }
     let version = state.version.load(Ordering::SeqCst);
     let builder = response_headers(&state, &range, version);
@@ -265,7 +317,7 @@ fn digest_headers(
     builder
 }
 
-type FrameState = (usize, usize, Active);
+type FrameState = (usize, usize, bool, Active);
 type Frame = (std::io::Result<Bytes>, FrameState);
 
 fn transfer_body(state: Arc<ServerState>, range: TransferRange, version: usize) -> Body {
@@ -274,15 +326,29 @@ fn transfer_body(state: Arc<ServerState>, range: TransferRange, version: usize) 
     state.peak.fetch_max(active, Ordering::SeqCst);
     let truncated = matches!(state.mode, Mode::Truncated | Mode::TruncatedNoValidator)
         && state.fail_once.swap(false, Ordering::SeqCst);
+    let slow = range.start == state.data.len() * 3 / 4
+        && matches!(
+            state.mode,
+            Mode::Heterogeneous
+                | Mode::SplitValidator
+                | Mode::Split429
+                | Mode::Split503
+                | Mode::SplitRefused
+                | Mode::SplitDonorRetry
+        );
+    let refused = range.start > state.data.len() * 3 / 4
+        && matches!(state.mode, Mode::SplitRefused)
+        && state.fail_once.swap(false, Ordering::SeqCst);
+    let truncated = truncated || refused;
     let guard = Active(state);
-    let stream = futures_util::stream::unfold((range.start, 0, guard), move |state| {
+    let stream = futures_util::stream::unfold((range.start, 0, slow, guard), move |state| {
         next_frame(state, range.end, truncated, version)
     });
     Body::from_stream(stream)
 }
 
 async fn next_frame(
-    (offset, pieces, guard): FrameState,
+    (offset, pieces, slow, guard): FrameState,
     end: usize,
     truncated: bool,
     version: usize,
@@ -293,19 +359,35 @@ async fn next_frame(
     if matches!(guard.0.mode, Mode::Stalled) {
         tokio::time::sleep(Duration::from_secs(5)).await;
     }
-    let delay = if matches!(guard.0.mode, Mode::SlowRanges) {
+    let delay = if slow {
+        200
+    } else if matches!(
+        guard.0.mode,
+        Mode::Heterogeneous
+            | Mode::SplitValidator
+            | Mode::Split429
+            | Mode::Split503
+            | Mode::SplitRefused
+            | Mode::SplitDonorRetry
+            | Mode::SlowRanges
+    ) {
         20
     } else {
         6
     };
     tokio::time::sleep(Duration::from_millis(delay)).await;
-    if truncated && pieces == 6 {
+    if (truncated && pieces == 6)
+        || (slow
+            && pieces == 16
+            && matches!(guard.0.mode, Mode::SplitDonorRetry)
+            && guard.0.fail_once.swap(false, Ordering::SeqCst))
+    {
         return Some((
             Err(std::io::Error::new(
                 std::io::ErrorKind::ConnectionReset,
                 "intentional drop",
             )),
-            (end + 1, pieces, guard),
+            (end + 1, pieces, slow, guard),
         ));
     }
     let next = (offset + 64 * 1024).min(end + 1);
@@ -313,7 +395,7 @@ async fn next_frame(
         .iter()
         .map(|b| b.wrapping_add(version as u8))
         .collect();
-    Some((Ok(Bytes::from(bytes)), (next, pieces + 1, guard)))
+    Some((Ok(Bytes::from(bytes)), (next, pieces + 1, slow, guard)))
 }
 
 pub(super) async fn manager(dir: &tempfile::TempDir, connections: usize) -> Manager {
@@ -328,6 +410,64 @@ pub(super) async fn manager(dir: &tempfile::TempDir, connections: usize) -> Mana
     .await
     .unwrap()
 }
+
+/// Own the isolated resources shared by ordinary download scenarios, leaving
+/// each test responsible for its admissions and scenario-specific assertions.
+pub(super) struct DownloadCase {
+    pub(super) fixture: Fixture,
+    pub(super) manager: Manager,
+    directory: tempfile::TempDir,
+}
+
+impl DownloadCase {
+    pub(super) async fn start(mode: Mode, connections: usize) -> Self {
+        let fixture = Fixture::start(mode).await;
+        let directory = tempfile::tempdir().unwrap();
+        let manager = manager(&directory, connections).await;
+        Self {
+            fixture,
+            manager,
+            directory,
+        }
+    }
+
+    pub(super) async fn add(&self) -> Download {
+        self.manager.add(&self.fixture.url, None).await.unwrap()
+    }
+
+    pub(super) async fn wait(&self, id: Uuid) -> Download {
+        terminal(&self.manager, id).await
+    }
+
+    pub(super) async fn assert_complete_bytes(&self, id: Uuid) {
+        let item = self.wait(id).await;
+        assert_eq!(item.status, Status::Completed, "{:?}", item.error);
+        assert_eq!(
+            tokio::fs::read(self.directory.path().join(item.filename))
+                .await
+                .unwrap(),
+            self.fixture.state.data
+        );
+    }
+
+    pub(super) async fn close(self) {
+        self.manager.shutdown().await.unwrap();
+        self.fixture.close().await;
+    }
+}
+
+/// Stop a wrapping server before its backing origin so teardown cannot outlive
+/// either fixture. Cookie and credential capture fixtures share this ordering.
+pub(super) async fn close_fixture_server(
+    stop: CancellationToken,
+    server: tokio::task::JoinHandle<()>,
+    origin: Fixture,
+) {
+    stop.cancel();
+    server.await.unwrap();
+    origin.close().await;
+}
+
 pub(super) async fn terminal(manager: &Manager, id: Uuid) -> vise::model::Download {
     tokio::time::timeout(Duration::from_secs(15), async {
         loop {
