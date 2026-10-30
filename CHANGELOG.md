@@ -4,6 +4,8 @@ All notable changes to Vise are documented here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-30
+
 ### Added
 
 - Adaptive HTTP range tail splitting: idle workers steal throughput-weighted portions of unfinished ranges, with conservative halving when observations are unreliable. Preserve validators, proxy/credential transport, shared rate limiting, bounded retries, checksum publication, and atomic SQLite range ownership without a schema migration.
@@ -22,6 +24,8 @@ All notable changes to Vise are documented here. The format follows [Keep a Chan
 
 ### Fixed
 
+- Read the complete split-phase acknowledgment before killing the crash-test child, avoiding socket-reset races; cover incomplete and incorrect acknowledgments.
+- Synchronize the donor-retry fixture with the split child’s actual range request instead of relying on frame timing, with a virtual-clock regression.
 - Include each available benchmark tool's resolved absolute executable path alongside its version and SHA-256 in report environment metadata; retain explicit skips for missing optional tools.
 
 ## [0.7.0] - 2026-10-28
@@ -238,6 +242,7 @@ Initial release.
 - **Local WebUI safeguards:** Loopback-only binding, host and browser-origin validation, JSON-only mutations, and a Content Security Policy constrain browser access.
 - **Safe publication:** Existing output files are never overwritten, and configured checksum verification must succeed before final publication. SHA-256 from a trusted source is preferred for security-sensitive verification; MD5 supports legacy compatibility and accidental-corruption detection.
 
+[0.8.0]: https://github.com/juic3b0x/vise/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/juic3b0x/vise/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/juic3b0x/vise/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/juic3b0x/vise/compare/v0.5.0...v0.5.1
@@ -252,4 +257,4 @@ Initial release.
 [0.1.1]: https://github.com/juic3b0x/vise/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/juic3b0x/vise/releases/tag/v0.1.0
 
-[Unreleased]: https://github.com/juic3b0x/vise/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/juic3b0x/vise/compare/v0.8.0...HEAD

@@ -1,6 +1,6 @@
 # Vise browser extension
 
-Version **0.3.0**, bundled with Vise **0.7.0**. Use the matching daemon for the request-credential API.
+Version **0.3.0**, bundled with Vise **0.8.0**. Use the matching daemon for the request-credential API.
 
 Right-click an HTTP(S) link and select **Send to Vise** to queue it in your local download manager. Clicking the toolbar icon opens settings. There is no automatic download interception, page scraping, analytics, or third-party service.
 

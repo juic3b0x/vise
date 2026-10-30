@@ -2,7 +2,7 @@
 
 Return to the [README](README.md) for features and usage, or continue to the [quick start](README.md#quick-start) after installation.
 
-This checkout contains **Vise 0.7.0** and **extension 0.3.0**. The commands below use a local checkout or GitHub’s default branch; they do not assume that the new tag has been published.
+This checkout contains **Vise 0.8.0** and **extension 0.3.0**. The commands below use a local checkout or GitHub’s default branch; they do not assume that the new tag has been published.
 
 ## System requirements
 
@@ -35,7 +35,7 @@ By default, Cargo places the executable in `~/.cargo/bin/` (`%USERPROFILE%\.carg
 
 ## Verify installation
 
-For the prepared release, version output starts with `vise 0.7.0` and includes build provenance when available; `vise --help` lists the per-task request flags. Confirm the installation:
+For the prepared release, version output starts with `vise 0.8.0` and includes build provenance when available; `vise --help` lists the per-task request flags. Confirm the installation:
 
 ```sh
 vise --version
@@ -47,13 +47,13 @@ vise --help
 `--version` and `-V` produce the same line:
 
 ```text
-vise 0.7.0 (a1b2c3d 2026-10-28)
-vise 0.7.0 (a1b2c3d-dirty 2026-10-28)
+vise 0.8.0 (a1b2c3d 2026-10-28)
+vise 0.8.0 (a1b2c3d-dirty 2026-10-28)
 ```
 
 These are examples: the seven lowercase hexadecimal characters identify the commit actually built. The date is that commit's **committer date**, using its stored timezone, never the build time. Dirty means staged, unstaged, or untracked non-ignored changes within `src/`, `Cargo.toml`, `Cargo.lock`, `build.rs`, or `build_support.rs`. Editing docs, benchmarks, or extension files alone neither marks the build dirty nor reruns the build script; a new commit still refreshes the embedded commit ID.
 
-The information is embedded at compile time. Running the installed binary needs no Git checkout or Git executable and creates no local state. Builds without Git, without a checkout rooted at the package directory, or with failed Git discovery fall back to `vise 0.7.0`. This includes source archives and container builds that do not copy Git metadata. Detached HEAD and shallow checkouts retain the checked-out commit and its date, including ordinary tagged CI builds. Git ownership/safe-directory failures also fall back safely.
+The information is embedded at compile time. Running the installed binary needs no Git checkout or Git executable and creates no local state. Builds without Git, without a checkout rooted at the package directory, or with failed Git discovery fall back to `vise 0.8.0`. This includes source archives and container builds that do not copy Git metadata. Detached HEAD and shallow checkouts retain the checked-out commit and its date, including ordinary tagged CI builds. Git ownership/safe-directory failures also fall back safely.
 
 Packagers can supply these build-time environment variables without Git:
 
@@ -67,7 +67,7 @@ Invalid override values produce package-version-only output without failing the 
 
 ```sh
 VISE_GIT_COMMIT=deadbee VISE_GIT_DATE=2026-01-02 cargo install --path . --locked
-# Installed output: vise 0.7.0 (deadbee 2026-01-02)
+# Installed output: vise 0.8.0 (deadbee 2026-01-02)
 ```
 
 These variables affect compilation, not runtime settings. No machine paths, usernames, hostnames, or build timestamps are embedded in the version string. The `vise X.Y.Z` prefix remains stable; tools should allow an optional provenance suffix.
@@ -110,9 +110,11 @@ Temporary Firefox add-ons are removed when Firefox closes. Persistent distributi
 
 If your browser requests host/site access, allow it for the configured `127.0.0.1` or `localhost` address. Copy the token from `daemon.VISE_API_TOKEN` in `~/.vise/config.toml`, or use the `VISE_API_TOKEN` environment override used to launch the daemon. Right-click an HTTP(S) link and select **Send to Vise**. Credential forwarding is off by default. To opt in, independently enable cookie/referer forwarding, grant the download site with **Grant site access**, and save preferences. Runtime host grants cover that scheme/host on all ports; cookie permission is optional. Cookie forwarding requires an identifiable tab store and partition (Chrome 132+ lookup); current Firefox safely refuses this path. **Send URL only to Vise** always bypasses browser credential capture. The daemon journals supplied credentials as plaintext, so protect `~/.vise/`, its WAL/SHM files, and backups. See the [extension guide](extension/README.md) for permissions, privacy, and troubleshooting.
 
-## Upgrading to 0.7.0
+## Upgrading to 0.8.0
 
-Stop Vise and make a SQLite-consistent backup of `~/.vise/`, including its configuration, WAL/SHM where applicable, and credentials, before upgrading. First startup upgrades schema 5 to schema 6 additively. Existing tasks retain their legacy request behavior; newly supplied request credentials are saved privately for resume. Older binaries cannot read schema 6: restore the pre-upgrade backup before rolling back rather than opening the upgraded journal with an older executable.
+Stop Vise and make a SQLite-consistent backup of `~/.vise/`, including its configuration, WAL/SHM where applicable, and credentials, before upgrading. Upgrading from 0.7.0 to 0.8.0 retains schema 6 without a schema migration. Unfinished tasks recover as paused; resume them explicitly or with `--resume-all`. Adaptive tail splitting preserves durable chunk ownership and existing checksum, proxy, and credential protections.
+
+Upgrading from 0.6.0 adds schema 6’s nullable `request_credentials` column. Existing tasks retain their legacy request behavior; newly supplied request credentials are saved privately for resume. Binaries predating schema 6 cannot read it: restore the pre-upgrade backup before rolling back to those versions rather than opening the upgraded journal with an older executable.
 
 ## Upgrading from per-directory journals
 
