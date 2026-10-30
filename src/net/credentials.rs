@@ -69,7 +69,7 @@ impl<'de> Deserialize<'de> for RequestOverrides {
 }
 
 #[derive(Clone, PartialEq, Eq)]
-pub struct TaskRequestContext {
+pub(crate) struct TaskRequestContext {
     headers: Vec<Header>,
     referer: Option<Secret>,
     user_agent: Secret,
@@ -81,8 +81,8 @@ pub struct TaskRequestContext {
 #[serde(default)]
 pub struct RequestSummary {
     pub header_names: Vec<String>,
-    pub header_count: usize,
-    pub has_custom_headers: bool,
+    pub(crate) header_count: usize,
+    pub(crate) has_custom_headers: bool,
     pub has_referer: bool,
     pub has_user_agent: bool,
     pub has_cookies: bool,
@@ -116,7 +116,7 @@ impl RequestOverrides {
     }
 
     /// Validate before queue admission, retaining explicit empty overrides.
-    pub fn resolve(&self, defaults: &Self) -> Result<Option<TaskRequestContext>> {
+    pub(crate) fn resolve(&self, defaults: &Self) -> Result<Option<TaskRequestContext>> {
         let defaults = defaults.normalized()?;
         let selected = self.normalized()?;
         let present = self.present() || defaults.present();
@@ -175,7 +175,7 @@ impl RequestOverrides {
 }
 
 impl TaskRequestContext {
-    pub fn summary(&self) -> RequestSummary {
+    pub(crate) fn summary(&self) -> RequestSummary {
         RequestSummary {
             header_names: self
                 .headers
@@ -192,7 +192,7 @@ impl TaskRequestContext {
         }
     }
 
-    pub fn validate_urls(&self, urls: &[String]) -> Result<()> {
+    pub(crate) fn validate_urls(&self, urls: &[String]) -> Result<()> {
         let mut first = None;
         for value in urls {
             let url = Url::parse(value).map_err(|_| invalid("invalid credential target URL"))?;

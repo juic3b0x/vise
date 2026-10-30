@@ -1,3 +1,4 @@
+//! Shared failures and results for Vise's internal binary and test interfaces.
 use reqwest::StatusCode;
 
 #[derive(Debug, thiserror::Error)]

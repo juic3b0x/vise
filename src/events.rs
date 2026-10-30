@@ -38,7 +38,7 @@ pub enum EventKind {
 
 #[derive(Debug, Clone)]
 pub struct Event {
-    pub timestamp: SystemTime,
+    pub(crate) timestamp: SystemTime,
     pub kind: EventKind,
     pub download: Option<Download>,
 }

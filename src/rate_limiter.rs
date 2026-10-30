@@ -7,7 +7,9 @@ use std::{
     time::Duration,
 };
 
+#[cfg(test)]
 use bytes::Bytes;
+#[cfg(test)]
 use futures_util::{Stream, StreamExt, stream};
 use serde::{Deserialize, Serialize};
 use tokio::{
@@ -176,10 +178,10 @@ struct Inner {
 }
 
 #[derive(Clone)]
-pub struct RateLimiter(Arc<Inner>);
+pub(crate) struct RateLimiter(Arc<Inner>);
 
 impl RateLimiter {
-    pub fn new(rate: RateLimit) -> Self {
+    pub(crate) fn new(rate: RateLimit) -> Self {
         let (changed, _) = watch::channel(0);
         Self(Arc::new(Inner {
             bucket: Mutex::new(Bucket {
@@ -192,7 +194,7 @@ impl RateLimiter {
         }))
     }
 
-    pub fn limit(&self) -> RateLimit {
+    pub(crate) fn limit(&self) -> RateLimit {
         self.0
             .bucket
             .lock()
@@ -202,7 +204,7 @@ impl RateLimiter {
 
     /// Changing a limit discards old credits and wakes the current token waiter.
     /// No response streams, connection handles, or worker tasks are replaced.
-    pub fn set_limit(&self, rate: RateLimit) {
+    pub(crate) fn set_limit(&self, rate: RateLimit) {
         {
             let mut bucket = self
                 .0
@@ -223,7 +225,11 @@ impl RateLimiter {
 
     /// Grant at most 64 KiB, shared across every clone. Credit uses integer
     /// byte-nanoseconds, so fractional refill never rounds away at low rates.
-    pub async fn acquire(&self, maximum: usize, cancel: &CancellationToken) -> Result<usize> {
+    pub(crate) async fn acquire(
+        &self,
+        maximum: usize,
+        cancel: &CancellationToken,
+    ) -> Result<usize> {
         if maximum == 0 {
             return Ok(0);
         }
@@ -272,7 +278,9 @@ impl RateLimiter {
     /// Upstream is not polled while tokens are exhausted, providing backpressure.
     /// Reqwest's idle read timer resets after each frame, so these intentional
     /// waits do not turn into connection timeouts.
-    pub fn throttle<S, E>(
+    // This helper exists for tests only.
+    #[cfg(test)]
+    pub(crate) fn throttle<S, E>(
         &self,
         source: S,
         cancel: CancellationToken,

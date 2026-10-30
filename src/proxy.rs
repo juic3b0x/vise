@@ -42,13 +42,13 @@ impl ProxyUrl {
         self.0.as_str()
     }
 
-    pub fn redacted(&self) -> String {
+    pub(crate) fn redacted(&self) -> String {
         let mut url = self.0.clone();
         let _ = url.set_password(None);
         let _ = url.set_username("");
         url.into()
     }
-    pub fn authenticated(&self) -> bool {
+    pub(crate) fn authenticated(&self) -> bool {
         !self.0.username().is_empty() || self.0.password().is_some()
     }
     /// Explicit routes override environment proxies and NO_PROXY; failure never

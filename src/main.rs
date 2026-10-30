@@ -9,7 +9,6 @@ use vise::{checksum::ExpectedChecksums, cli, engine::Manager, rate_limiter::Rate
 
 mod app;
 mod client;
-mod logging;
 mod startup;
 
 #[derive(Parser)]
@@ -103,7 +102,7 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    logging::init();
+    vise::logging::init();
     match run(Args::parse()).await {
         Ok(code) => ExitCode::from(code),
         Err(error) => {

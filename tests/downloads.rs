@@ -1,5 +1,11 @@
 //! Integration coverage grouped by transfer responsibility; all tests share the
 //! same local HTTP/proxy fixtures and run in one integration-test binary.
+
+// Compile the shared logging entry points from a separate crate without
+// installing a process-global subscriber or changing the runtime test inventory.
+const _: fn() = vise::logging::init;
+const _: vise::logging::CredentialGuard = vise::logging::CredentialGuard;
+
 #[path = "downloads/fixture.rs"]
 mod fixture;
 #[path = "support/proxy.rs"]

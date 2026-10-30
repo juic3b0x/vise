@@ -10,7 +10,7 @@ use tokio::sync::{broadcast, watch};
 use uuid::Uuid;
 
 impl Manager {
-    pub fn subscribe(&self) -> watch::Receiver<u64> {
+    pub(crate) fn subscribe(&self) -> watch::Receiver<u64> {
         self.0.events.subscribe()
     }
 
@@ -72,7 +72,7 @@ impl Manager {
         Ok(())
     }
 
-    pub fn server_started(&self, address: String) {
+    pub(crate) fn server_started(&self, address: String) {
         self.publish(EventKind::ServerStarted { address }, None);
     }
 

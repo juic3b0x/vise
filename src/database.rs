@@ -19,7 +19,7 @@ mod setup;
 
 const APPLICATION_ID: i32 = 0x5649_5345; // VISE
 const SCHEMA_VERSION: i32 = 6;
-pub const FILE_NAME: &str = "state.sqlite3";
+pub(crate) const FILE_NAME: &str = "state.sqlite3";
 
 const DOWNLOADS_SCHEMA: &str = r#"
 CREATE TABLE downloads (
@@ -104,7 +104,7 @@ impl Database {
         })
     }
 
-    pub fn path(&self) -> &Path {
+    pub(crate) fn path(&self) -> &Path {
         &self.path
     }
 
