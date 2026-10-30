@@ -8,7 +8,7 @@
 
 Vise is a high-performance HTTP(S) download manager built in Rust. Multi-threaded chunked downloads run on Tokio's async runtime, while Indicatif keeps the CLI clear with live progress, speed, and ETA. Prefer a dashboard? Launch the lightweight, embedded Axum WebUI with `--webui`.
 
-**Vise 0.7.0** includes **browser extension 0.3.0**. See the [release notes](RELEASE_NOTES.md) and [changelog](CHANGELOG.md#070---2026-10-28). Rust 1.88 remains the minimum supported toolchain.
+**Vise 0.8.0** includes **browser extension 0.3.0**. See the [release notes](RELEASE_NOTES.md) and [changelog](CHANGELOG.md#080---2026-10-30). Rust 1.88 remains the minimum supported toolchain.
 
 ## Features
 
@@ -32,7 +32,7 @@ Vise is a high-performance HTTP(S) download manager built in Rust. Multi-threade
 
 See [INSTALL.md](INSTALL.md) for system requirements, Cargo installation, verification, and systemd service setup.
 
-`vise --version` (or `vise -V`) identifies the package and build commit, for example `vise 0.7.0 (a1b2c3d 2026-10-28)`. The date is the committer date; `-dirty` marks changes in build inputs. Builds without usable Git metadata report `vise 0.7.0`. See [build identification and packager overrides](INSTALL.md#build-identification).
+`vise --version` (or `vise -V`) identifies the package and build commit, for example `vise 0.8.0 (a1b2c3d 2026-10-28)`. The date is the committer date; `-dirty` marks changes in build inputs. Builds without usable Git metadata report `vise 0.8.0`. See [build identification and packager overrides](INSTALL.md#build-identification).
 
 ## Documentation
 

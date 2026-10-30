@@ -2,7 +2,7 @@
 
 Install Vise from source with Cargo, verify the executable, then choose a [terminal](usage.md), [dashboard](webui.md), or [daemon](daemon.md) workflow. This guide expands the repository's [INSTALL.md](https://github.com/juic3b0x/vise/blob/main/INSTALL.md).
 
-This checkout pairs **Vise 0.7.0** with **extension 0.3.0** and retains Rust **1.88** support. Default-branch installation commands are not pinned to an unpublished tag.
+This checkout pairs **Vise 0.8.0** with **extension 0.3.0** and retains Rust **1.88** support. Default-branch installation commands are not pinned to an unpublished tag.
 
 ## System requirements
 
@@ -56,19 +56,19 @@ vise --version
 vise --help
 ```
 
-The prepared binary's version starts with `vise 0.7.0`; its help includes `--header`, `--referer`, and `--user-agent`. `--version` and `-V` produce identical output. These checks do not create configuration or journal files. If the command is unavailable, reopen the terminal after installing Rust and verify the Cargo binary directory is on `PATH`.
+The prepared binary's version starts with `vise 0.8.0`; its help includes `--header`, `--referer`, and `--user-agent`. `--version` and `-V` produce identical output. These checks do not create configuration or journal files. If the command is unavailable, reopen the terminal after installing Rust and verify the Cargo binary directory is on `PATH`.
 
 ### Build provenance
 
-Git builds include the seven-character commit and its committer date, for example `vise 0.7.0 (a1b2c3d 2026-10-28)`. The date uses the commit's stored timezone, never the build clock. Staged, unstaged, and untracked non-ignored changes within `src/`, `Cargo.toml`, `Cargo.lock`, `build.rs`, and `build_support.rs` add `-dirty` after the commit. Other file edits do not affect this flag. The information is embedded at compile time; the installed binary never invokes Git for version output.
+Git builds include the seven-character commit and its committer date, for example `vise 0.8.0 (a1b2c3d 2026-10-28)`. The date uses the commit's stored timezone, never the build clock. Staged, unstaged, and untracked non-ignored changes within `src/`, `Cargo.toml`, `Cargo.lock`, `build.rs`, and `build_support.rs` add `-dirty` after the commit. Other file edits do not affect this flag. The information is embedded at compile time; the installed binary never invokes Git for version output.
 
-Missing Git, source-only archives, an enclosing unrelated repository, or Git errors produce the clean fallback `vise 0.7.0`. Detached HEAD, linked worktrees, and shallow clones are supported. Tagged builds in the existing release workflow retain the tagged commit and date even with a shallow checkout; no full history is required. A container without `.git`, or a Git safe-directory error, uses the fallback instead.
+Missing Git, source-only archives, an enclosing unrelated repository, or Git errors produce the clean fallback `vise 0.8.0`. Detached HEAD, linked worktrees, and shallow clones are supported. Tagged builds in the existing release workflow retain the tagged commit and date even with a shallow checkout; no full history is required. A container without `.git`, or a Git safe-directory error, uses the fallback instead.
 
 For builds without Git, set `VISE_GIT_COMMIT` (7–64 hex characters, shortened to seven), optionally `VISE_GIT_DATE` (`YYYY-MM-DD`) and `VISE_GIT_DIRTY` (`true`/`false` or `1`/`0`) during compilation. An explicit commit bypasses Git; an omitted date stays omitted and dirty defaults to false. An empty commit forces package-version-only output. Without a commit override, date/dirty overrides win over successful Git discovery. Invalid overrides safely fall back without failing compilation or echoing values.
 
 ```sh
 VISE_GIT_COMMIT=deadbee VISE_GIT_DATE=2026-01-02 cargo install --path . --locked
-# vise --version: vise 0.7.0 (deadbee 2026-01-02)
+# vise --version: vise 0.8.0 (deadbee 2026-01-02)
 ```
 
 These are build variables, not daemon configuration keys. The output never includes build-host names, paths, usernames, or build timestamps. Consumers should accept the stable `vise X.Y.Z` prefix plus an optional suffix.
@@ -116,7 +116,9 @@ The repository includes an unpacked Manifest V3 extension for Chrome/Chromium an
 
 Stop Vise before replacing its executable. Back up `~/.vise/` after a clean shutdown, including the configuration and journal, and retain staging files in each output directory. Do not copy only `state.sqlite3` while the process is running: committed data may still be in its WAL file.
 
-Upgrading from 0.6.0 adds schema 6’s nullable `request_credentials` column. Existing tasks retain legacy redirect behavior. Supplied credentials become private plaintext journal data; protect backups too. Older binaries reject schema 6, so rollback requires restoring a consistent pre-upgrade backup.
+Upgrading from 0.7.0 to 0.8.0 retains schema 6 without a schema migration. Unfinished tasks recover as paused; resume them explicitly or with `--resume-all`. Adaptive tail splitting preserves durable chunk ownership and existing checksum, proxy, and credential protections.
+
+Upgrading from 0.6.0 adds schema 6’s nullable `request_credentials` column. Existing tasks retain legacy redirect behavior. Supplied credentials become private plaintext journal data; protect backups too. Binaries predating schema 6 reject it, so rollback to those versions requires restoring a consistent pre-upgrade backup.
 
 For older per-output-directory journals, stop all older binaries and visit each old directory once. This shell example imports the previous default destination:
 
