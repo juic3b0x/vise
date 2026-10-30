@@ -464,10 +464,51 @@ async fn crash_server() -> (String, tokio::task::JoinHandle<()>) {
     (url, handle)
 }
 
+async fn read_split_ack(
+    socket: &mut (impl tokio::io::AsyncRead + Unpin),
+    phase: &str,
+) -> std::io::Result<()> {
+    use tokio::io::AsyncReadExt;
+    let mut message = vec![0; phase.len()];
+    socket.read_exact(&mut message).await?;
+    if message != phase.as_bytes() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "unexpected split phase acknowledgment",
+        ));
+    }
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn split_ack_does_not_wait_for_child_exit() {
+    use tokio::io::AsyncWriteExt;
+    let phase = "after-commit";
+    let (mut child, mut parent) = tokio::io::duplex(64);
+    child.write_all(phase.as_bytes()).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(1), read_split_ack(&mut parent, phase))
+        .await
+        .expect("acknowledgment must be readable while the child is still alive")
+        .unwrap();
+    drop(child);
+}
+
+#[tokio::test]
+async fn split_ack_rejects_incomplete_or_wrong_phase() {
+    for (message, expected) in [
+        (b"after-comm".as_slice(), std::io::ErrorKind::UnexpectedEof),
+        (b"before-child".as_slice(), std::io::ErrorKind::InvalidData),
+    ] {
+        let error = read_split_ack(&mut &message[..], "after-commit")
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), expected);
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn split_process_death_at_every_phase() {
     use crate::model::Status;
-    use tokio::io::AsyncReadExt;
     let (url, server) = crash_server().await;
     for phase in [
         "before-boundary",
@@ -500,15 +541,18 @@ async fn split_process_death_at_every_phase() {
             .stderr(std::process::Stdio::null())
             .spawn()
             .unwrap();
-        let reached = tokio::time::timeout(Duration::from_secs(10), ack.accept()).await;
+        // The child parks with this socket open. Consume its complete message
+        // before killing it; abrupt process exit can reset the socket on Windows.
+        let reached = tokio::time::timeout(Duration::from_secs(10), async {
+            let (mut socket, _) = ack.accept().await?;
+            read_split_ack(&mut socket, phase).await
+        })
+        .await;
         child.kill().unwrap();
         child.wait().unwrap();
-        let (mut socket, _) = reached
+        reached
             .unwrap_or_else(|_| panic!("child did not reach {phase}"))
             .unwrap();
-        let mut message = String::new();
-        socket.read_to_string(&mut message).await.unwrap();
-        assert_eq!(message, phase);
         let manager = Manager::open(super::super::Config {
             home_dir: Some(root.path().join("home")),
             output_dir: root.path().join("out"),
