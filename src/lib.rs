@@ -6,6 +6,7 @@ pub mod engine;
 pub mod error;
 pub mod events;
 pub mod input;
+pub mod logging;
 pub mod model;
 pub mod net;
 mod paths;

@@ -1,4 +1,4 @@
-//! Binary logging policy. RUST_LOG selects verbosity; it cannot enable targets
+//! Shared logging policy. RUST_LOG selects verbosity; it cannot enable targets
 //! known to format credentials. Keep the narrow deny-list here when auditing
 //! dependency upgrades. Do not format event fields while deciding whether to drop.
 use tracing::{
@@ -14,7 +14,7 @@ use tracing_subscriber::{
 #[cfg(test)]
 mod tests;
 
-pub(super) fn init() {
+pub fn init() {
     tracing_subscriber::registry()
         .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| "vise=warn".into()))
         .with(
@@ -37,7 +37,7 @@ fn credential_target(target: &str) -> bool {
     })
 }
 
-struct CredentialGuard;
+pub struct CredentialGuard;
 impl<S: Subscriber> Filter<S> for CredentialGuard {
     fn enabled(&self, metadata: &Metadata<'_>, _: &Context<'_, S>) -> bool {
         !credential_target(metadata.target())
