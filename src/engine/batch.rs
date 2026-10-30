@@ -61,7 +61,7 @@ impl Manager {
         Ok(())
     }
 
-    pub async fn add_batch_with_options(
+    pub(crate) async fn add_batch_with_options(
         &self,
         urls: Vec<String>,
         options: TransferOptions,

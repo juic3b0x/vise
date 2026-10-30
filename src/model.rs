@@ -66,7 +66,7 @@ pub enum ChunkStatus {
     Failed,
 }
 impl ChunkStatus {
-    pub const fn as_str(self) -> &'static str {
+    pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Queued => "queued",
             Self::Downloading => "downloading",
