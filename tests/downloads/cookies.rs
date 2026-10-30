@@ -71,9 +71,7 @@ impl ProtectedFixture {
     }
 
     async fn close(self) {
-        self.stop.cancel();
-        self.server.await.unwrap();
-        self.origin.close().await;
+        fixture::close_fixture_server(self.stop, self.server, self.origin).await;
     }
 }
 

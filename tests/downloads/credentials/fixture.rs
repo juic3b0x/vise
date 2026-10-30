@@ -58,12 +58,8 @@ impl Capture {
             task,
         }
     }
-    // Intentionally mirrors the independent cookie fixture: stop the capture
-    // listener before its backing origin so teardown cannot outlive either server.
     pub async fn close(self) {
-        self.stop.cancel();
-        self.task.await.unwrap();
-        self.origin.close().await;
+        fixture::close_fixture_server(self.stop, self.task, self.origin).await;
     }
 }
 async fn serve(
