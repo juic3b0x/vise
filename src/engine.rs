@@ -119,6 +119,7 @@ impl Job {
 struct Inner {
     config: Config,
     database: Database,
+    stateless_client: tokio::sync::OnceCell<Transport>,
     rate_limiter: RateLimiter,
     settings: Mutex<()>,
     jobs: RwLock<BTreeMap<Uuid, Arc<Job>>>,

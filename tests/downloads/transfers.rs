@@ -217,3 +217,26 @@ async fn missing_completed_file_is_redownloaded_without_reusing_stale_offsets() 
     manager.shutdown().await.unwrap();
     fixture.close().await;
 }
+
+#[tokio::test]
+async fn stateless_downloads_reuse_connections_across_tasks() {
+    let fixture = Fixture::start(Mode::Ranges).await;
+    let root = tempfile::tempdir().unwrap();
+    let manager = manager(&root, 1).await;
+    let first = manager.add(&fixture.url, None).await.unwrap();
+    assert_eq!(terminal(&manager, first.id).await.status, Status::Completed);
+    let previous = fixture.state.peers.lock().unwrap().clone();
+    fixture.state.peers.lock().unwrap().clear();
+    let second = manager.add(&fixture.url, None).await.unwrap();
+    assert_eq!(
+        terminal(&manager, second.id).await.status,
+        Status::Completed
+    );
+    let next = fixture.state.peers.lock().unwrap().clone();
+    assert!(
+        !previous.is_disjoint(&next),
+        "a completed task's pooled connection was not reused"
+    );
+    manager.shutdown().await.unwrap();
+    fixture.close().await;
+}

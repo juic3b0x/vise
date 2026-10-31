@@ -4,6 +4,10 @@ All notable changes to Vise are documented here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+### Changed
+
+- Reuse a stateless HTTP client across tasks without explicit proxies, cookie files or request contexts; retain isolated transports for every other task, including recovery. Preserve probe/body requests and private routing/cookie behavior.
+
 ### Fixed
 
 - Replace the small benchmark's interactive workaround with `--batch --input`; add `--small-files N` and bound both it and `small_count` by the production 1,000-URL limit. Preserve seed, sizes and connection/job budgets; earlier interactive results need a new baseline.

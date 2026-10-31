@@ -36,6 +36,25 @@ impl From<Client> for Transport {
     }
 }
 impl Transport {
+    /// Only a client with no task-specific inputs may enter the shared pool.
+    pub(crate) async fn for_task(
+        shared: &tokio::sync::OnceCell<Self>,
+        timeout: Duration,
+        proxy: Option<&ProxyUrl>,
+        file: Option<&Path>,
+        context: Option<&TaskRequestContext>,
+    ) -> Result<(Self, Option<PathBuf>)> {
+        if proxy.is_none() && file.is_none() && context.is_none() {
+            let transport = shared
+                .get_or_try_init(|| async {
+                    Self::new(timeout, None, None, None).await.map(|v| v.0)
+                })
+                .await?;
+            return Ok((transport.clone(), None));
+        }
+        Self::new(timeout, proxy, file, context).await
+    }
+
     pub(crate) async fn new(
         timeout: Duration,
         proxy: Option<&ProxyUrl>,
