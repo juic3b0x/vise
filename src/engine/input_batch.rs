@@ -71,6 +71,60 @@ impl Manager {
         if self.0.stopping.load(Ordering::Acquire) {
             return Err(Error::Conflict("manager is shutting down".into()));
         }
+        let jobs = self
+            .prepare_input_jobs(urls, filename, expected, transports, context)
+            .await?;
+        // Prevent direct library controls from starting provisional new entries.
+        // The coordinator never acquires these locks while holding checkpoint.
+        let mut controls = Vec::with_capacity(jobs.len());
+        for (_, job) in &jobs {
+            controls.push(job.control.lock().await);
+        }
+        let _checkpoint = self.0.checkpoint.lock().await;
+        {
+            let mut queue = self.0.jobs.write().await;
+            for (id, job) in &jobs {
+                queue.insert(*id, job.clone());
+            }
+        }
+        // A: all identities, destinations and private request settings are durable.
+        if let Err(error) = self.checkpoint_locked().await {
+            return self.input_failure(&jobs, false, error).await;
+        }
+        #[cfg(test)]
+        if let Some((entered, release)) = self.0.input_hook.lock().await.take() {
+            let _ = entered.send(());
+            let _ = release.await;
+        }
+        for (_, job) in &jobs {
+            job.record.write().await.status = Status::Queued;
+        }
+        // B: every Queued transition commits before any event or worker.
+        if let Err(error) = self.checkpoint_locked().await {
+            return self.input_failure(&jobs, true, error).await;
+        }
+        for (_, job) in &jobs {
+            job.adaptive
+                .reset(&*job.record.read().await, self.0.rate_limiter.limit());
+            self.publish_job(EventKind::Added, job).await;
+        }
+        for (id, job) in &jobs {
+            self.schedule(*id, job.clone()).await;
+        }
+        self.notify();
+        Ok(())
+    }
+
+    // Caller holds admission while reserving collision-safe destinations.
+    // Preparation finishes before any provisional entry reaches the queue.
+    async fn prepare_input_jobs(
+        &self,
+        urls: Vec<String>,
+        filename: Option<String>,
+        expected: ExpectedChecksums,
+        transports: Vec<(net::Transport, Option<std::path::PathBuf>)>,
+        context: Option<Arc<net::credentials::TaskRequestContext>>,
+    ) -> Result<Vec<(Uuid, Arc<Job>)>> {
         let (output, staging) =
             super::storage::admission_directories(self.0.config.output_dir.clone()).await?;
         let mut used: Vec<_> = self
@@ -115,45 +169,7 @@ impl Manager {
             };
             jobs.push((id, Arc::new(Job::new(record, client))));
         }
-        // Prevent direct library controls from starting provisional new entries.
-        // The coordinator never acquires these locks while holding checkpoint.
-        let mut controls = Vec::with_capacity(jobs.len());
-        for (_, job) in &jobs {
-            controls.push(job.control.lock().await);
-        }
-        let _checkpoint = self.0.checkpoint.lock().await;
-        {
-            let mut queue = self.0.jobs.write().await;
-            for (id, job) in &jobs {
-                queue.insert(*id, job.clone());
-            }
-        }
-        // A: all identities, destinations and private request settings are durable.
-        if let Err(error) = self.checkpoint_locked().await {
-            return self.input_failure(&jobs, false, error).await;
-        }
-        #[cfg(test)]
-        if let Some((entered, release)) = self.0.input_hook.lock().await.take() {
-            let _ = entered.send(());
-            let _ = release.await;
-        }
-        for (_, job) in &jobs {
-            job.record.write().await.status = Status::Queued;
-        }
-        // B: every Queued transition commits before any event or worker.
-        if let Err(error) = self.checkpoint_locked().await {
-            return self.input_failure(&jobs, true, error).await;
-        }
-        for (_, job) in &jobs {
-            job.adaptive
-                .reset(&*job.record.read().await, self.0.rate_limiter.limit());
-            self.publish_job(EventKind::Added, job).await;
-        }
-        for (id, job) in &jobs {
-            self.schedule(*id, job.clone()).await;
-        }
-        self.notify();
-        Ok(())
+        Ok(jobs)
     }
 
     // Caller retains admission, all new-job control guards and checkpoint until
