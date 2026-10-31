@@ -65,6 +65,8 @@ impl Manager {
         let snapshot = job.adaptive.decorate(record.snapshot());
         drop(record);
         self.checkpoint().await?;
+        #[cfg(test)]
+        crate::database::split_test_hook("after-transition-commit");
         if from != to {
             self.publish(EventKind::StateChanged { from, to }, Some(snapshot));
         }

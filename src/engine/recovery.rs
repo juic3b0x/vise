@@ -77,6 +77,8 @@ impl Manager {
             stopping: AtomicBool::new(false),
             _global_lock: lock,
             _output_locks: output_locks,
+            #[cfg(test)]
+            checkpoint_hook: Mutex::new(None),
         }));
         manager.checkpoint().await?;
         // Persist recovery before removing hard-link evidence or corrupt targets.

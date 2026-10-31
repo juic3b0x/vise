@@ -6,6 +6,7 @@ All notable changes to Vise are documented here. The format follows [Keep a Chan
 
 ### Changed
 
+- Reuse successfully checkpointed completed snapshots and update only changed/deleted entries in the SQLite saved cache. Retain whole-queue validation/comparison scans, immediate lifecycle commits, permission checks, and existing file/publication ordering; no schema or request changes.
 - Avoid acquiring the global checkpoint lock when an adaptive split cannot fit a serving tail; retain authoritative eligibility and cancellation checks under the lock.
 - Reuse a stateless HTTP client across tasks without explicit proxies, cookie files or request contexts; retain isolated transports for every other task, including recovery. Preserve probe/body requests and private routing/cookie behavior.
 

@@ -722,3 +722,25 @@ async fn split_precheck_never_rejects_an_authoritative_candidate() {
     }
     manager.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn split_reconciles_a_committed_layout_after_lost_acknowledgement() {
+    let (_root, manager, job) = staged().await;
+    manager.0.database.reject_next_commit_ack();
+    assert!(
+        manager
+            .split_tail(&job, &[None], &CancellationToken::new())
+            .await
+            .is_err()
+    );
+    let durable = manager.0.database.load().await.unwrap().remove(0);
+    assert_eq!(durable.chunks.len(), 3);
+    assert_eq!(job.record.read().await.chunks, durable.chunks);
+    assert!(!job.journal_blocked.load(Ordering::Acquire));
+    manager.checkpoint().await.unwrap();
+    assert_eq!(
+        manager.0.database.load().await.unwrap()[0].chunks,
+        durable.chunks
+    );
+    manager.shutdown().await.unwrap();
+}
