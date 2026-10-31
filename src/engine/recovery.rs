@@ -71,6 +71,7 @@ impl Manager {
             jobs: RwLock::new(jobs),
             scheduled: RwLock::new(std::collections::BTreeSet::new()),
             checkpoint: Mutex::new(()),
+            journal_group: Arc::new(super::journal::group::Group::default()),
             admission: Mutex::new(()),
             events,
             activity,
@@ -79,6 +80,8 @@ impl Manager {
             _output_locks: output_locks,
             #[cfg(test)]
             checkpoint_hook: Mutex::new(None),
+            #[cfg(test)]
+            delete_hook: Mutex::new(None),
             #[cfg(test)]
             journal_trace: Arc::new(super::journal::barriers::Trace::default()),
         }));
