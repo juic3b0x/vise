@@ -53,17 +53,19 @@ impl Manager {
             .await?,
         );
         let rate = restore_rate(&database, config.limit_rate).await?;
+        let stateless_client = tokio::sync::OnceCell::new();
         let Recovered {
             jobs,
             completed_parts,
             corrupt_targets,
-        } = restore_jobs(&database, &config).await?;
+        } = restore_jobs(&database, &config, &stateless_client).await?;
         let (events, _) = watch::channel(0);
         let (activity, _) = broadcast::channel(2048);
         let manager = Self(Arc::new(Inner {
             pool: Semaphore::new(config.concurrent_downloads),
             config,
             database,
+            stateless_client,
             rate_limiter: RateLimiter::new(rate),
             settings: Mutex::new(()),
             jobs: RwLock::new(jobs),
@@ -75,6 +77,8 @@ impl Manager {
             stopping: AtomicBool::new(false),
             _global_lock: lock,
             _output_locks: output_locks,
+            #[cfg(test)]
+            checkpoint_hook: Mutex::new(None),
         }));
         manager.checkpoint().await?;
         // Persist recovery before removing hard-link evidence or corrupt targets.
@@ -246,7 +250,11 @@ struct Recovered {
     corrupt_targets: Vec<PathBuf>,
 }
 
-async fn restore_jobs(database: &Database, config: &Config) -> Result<Recovered> {
+async fn restore_jobs(
+    database: &Database,
+    config: &Config,
+    shared: &tokio::sync::OnceCell<net::Transport>,
+) -> Result<Recovered> {
     let mut recovered = Recovered {
         jobs: BTreeMap::new(),
         completed_parts: Vec::new(),
@@ -261,7 +269,23 @@ async fn restore_jobs(database: &Database, config: &Config) -> Result<Recovered>
         .await?;
         // Load saved cookie files when the task runs. A removed/expired session
         // must not prevent unrelated tasks or the controller from recovering.
-        let (client, _) = net::client(config.read_timeout, record.proxy_url.as_ref(), None).await?;
+        let client = if record.cookies_file.is_none() && record.request_credentials.is_none() {
+            net::Transport::for_task(
+                shared,
+                config.read_timeout,
+                record.proxy_url.as_ref(),
+                None,
+                None,
+            )
+            .await?
+            .0
+        } else {
+            // Credentialed placeholders stay isolated; saved inputs are reloaded at execution.
+            net::client(config.read_timeout, record.proxy_url.as_ref(), None)
+                .await?
+                .0
+                .into()
+        };
         recovered
             .jobs
             .insert(record.id, Arc::new(Job::new(record, client)));

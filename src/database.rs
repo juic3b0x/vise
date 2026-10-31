@@ -83,11 +83,23 @@ impl Drop for Shared {
     }
 }
 
+#[cfg(test)]
+type CommitHook = (
+    tokio::sync::oneshot::Sender<()>,
+    std::sync::mpsc::Receiver<()>,
+);
+
 #[derive(Clone)]
 pub struct Database {
     state: Arc<Shared>,
     path: Arc<Path>,
     gate: Arc<tokio::sync::Mutex<()>>,
+    #[cfg(test)]
+    reject_commit_ack: Arc<std::sync::atomic::AtomicBool>,
+    #[cfg(test)]
+    before_commit: Arc<Mutex<Option<CommitHook>>>,
+    #[cfg(test)]
+    after_commit: Arc<Mutex<Option<CommitHook>>>,
 }
 
 impl Database {
@@ -101,6 +113,12 @@ impl Database {
             state: Arc::new(Shared(Mutex::new(Some(state)))),
             path: Arc::from(path.into_boxed_path()),
             gate: Arc::new(tokio::sync::Mutex::new(())),
+            #[cfg(test)]
+            reject_commit_ack: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            #[cfg(test)]
+            before_commit: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            after_commit: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -182,41 +200,106 @@ impl Database {
             .await
     }
 
-    pub(crate) async fn persist(&self, records: Vec<Record>) -> Result<()> {
+    pub(crate) async fn persist(&self, mut records: Vec<Arc<Record>>) -> Result<()> {
         let path = self.path.clone();
+        #[cfg(test)]
+        let reject_ack = self.reject_commit_ack.clone();
+        #[cfg(test)]
+        let before_commit = self.before_commit.clone();
+        #[cfg(test)]
+        let after_commit = self.after_commit.clone();
         self.call(move |state| {
+            // Retain permission checks even for an otherwise unchanged snapshot.
             if records.iter().any(|r| r.request_credentials.is_some()) {
                 setup::credentials_permissions(&path)?;
             }
-            let records = snapshots(records)?;
-            if state.saved == records {
+            records.sort_unstable_by_key(|record| record.id);
+            if records
+                .windows(2)
+                .any(|pair| matches!(pair, [left, right] if left.id == right.id))
+            {
+                return Err(Error::Invalid(
+                    "duplicate download ID in journal snapshot".into(),
+                ));
+            }
+            for record in &mut records {
+                if record.speed != 0.0 {
+                    Arc::make_mut(record).speed = 0.0;
+                }
+            }
+            // Keep the full comparison/deletion scan. Only changed records are
+            // cloned into the durable cache, after the SQL commit succeeds.
+            let changed: Vec<_> = records
+                .iter()
+                .filter(|record| state.saved.get(&record.id) != Some(record.as_ref()))
+                .collect();
+            let removed: Vec<_> = state
+                .saved
+                .keys()
+                .filter(|id| {
+                    records
+                        .binary_search_by_key(*id, |record| record.id)
+                        .is_err()
+                })
+                .copied()
+                .collect();
+            if changed.is_empty() && removed.is_empty() {
                 return Ok(());
             }
             #[cfg(test)]
-            let _split_hook = SplitHookGuard::new(records.iter().any(|(id, next)| {
-                state.saved.get(id).is_some_and(|old| {
+            let _split_hook = SplitHookGuard::new(changed.iter().any(|next| {
+                state.saved.get(&next.id).is_some_and(|old| {
                     !old.chunks.is_empty() && next.chunks.len() > old.chunks.len()
                 })
             }));
             let transaction = state
                 .connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)?;
-            for id in state.saved.keys().filter(|id| !records.contains_key(id)) {
+            for id in &removed {
                 transaction.execute("DELETE FROM downloads WHERE id=?1", [id.to_string()])?;
             }
-            write_rows(
-                &transaction,
-                records
-                    .values()
-                    .filter(|record| state.saved.get(&record.id) != Some(record)),
-            )?;
+            write_rows(&transaction, changed.iter().map(|record| record.as_ref()))?;
             #[cfg(test)]
             split_test_hook("before-sql-commit");
+            #[cfg(test)]
+            wait_before_commit(&before_commit);
             transaction.commit()?;
-            state.saved = records;
+            #[cfg(test)]
+            checkpoint_hook::wait_after_commit(&after_commit)?;
+            #[cfg(test)]
+            if reject_ack.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                return Err(Error::Worker("injected lost commit acknowledgement".into()));
+            }
+            for id in removed {
+                state.saved.remove(&id);
+            }
+            for record in changed {
+                state.saved.insert(record.id, record.as_ref().clone());
+            }
             Ok(())
         })
         .await
+    }
+
+    #[cfg(test)]
+    async fn persist_records(&self, records: Vec<Record>) -> Result<()> {
+        self.persist(records.into_iter().map(Arc::new).collect())
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reject_next_commit_ack(&self) {
+        self.reject_commit_ack
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[cfg(test)]
+fn wait_before_commit(hook: &Mutex<Option<CommitHook>>) {
+    let hook = hook.lock().unwrap().take();
+    if let Some((entered, release)) = hook {
+        let _ = entered.send(());
+        release.recv().unwrap();
     }
 }
 
@@ -504,7 +587,10 @@ mod tests {
         corrupt.status = Status::Corrupt;
         corrupt.checksums.expected_sha256 = Some("0".repeat(64));
         corrupt.checksums.actual_sha256 = Some("1".repeat(64));
-        database.persist(vec![corrupt.clone()]).await.unwrap();
+        database
+            .persist_records(vec![corrupt.clone()])
+            .await
+            .unwrap();
         assert_eq!(database.load().await.unwrap(), vec![corrupt]);
     }
 
@@ -546,7 +632,10 @@ mod tests {
             .await
             .unwrap();
         let record = record();
-        database.persist(vec![record.clone()]).await.unwrap();
+        database
+            .persist_records(vec![record.clone()])
+            .await
+            .unwrap();
         assert_eq!(database.load().await.unwrap(), vec![record.clone()]);
         assert_eq!(database.list().await.unwrap()[0].created_at, 1234);
         database.call(|state| {
@@ -558,7 +647,7 @@ mod tests {
                 (0, 0, 1024, 256, "paused".into()));
             Ok(())
         }).await.unwrap();
-        database.persist(Vec::new()).await.unwrap();
+        database.persist_records(Vec::new()).await.unwrap();
         database
             .call(|state| {
                 assert_eq!(
@@ -580,7 +669,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let database = Database::open(dir.path().join(FILE_NAME)).await.unwrap();
         let original = record();
-        database.persist(vec![original.clone()]).await.unwrap();
+        database
+            .persist_records(vec![original.clone()])
+            .await
+            .unwrap();
         let other = record();
         let mut conflicting = record();
         let destination = conflicting.output_path.clone();
@@ -618,7 +710,7 @@ mod tests {
             .unwrap();
         assert_eq!(database.list().await.unwrap().len(), 3);
         assert!(database.source_imported("source".into()).await.unwrap());
-        database.persist(Vec::new()).await.unwrap();
+        database.persist_records(Vec::new()).await.unwrap();
         database
             .import_source("source".into(), vec![original], None)
             .await
@@ -645,19 +737,25 @@ mod tests {
                 status: crate::model::ChunkStatus::Paused,
             },
         ];
-        database.persist(vec![original.clone()]).await.unwrap();
+        database
+            .persist_records(vec![original.clone()])
+            .await
+            .unwrap();
         let mut invalid = original.clone();
         invalid.status = Status::Completed;
         invalid.chunks[0].written = 256;
         invalid.chunks[1].written = 1024; // Failure after parent AND first chunk update.
         assert!(matches!(
-            database.persist(vec![invalid]).await,
+            database.persist_records(vec![invalid]).await,
             Err(Error::Database(_))
         ));
         assert_eq!(database.load().await.unwrap(), vec![original.clone()]);
         let mut changed = original;
         changed.chunks[0].written = 512;
-        database.persist(vec![changed.clone()]).await.unwrap();
+        database
+            .persist_records(vec![changed.clone()])
+            .await
+            .unwrap();
         assert_eq!(database.load().await.unwrap(), vec![changed]);
     }
 
@@ -668,7 +766,7 @@ mod tests {
         let external = Connection::open(database.path()).unwrap();
         external.execute_batch("BEGIN IMMEDIATE").unwrap();
         let worker = database.clone();
-        let pending = tokio::spawn(async move { worker.persist(vec![record()]).await });
+        let pending = tokio::spawn(async move { worker.persist_records(vec![record()]).await });
         tokio::time::timeout(
             Duration::from_millis(200),
             tokio::time::sleep(Duration::from_millis(30)),
@@ -700,7 +798,7 @@ mod tests {
         entered.await.unwrap();
         first.abort();
         let worker = database.clone();
-        let next = tokio::spawn(async move { worker.persist(vec![record()]).await });
+        let next = tokio::spawn(async move { worker.persist_records(vec![record()]).await });
         tokio::time::sleep(Duration::from_millis(30)).await;
         assert!(!next.is_finished());
         release.send(()).unwrap();
@@ -737,7 +835,10 @@ mod tests {
                 .parse()
                 .unwrap(),
         );
-        database.persist(vec![original.clone()]).await.unwrap();
+        database
+            .persist_records(vec![original.clone()])
+            .await
+            .unwrap();
         assert_eq!(database.load().await.unwrap(), vec![original.clone()]);
         let public = database.list().await.unwrap().remove(0);
         assert!(public.proxy_authenticated);
@@ -799,7 +900,10 @@ mod tests {
         let database = Database::open(&path).await.unwrap();
         assert_eq!(database.load().await.unwrap(), vec![original.clone()]);
         original.cookies_file = Some(dir.path().join("cookies.txt"));
-        database.persist(vec![original.clone()]).await.unwrap();
+        database
+            .persist_records(vec![original.clone()])
+            .await
+            .unwrap();
         let reopened = Database::open(&path).await.unwrap();
         assert_eq!(reopened.load().await.unwrap(), vec![original]);
         reopened
@@ -844,7 +948,11 @@ mod tests {
 }
 
 #[cfg(test)]
+mod checkpoint_hook;
+#[cfg(test)]
 mod credentials_tests;
+#[cfg(test)]
+mod snapshot_tests;
 
 // These process-death barriers exist only in the unit-test executable. Never
 // expose crash injection through a shipped CLI, feature flag, or production env.

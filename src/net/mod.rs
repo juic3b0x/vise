@@ -1,4 +1,4 @@
-//! Per-transfer HTTP clients. Cookie jars and proxy routes never cross tasks.
+//! Stateless pooled HTTP clients and isolated per-task credentials/proxy routes.
 mod cookies;
 pub mod credentials;
 mod request;

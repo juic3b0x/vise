@@ -62,7 +62,8 @@ impl Manager {
         let cookies_file = options
             .cookies_file
             .or_else(|| self.0.config.cookies_file.clone());
-        let (client, cookies_file) = net::Transport::new(
+        let (client, cookies_file) = net::Transport::for_task(
+            &self.0.stateless_client,
             self.0.config.read_timeout,
             proxy_url.as_ref(),
             cookies_file.as_deref(),

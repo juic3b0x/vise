@@ -29,6 +29,8 @@ def parameters(args):
         value = getattr(args, key)
         if value is not None:
             config[key] = value
+    if args.small_files is not None:
+        config["small_count"] = args.small_files
     if args.scenarios:
         config["scenarios"] = args.scenarios.split(",")
     known = {"large", "capped", "heterogeneous", "small", "latency", "flaky"}
@@ -39,7 +41,7 @@ def parameters(args):
         raise ValueError("invalid scenarios")
     bounds = {"connections": (1, 16), "jobs": (1, 64), "seed": (0, 2**63 - 1),
               "retries": (0, 20), "timeout": (1, 3600), "run_timeout": (1, 86400),
-              "large_bytes": (1, 16 * 1024**3), "small_count": (1, 10000),
+              "large_bytes": (1, 16 * 1024**3), "small_count": (1, 1000),
               "small_min_bytes": (1, 1024**3), "small_max_bytes": (1, 1024**3),
               "rate_bytes_per_second": (1, 16 * 1024**3), "slow_every": (1, 1000),
               "slow_divisor": (1, 1000), "latency_ms": (0, 60000), "faults_per_file": (0, 10)}
@@ -89,7 +91,7 @@ def run_one(output, executable, fixture_executable, profile, scenario, cohort, c
             urls = [f'http://127.0.0.1:{fixture.ready["port"]}/file/{i}.bin'
                     for i in range(len(fixture_settings["sizes"]))]
             command, stdin = adapters.command(profile, executable, urls, destination, work,
-                                              connections, jobs, config["retries"], config["timeout"], scenario == "small")
+                                              connections, jobs, config["retries"], config["timeout"])
             # Store exact flags but replace local ephemeral paths/ports; no environment dump.
             run["argv"] = [part.replace(str(work), "<run>").replace(str(fixture.ready["port"]), "<port>") for part in command]
             counters = measurement.launch(command, env, work, stdin, config["run_timeout"])
@@ -129,6 +131,7 @@ def main(argv=None):
     parser.add_argument("--runs", type=int, default=6, help="full profile measured repetitions, minimum 5")
     parser.add_argument("--connections", type=int)
     parser.add_argument("--jobs", type=int)
+    parser.add_argument("--small-files", type=int, help="small file count, 1–1000 (full default: 1000)")
     parser.add_argument("--seed", type=int)
     parser.add_argument("--storage", default="auto", choices=("auto", "real-disk", "ramdisk"))
     args = parser.parse_args(argv)

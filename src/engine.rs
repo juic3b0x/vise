@@ -83,6 +83,9 @@ struct Job {
     output_path: PathBuf,
     part_path: PathBuf,
     record: RwLock<Record>,
+    // Reuse only successfully checkpointed immutable completed snapshots.
+    // Capture still compares the live record, including mutations during commit.
+    completed_snapshot: std::sync::Mutex<Option<Arc<Record>>>,
     // Readers must not observe provisional terminal state during its journal commit.
     settlement: RwLock<()>,
     client: RwLock<Transport>,
@@ -107,6 +110,7 @@ impl Job {
             output_path: record.output_path.clone(),
             part_path: record.part_path.clone(),
             record: RwLock::new(record),
+            completed_snapshot: std::sync::Mutex::new(None),
             settlement: RwLock::new(()),
             client: RwLock::new(client.into()),
             control: Mutex::new(()),
@@ -116,9 +120,16 @@ impl Job {
     }
 }
 
+#[cfg(test)]
+type CheckpointHook = (
+    tokio::sync::oneshot::Sender<()>,
+    tokio::sync::oneshot::Receiver<()>,
+);
+
 struct Inner {
     config: Config,
     database: Database,
+    stateless_client: tokio::sync::OnceCell<Transport>,
     rate_limiter: RateLimiter,
     settings: Mutex<()>,
     jobs: RwLock<BTreeMap<Uuid, Arc<Job>>>,
@@ -131,6 +142,8 @@ struct Inner {
     stopping: AtomicBool,
     _global_lock: std::fs::File,
     _output_locks: Vec<std::fs::File>,
+    #[cfg(test)]
+    checkpoint_hook: Mutex<Option<CheckpointHook>>,
 }
 
 /// Cloneable controller shared by CLI, REST handlers, and WebSocket subscribers.

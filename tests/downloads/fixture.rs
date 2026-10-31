@@ -75,6 +75,7 @@ pub(super) struct ServerState {
     pub(super) version: AtomicUsize,
     pub(super) ranges: Mutex<Vec<(usize, usize)>>,
     pub(super) if_ranges: Mutex<Vec<Option<String>>>,
+    pub(super) peers: Mutex<std::collections::BTreeSet<std::net::SocketAddr>>,
     split_requested: CancellationToken,
     bodies: AtomicUsize,
     pub(super) active: AtomicUsize,
@@ -111,6 +112,7 @@ impl Fixture {
             version: AtomicUsize::new(0),
             ranges: Mutex::new(vec![]),
             if_ranges: Mutex::new(vec![]),
+            peers: Mutex::new(Default::default()),
             split_requested: CancellationToken::new(),
             bodies: AtomicUsize::new(0),
             active: AtomicUsize::new(0),
@@ -120,15 +122,18 @@ impl Fixture {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/file.bin", listener.local_addr().unwrap());
         let router = Router::new()
-            .route("/file.bin", get(serve))
+            .route("/file.bin", get(serve_connected))
             .with_state(state.clone());
         let stop = CancellationToken::new();
         let token = stop.clone();
         let server = tokio::spawn(async move {
-            axum::serve(listener, router)
-                .with_graceful_shutdown(token.cancelled_owned())
-                .await
-                .unwrap();
+            axum::serve(
+                listener,
+                router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .with_graceful_shutdown(token.cancelled_owned())
+            .await
+            .unwrap();
         });
         Self {
             url,
@@ -141,6 +146,15 @@ impl Fixture {
         self.stop.cancel();
         self.server.await.unwrap();
     }
+}
+
+async fn serve_connected(
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+) -> Response {
+    state.peers.lock().unwrap().insert(peer);
+    serve(State(state), headers).await
 }
 
 pub(super) async fn serve(State(state): State<Arc<ServerState>>, headers: HeaderMap) -> Response {

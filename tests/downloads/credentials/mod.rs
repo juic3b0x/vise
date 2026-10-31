@@ -297,3 +297,56 @@ async fn redirect_limit_and_invalid_locations_fail_without_echoing_values() {
     manager.shutdown().await.unwrap();
     source.close().await;
 }
+
+#[tokio::test]
+async fn shared_stateless_requests_never_inherit_task_or_response_credentials() {
+    use vise::engine::TransferOptions;
+    let server = Capture::start(Mode::Ranges).await;
+    let root = tempfile::tempdir().unwrap();
+    let manager = manager(&root, 1).await;
+    let file = root.path().join("cookies.txt");
+    std::fs::write(
+        &file,
+        "127.0.0.1\tFALSE\t/\tFALSE\t0\tfile-session\tfile-secret\n",
+    )
+    .unwrap();
+    for (plain, options) in [
+        (true, TransferOptions::default()),
+        (false, options()),
+        (
+            false,
+            TransferOptions {
+                cookies_file: Some(file),
+                ..Default::default()
+            },
+        ),
+        (true, TransferOptions::default()),
+        (true, TransferOptions::default()),
+    ] {
+        let before = server.requests.lock().unwrap().len();
+        let task = manager
+            .add_with_options(&server.url, None, options)
+            .await
+            .unwrap();
+        assert_eq!(terminal(&manager, task.id).await.status, Status::Completed);
+        if plain {
+            for (_, headers) in &server.requests.lock().unwrap()[before..] {
+                for name in [
+                    "cookie",
+                    "authorization",
+                    "proxy-authorization",
+                    "referer",
+                    "x-secret",
+                ] {
+                    assert!(
+                        headers.get(name).is_none(),
+                        "stateless request inherited {name}"
+                    );
+                }
+                assert_ne!(headers.get("user-agent").unwrap(), SECRET);
+            }
+        }
+    }
+    manager.shutdown().await.unwrap();
+    server.close().await;
+}

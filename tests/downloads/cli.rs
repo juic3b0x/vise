@@ -40,8 +40,8 @@ async fn cli_batch_download_is_successful_and_failure_exits_nonzero() {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        assert!(!String::from_utf8_lossy(&output.stdout).contains("MONITOR"));
-        assert!(!String::from_utf8_lossy(&output.stdout).contains("STATUS"));
+        assert_eq!(output.stdout, b"", "redirected stdout changed");
+        assert_eq!(output.stderr, b"", "redirected stderr changed");
         if expected == 0 {
             assert_eq!(
                 tokio::fs::read(dir.path().join("file.bin")).await.unwrap(),

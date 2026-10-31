@@ -1,5 +1,7 @@
 use super::*;
 
+mod checkpoint;
+
 fn candidate(end: u64, written: u64) -> Candidate {
     Candidate {
         start: 0,
@@ -660,5 +662,87 @@ async fn resume_resets_counters_before_probe() {
     let view = manager.get(id).await.unwrap();
     assert_eq!((view.tail_splits, view.split_discarded_bytes), (0, 0));
     manager.pause(id).await.unwrap();
+    manager.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn impossible_split_does_not_wait_for_checkpoint_lock() {
+    let (_root, manager, job) = staged().await;
+    job.adaptive.stopped(0);
+    let checkpoint = manager.0.checkpoint.lock().await;
+    let cancel = CancellationToken::new();
+    let attempt = manager.split_tail(&job, &[None], &cancel);
+    tokio::pin!(attempt);
+    assert!(matches!(
+        futures_util::poll!(&mut attempt),
+        std::task::Poll::Ready(Ok(None))
+    ));
+    drop(checkpoint);
+    manager.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn split_precheck_preserves_authoritative_recheck_after_waiting() {
+    let (_root, manager, job) = staged().await;
+    let checkpoint = manager.0.checkpoint.lock().await;
+    let cancel = CancellationToken::new();
+    let attempt = manager.split_tail(&job, &[None], &cancel);
+    tokio::pin!(attempt);
+    assert!(matches!(
+        futures_util::poll!(&mut attempt),
+        std::task::Poll::Pending
+    ));
+    job.record.write().await.validator = None;
+    drop(checkpoint);
+    assert_eq!(attempt.await.unwrap(), None);
+    manager.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn split_precheck_never_rejects_an_authoritative_candidate() {
+    let (_root, manager, job) = staged().await;
+    for units in 1..48 {
+        let end = units * ALIGNMENT;
+        for written_units in 0..units {
+            for minimum in [0, ALIGNMENT, 2 * ALIGNMENT, MARGIN] {
+                let written = written_units * ALIGNMENT;
+                let mut record = job.record.write().await;
+                record.total_bytes = Some(end);
+                record.chunks = vec![Chunk {
+                    start: 0,
+                    end: Some(end),
+                    written,
+                    status: ChunkStatus::Downloading,
+                }];
+                job.adaptive.reset(&record, RateLimit::UNLIMITED);
+                job.adaptive.begin_body(0, written);
+                let eligible = job.adaptive.has_tail(minimum);
+                let decision = job.adaptive.propose(&record, &[None], minimum);
+                assert!(decision.is_none() || eligible);
+            }
+        }
+    }
+    manager.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn split_reconciles_a_committed_layout_after_lost_acknowledgement() {
+    let (_root, manager, job) = staged().await;
+    manager.0.database.reject_next_commit_ack();
+    assert!(
+        manager
+            .split_tail(&job, &[None], &CancellationToken::new())
+            .await
+            .is_err()
+    );
+    let durable = manager.0.database.load().await.unwrap().remove(0);
+    assert_eq!(durable.chunks.len(), 3);
+    assert_eq!(job.record.read().await.chunks, durable.chunks);
+    assert!(!job.journal_blocked.load(Ordering::Acquire));
+    manager.checkpoint().await.unwrap();
+    assert_eq!(
+        manager.0.database.load().await.unwrap()[0].chunks,
+        durable.chunks
+    );
     manager.shutdown().await.unwrap();
 }

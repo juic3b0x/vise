@@ -36,7 +36,7 @@ Build the optimized binaries before timing. `--vise PATH` and `--fixture PATH` s
 
 ## Controlled scenarios
 
-All parameters are in the tracked [`benchmarks/scenarios.json`](https://github.com/juic3b0x/vise/blob/main/benchmarks/scenarios.json). Copy it inside the repository and pass `--config PATH` to change sizes, file count, byte-rate cap, latency, faults, seed, timeout, connections, jobs, or selected scenarios. `--connections`, `--jobs`, `--seed`, and `--scenarios large,capped` also override the corresponding fields. Integer bounds are validated. Large files must allow at least 2 MiB per requested connection, matching aria2's minimum split restrictions.
+All parameters are in the tracked [`benchmarks/scenarios.json`](https://github.com/juic3b0x/vise/blob/main/benchmarks/scenarios.json). Copy it inside the repository and pass `--config PATH` to change sizes, file count, byte-rate cap, latency, faults, seed, timeout, connections, jobs, or selected scenarios. `--connections`, `--jobs`, `--seed`, `--small-files N`, and `--scenarios large,capped` also override the corresponding fields. Integer bounds are validated. Large files must allow at least 2 MiB per requested connection, matching aria2's minimum split restrictions.
 
 | Scenario | Full default | What it exercises |
 | --- | --- | --- |
@@ -47,7 +47,7 @@ All parameters are in the tracked [`benchmarks/scenarios.json`](https://github.c
 | `latency` | 80 ms before **each** response | Request/probe overhead; this is response delay, not simulated network RTT |
 | `flaky` | Two seeded absolute fault offsets per file | Reset recovery, success rate, correct-completion time and observed retries |
 
-The small-file scenario uses C=1 for every client. Vise receives URLs over `--interactive` stdin and then EOF, which waits for all queued downloads. The default workload contains 1,000 URLs. aria2 receives its stdin input list; curl uses a generated config file. Timing includes process startup, stdin feeding, queue admission, and shutdown. **Do not send `quit`**, which cancels Vise's interactive session.
+The small-file scenario uses C=1 for every client. Vise reads a generated URL list with `--batch --input`; aria2 receives its stdin input list, and curl uses a generated config file. The full default is 1,000 URLs; `--small-files 250`, `--small-files 500`, and `--small-files 1000` override `small_count` for scaling comparisons without changing the seed or size distribution. Both the option and configuration reject counts above Vise's production input limit of 1,000. Timing includes process startup, input reading, queue admission, and shutdown; list-file creation is outside timing. There is no interactive small-file scenario. Results from the earlier interactive invocation require a separate baseline. Both 0.7.0 (`3e7a279`) and 0.8.0 (`112a87d`) support the same batch/input semantics and limit.
 
 The independent fixture binds only numeric `127.0.0.1` on an ephemeral port. Payload bytes come from a seeded, seekable counter-based SplitMix64 PRNG, never a disk file or a whole-file allocation. Fixed-size buffers generate arbitrary ranges; SHA-256 digests are computed independently before the timed run. HTTP/1.1 GET/HEAD, strong ETags, single closed/open/suffix ranges, If-Range, Content-Length and invalid-range rejection are implemented. Requests, headers, file counts and lengths are bounded; malformed input is rejected without echoing it. No raw headers or request text are logged.
 

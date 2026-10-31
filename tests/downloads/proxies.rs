@@ -149,6 +149,9 @@ async fn explicit_proxy_failure_never_falls_back_to_a_reachable_origin() {
     })
     .await
     .unwrap();
+    let warm = manager.add(&fixture.url, None).await.unwrap();
+    assert_eq!(terminal(&manager, warm.id).await.status, Status::Completed);
+    let before = fixture.state.ranges.lock().unwrap().len();
     let item = manager
         .add_with_options(
             &fixture.url,
@@ -166,11 +169,13 @@ async fn explicit_proxy_failure_never_falls_back_to_a_reachable_origin() {
         .unwrap();
     let failed = terminal(&manager, item.id).await;
     assert_eq!(failed.status, Status::Failed);
-    assert!(fixture.state.ranges.lock().unwrap().is_empty());
+    assert_eq!(fixture.state.ranges.lock().unwrap().len(), before);
     let public = serde_json::to_string(&failed).unwrap();
     assert!(!public.contains("private-user"));
     assert!(!public.contains("private-password"));
     assert!(!dir.path().join(&failed.filename).exists());
+    let next = manager.add(&fixture.url, None).await.unwrap();
+    assert_eq!(terminal(&manager, next.id).await.status, Status::Completed);
     manager.shutdown().await.unwrap();
     fixture.close().await;
 }

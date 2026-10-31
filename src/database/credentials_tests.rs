@@ -69,7 +69,10 @@ async fn private_credentials_round_trip_without_public_serialization() {
     let path = root.path().join(FILE_NAME);
     let database = Database::open(&path).await.unwrap();
     let record = private_record();
-    database.persist(vec![record.clone()]).await.unwrap();
+    database
+        .persist_records(vec![record.clone()])
+        .await
+        .unwrap();
     assert!(
         !serde_json::to_string(&record)
             .unwrap()
@@ -88,14 +91,25 @@ async fn journal_permissions_checked_before_persisting_credentials() {
     let path = root.path().join(FILE_NAME);
     let database = Database::open(&path).await.unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
-    let error = database.persist(vec![private_record()]).await.unwrap_err();
+    let error = database
+        .persist_records(vec![private_record()])
+        .await
+        .unwrap_err();
     assert!(error.to_string().contains("0600"));
     assert!(!format!("{error:?} {error}").contains("private-journal-sentinel"));
     assert!(database.load().await.unwrap().is_empty());
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
-    database.persist(vec![private_record()]).await.unwrap();
+    database
+        .persist_records(vec![private_record()])
+        .await
+        .unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-    assert!(database.persist(vec![private_record()]).await.is_err());
+    assert!(
+        database
+            .persist_records(vec![private_record()])
+            .await
+            .is_err()
+    );
 }
 
 #[cfg(unix)]
@@ -109,9 +123,17 @@ async fn credential_writes_require_private_wal_and_shm_files() {
         let sidecar = path.with_file_name(format!("{FILE_NAME}{suffix}"));
         assert!(sidecar.is_file());
         std::fs::set_permissions(&sidecar, std::fs::Permissions::from_mode(0o640)).unwrap();
-        assert!(database.persist(vec![private_record()]).await.is_err());
+        assert!(
+            database
+                .persist_records(vec![private_record()])
+                .await
+                .is_err()
+        );
         assert!(database.load().await.unwrap().is_empty());
         std::fs::set_permissions(sidecar, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
-    database.persist(vec![private_record()]).await.unwrap();
+    database
+        .persist_records(vec![private_record()])
+        .await
+        .unwrap();
 }
