@@ -13,6 +13,9 @@ use std::{
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+#[cfg(test)]
+pub(super) mod barriers;
+
 impl Manager {
     /// Drive progress samples and crash-safe checkpoints until cancellation.
     pub async fn monitor(&self, stop: CancellationToken) -> Result<()> {
@@ -52,8 +55,15 @@ impl Manager {
 
     // Caller holds the checkpoint mutex, including around destructive resets.
     pub(super) async fn checkpoint_locked(&self) -> Result<()> {
+        #[cfg(test)]
+        self.0.journal_trace.at(barriers::Phase::Capture).await;
         let downloads = self.capture_snapshots(None).await?;
-        let downloads = sync_snapshots(downloads).await?;
+        let downloads = sync_snapshots(
+            downloads,
+            #[cfg(test)]
+            Some(self.0.journal_trace.clone()),
+        )
+        .await?;
         #[cfg(test)]
         {
             let hook = self.0.checkpoint_hook.lock().await.take();
@@ -63,7 +73,14 @@ impl Manager {
             }
         }
         self.0.database.persist(downloads.clone()).await?;
+        #[cfg(test)]
+        self.0
+            .journal_trace
+            .at(barriers::Phase::BeforeDirectory)
+            .await;
         sync_directory(super::storage::parent(self.0.database.path())?.to_path_buf()).await?;
+        #[cfg(test)]
+        self.0.journal_trace.at(barriers::Phase::Directory).await;
         let jobs = self.0.jobs.read().await;
         for snapshot in downloads {
             if snapshot.status == Status::Completed
@@ -115,11 +132,26 @@ impl Manager {
 }
 
 // Snapshot offsets must be captured before entering this durability barrier.
-pub(super) async fn sync_snapshots(downloads: Vec<Arc<Record>>) -> Result<Vec<Arc<Record>>> {
-    let (downloads, directories) = tokio::task::spawn_blocking(move || sync_partials(downloads))
-        .await
-        .map_err(|error| Error::Worker(error.to_string()))??;
+pub(super) async fn sync_snapshots(
+    downloads: Vec<Arc<Record>>,
+    #[cfg(test)] trace: Option<Arc<barriers::Trace>>,
+) -> Result<Vec<Arc<Record>>> {
+    #[cfg(test)]
+    let file_trace = trace.clone();
+    let (downloads, directories) = tokio::task::spawn_blocking(move || {
+        sync_partials(
+            downloads,
+            #[cfg(test)]
+            file_trace,
+        )
+    })
+    .await
+    .map_err(|error| Error::Worker(error.to_string()))??;
     for directory in directories {
+        #[cfg(test)]
+        if let Some(trace) = &trace {
+            trace.at(barriers::Phase::StagingDirectory).await;
+        }
         match sync_directory(directory).await {
             Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {}
             result => result?,
@@ -130,6 +162,7 @@ pub(super) async fn sync_snapshots(downloads: Vec<Arc<Record>>) -> Result<Vec<Ar
 
 fn sync_partials(
     downloads: Vec<Arc<Record>>,
+    #[cfg(test)] trace: Option<Arc<barriers::Trace>>,
 ) -> Result<(Vec<Arc<Record>>, std::collections::BTreeSet<PathBuf>)> {
     let mut directories = std::collections::BTreeSet::new();
     for record in &downloads {
@@ -143,6 +176,10 @@ fn sync_partials(
         match std::fs::OpenOptions::new().write(true).open(&part) {
             Ok(file) => {
                 file.sync_data()?;
+                #[cfg(test)]
+                if let Some(trace) = &trace {
+                    trace.record(barriers::Phase::File);
+                }
                 directories.insert(paths::parent(&part)?.to_path_buf());
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
@@ -299,6 +336,48 @@ mod tests {
         assert_eq!(
             manager.0.database.load().await.unwrap()[0].error.as_deref(),
             Some("must be committed")
+        );
+        manager.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn receipt_and_completed_cache_wait_for_journal_directory() {
+        let (_root, manager, job) = completed_job().await;
+        let saved = manager.capture_snapshots(None).await.unwrap().remove(0);
+        job.record.write().await.error = Some("directory barrier".into());
+        let (entered, release) = manager
+            .0
+            .journal_trace
+            .gate(barriers::Phase::BeforeDirectory);
+        let worker = manager.clone();
+        let mut pending = tokio::spawn(async move { worker.checkpoint().await });
+        entered.await.unwrap();
+        assert_eq!(
+            manager.0.database.load().await.unwrap()[0].error.as_deref(),
+            Some("directory barrier")
+        );
+        assert!(
+            matches!(futures_util::poll!(&mut pending), std::task::Poll::Pending),
+            "receipt escaped before journal-directory sync"
+        );
+        assert!(
+            Arc::ptr_eq(
+                job.completed_snapshot.lock().unwrap().as_ref().unwrap(),
+                &saved
+            ),
+            "completed cache advanced before journal-directory sync"
+        );
+        release.send(()).unwrap();
+        pending.await.unwrap().unwrap();
+        assert_eq!(
+            job.completed_snapshot
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .error
+                .as_deref(),
+            Some("directory barrier")
         );
         manager.shutdown().await.unwrap();
     }

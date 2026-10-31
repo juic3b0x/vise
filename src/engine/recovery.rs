@@ -79,6 +79,8 @@ impl Manager {
             _output_locks: output_locks,
             #[cfg(test)]
             checkpoint_hook: Mutex::new(None),
+            #[cfg(test)]
+            journal_trace: Arc::new(super::journal::barriers::Trace::default()),
         }));
         manager.checkpoint().await?;
         // Persist recovery before removing hard-link evidence or corrupt targets.

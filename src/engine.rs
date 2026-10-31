@@ -144,6 +144,8 @@ struct Inner {
     _output_locks: Vec<std::fs::File>,
     #[cfg(test)]
     checkpoint_hook: Mutex<Option<CheckpointHook>>,
+    #[cfg(test)]
+    journal_trace: Arc<journal::barriers::Trace>,
 }
 
 /// Cloneable controller shared by CLI, REST handlers, and WebSocket subscribers.

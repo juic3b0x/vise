@@ -510,7 +510,12 @@ impl Manager {
         let snapshots = self.capture_snapshots(Some(candidate)).await?;
         #[cfg(test)]
         tests::hook("after-snapshot");
-        let snapshots = super::journal::sync_snapshots(snapshots).await?;
+        let snapshots = super::journal::sync_snapshots(
+            snapshots,
+            #[cfg(test)]
+            None,
+        )
+        .await?;
         #[cfg(test)]
         tests::hook("after-sync");
         if let Err(error) = self.0.database.persist(snapshots).await {

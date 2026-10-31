@@ -97,6 +97,8 @@ pub struct Database {
     #[cfg(test)]
     reject_commit_ack: Arc<std::sync::atomic::AtomicBool>,
     #[cfg(test)]
+    pub(crate) snapshot_commits: Arc<std::sync::atomic::AtomicUsize>,
+    #[cfg(test)]
     before_commit: Arc<Mutex<Option<CommitHook>>>,
     #[cfg(test)]
     after_commit: Arc<Mutex<Option<CommitHook>>>,
@@ -115,6 +117,8 @@ impl Database {
             gate: Arc::new(tokio::sync::Mutex::new(())),
             #[cfg(test)]
             reject_commit_ack: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            #[cfg(test)]
+            snapshot_commits: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             #[cfg(test)]
             before_commit: Arc::new(Mutex::new(None)),
             #[cfg(test)]
@@ -203,6 +207,8 @@ impl Database {
     pub(crate) async fn persist(&self, mut records: Vec<Arc<Record>>) -> Result<()> {
         let path = self.path.clone();
         #[cfg(test)]
+        let snapshot_commits = self.snapshot_commits.clone();
+        #[cfg(test)]
         let reject_ack = self.reject_commit_ack.clone();
         #[cfg(test)]
         let before_commit = self.before_commit.clone();
@@ -264,6 +270,8 @@ impl Database {
             #[cfg(test)]
             wait_before_commit(&before_commit);
             transaction.commit()?;
+            #[cfg(test)]
+            snapshot_commits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             #[cfg(test)]
             checkpoint_hook::wait_after_commit(&after_commit)?;
             #[cfg(test)]
