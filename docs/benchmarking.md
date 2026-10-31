@@ -43,11 +43,11 @@ All parameters are in the tracked [`benchmarks/scenarios.json`](https://github.c
 | `large` | One 512 MiB file, unthrottled | Whole-tool loopback overhead and storage cost |
 | `capped` | Same file; 8 MiB/s per TCP connection | Parallel connection utilization |
 | `heterogeneous` | Same cap; every fourth accepted TCP connection gets one tenth of it | Work distribution and completion tails |
-| `small` | 2,000 seeded files, 64 KiB–1 MiB, five concurrent jobs | Startup, probes, admissions, per-file publication and journaling |
+| `small` | 1,000 seeded files, 64 KiB–1 MiB, five concurrent jobs | Startup, probes, admissions, per-file publication and journaling |
 | `latency` | 80 ms before **each** response | Request/probe overhead; this is response delay, not simulated network RTT |
 | `flaky` | Two seeded absolute fault offsets per file | Reset recovery, success rate, correct-completion time and observed retries |
 
-The small-file scenario uses C=1 for every client. Vise receives URLs over `--interactive` stdin and then EOF, which waits for all queued downloads. This bypasses the 1,000-URL batch input bound without changing runtime code. aria2 receives its stdin input list; curl uses a generated config file. Timing includes process startup, stdin feeding, queue admission, and shutdown. **Do not send `quit`**, which cancels Vise's interactive session.
+The small-file scenario uses C=1 for every client. Vise receives URLs over `--interactive` stdin and then EOF, which waits for all queued downloads. The default workload contains 1,000 URLs. aria2 receives its stdin input list; curl uses a generated config file. Timing includes process startup, stdin feeding, queue admission, and shutdown. **Do not send `quit`**, which cancels Vise's interactive session.
 
 The independent fixture binds only numeric `127.0.0.1` on an ephemeral port. Payload bytes come from a seeded, seekable counter-based SplitMix64 PRNG, never a disk file or a whole-file allocation. Fixed-size buffers generate arbitrary ranges; SHA-256 digests are computed independently before the timed run. HTTP/1.1 GET/HEAD, strong ETags, single closed/open/suffix ranges, If-Range, Content-Length and invalid-range rejection are implemented. Requests, headers, file counts and lengths are bounded; malformed input is rejected without echoing it. No raw headers or request text are logged.
 

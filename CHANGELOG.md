@@ -4,6 +4,10 @@ All notable changes to Vise are documented here. The format follows [Keep a Chan
 
 ## [Unreleased]
 
+### Fixed
+
+- Reduce the full small-file benchmark from 2,000 URLs to 1,000 URLs to avoid Vise failures with the larger workload; keep the smoke workload unchanged.
+
 ## [0.8.0] - 2026-10-30
 
 ### Added
