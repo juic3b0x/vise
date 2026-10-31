@@ -387,6 +387,8 @@ See [architecture, recovery behavior, and API documentation](docs/architecture.m
 
 The package's Rust library target exists for Vise's binary and tests. Its entire public Rust surface is internal and unstable throughout 0.x; it is not a supported embedding API. See [library and binary boundaries](docs/architecture.md#library-and-binary-boundaries) for target ownership, visibility decisions, and the shared logger's protection boundary.
 
+CLI progress rendering reuses parsed styles and unchanged formatted text while preserving its output and lifecycle updates.
+
 Checkpoints reuse unchanged completed snapshots while retaining immediate lifecycle commits, whole-queue validation and the same SQLite/file durability barriers.
 
 Adaptive splitting skips checkpoint-lock acquisition for impossible tails and retains eligibility checks under the lock.
