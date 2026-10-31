@@ -1,6 +1,102 @@
 use super::{tests::record, *};
 
 #[tokio::test]
+async fn deleted_saved_entries_follow_acknowledged_commits() {
+    let root = tempfile::tempdir().unwrap();
+    let database = Database::open(root.path().join(FILE_NAME)).await.unwrap();
+    let first = record();
+    let second = record();
+    let originals = vec![first.clone(), second.clone()];
+    database.persist_records(originals.clone()).await.unwrap();
+    let original_cache = database
+        .call(|state| Ok(state.saved.clone()))
+        .await
+        .unwrap();
+    let external = Connection::open(database.path()).unwrap();
+    let mut changed = second.clone();
+    changed.error = Some("update in deleting transaction".into());
+
+    // The delete executes before this rejected update. Both SQL tables and the
+    // saved cache must retain their complete pre-transaction contents.
+    external.execute_batch("CREATE TRIGGER refuse_deleting_update BEFORE UPDATE ON downloads BEGIN SELECT RAISE(ABORT, 'injected update after deletion'); END;").unwrap();
+    assert!(database.persist_records(vec![changed]).await.is_err());
+    assert_eq!(
+        database
+            .call(|state| Ok(state.saved.clone()))
+            .await
+            .unwrap(),
+        original_cache,
+        "failed deletion must retain the entire saved cache"
+    );
+    let durable = database.load().await.unwrap();
+    assert_eq!(durable.len(), 2);
+    assert!(originals.iter().all(|record| durable.contains(record)));
+    external
+        .execute_batch("DROP TRIGGER refuse_deleting_update")
+        .unwrap();
+
+    database
+        .persist_records(vec![second.clone()])
+        .await
+        .unwrap();
+    let expected_cache = BTreeMap::from([(second.id, second.clone())]);
+    assert_eq!(
+        database
+            .call(|state| Ok(state.saved.clone()))
+            .await
+            .unwrap(),
+        expected_cache,
+        "successful deletion must remove the saved entry"
+    );
+    assert_eq!(database.load().await.unwrap(), vec![second.clone()]);
+    let deleted_chunks: i64 = external
+        .query_row(
+            "SELECT COUNT(*) FROM chunks WHERE download_id=?1",
+            [first.id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(deleted_chunks, 0, "deletion must cascade to chunks");
+
+    // An identical record must be inserted again, rather than skipped because
+    // its old value survived in the saved cache.
+    database.persist_records(originals.clone()).await.unwrap();
+    let durable = database.load().await.unwrap();
+    assert_eq!(
+        durable.len(),
+        2,
+        "identical deleted record must be reinserted"
+    );
+    assert!(originals.iter().all(|record| durable.contains(record)));
+
+    database.reject_next_commit_ack();
+    assert!(
+        database
+            .persist_records(vec![second.clone()])
+            .await
+            .is_err()
+    );
+    assert_eq!(database.load().await.unwrap(), vec![second.clone()]);
+    assert_eq!(
+        database
+            .call(|state| Ok(state.saved.clone()))
+            .await
+            .unwrap(),
+        original_cache,
+        "lost deletion acknowledgement must retain the saved cache"
+    );
+    database.persist_records(vec![second]).await.unwrap();
+    assert_eq!(
+        database
+            .call(|state| Ok(state.saved.clone()))
+            .await
+            .unwrap(),
+        expected_cache,
+        "retry must reconcile the deleted saved entry"
+    );
+}
+
+#[tokio::test]
 async fn failed_cancelled_and_ambiguous_commits_preserve_the_saved_cache() {
     let root = tempfile::tempdir().unwrap();
     let database = Database::open(root.path().join(FILE_NAME)).await.unwrap();
