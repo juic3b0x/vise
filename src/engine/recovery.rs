@@ -83,6 +83,8 @@ impl Manager {
             #[cfg(test)]
             delete_hook: Mutex::new(None),
             #[cfg(test)]
+            input_hook: Mutex::new(None),
+            #[cfg(test)]
             journal_trace: Arc::new(super::journal::barriers::Trace::default()),
         }));
         manager.checkpoint().await?;

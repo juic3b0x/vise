@@ -23,6 +23,8 @@ struct Args {
     /// Read HTTP(S) URLs from a UTF-8 text file (one per line; # comments)
     #[arg(long, value_name = "FILE")]
     input: Option<PathBuf>,
+    #[arg(skip)]
+    input_admission: bool,
     /// Launch the local dashboard instead of the terminal controller
     #[arg(long)]
     webui: bool,
@@ -124,6 +126,7 @@ async fn run(mut args: Args) -> anyhow::Result<u8> {
         !args.urls.iter().any(|url| url == "remote"),
         "put remote immediately after vise; local-engine options cannot be mixed with daemon client commands"
     );
+    args.input_admission = args.input.is_some();
     if args.input.is_some() || !args.urls.is_empty() {
         args.urls = vise::input::load(std::mem::take(&mut args.urls), args.input.take()).await?;
     }

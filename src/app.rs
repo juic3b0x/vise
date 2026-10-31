@@ -51,6 +51,12 @@ async fn seed_queue(
     if args.resume_all {
         manager.resume_all().await?;
     }
+    if args.input_admission {
+        manager
+            .add_input(args.urls.clone(), args.name.clone(), expected)
+            .await?;
+        return Ok(());
+    }
     for url in &args.urls {
         manager
             .add_with_checksums(url, args.name.as_deref(), expected.clone())

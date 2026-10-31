@@ -63,6 +63,12 @@ Vise trims each line, ignores empty lines and lines beginning with `#`, and acce
 
 Limits are 1 MiB of input text, 1,000 URLs per invocation, and 8,192 bytes per URL. Missing files, directories, invalid UTF-8, malformed URLs, and empty lists fail before configuration or journal creation and before any positional URLs are queued. A malformed line reports its line number without echoing the URL. Positional arguments precede file entries. An explicitly provided empty file is an error even with positional URLs.
 
+When `--input` is supplied, the complete resolved list (positional URLs first, followed by file entries) is preflighted and admitted in two atomic durable stages. The first transaction stores every new task paused; the second commits every queued transition. Vise emits `Added` events in input order after the second durability barrier, before starting any of these workers. Duplicates keep their normal collision-safe names and each task keeps its proxy, cookies and origin-bound request credentials.
+
+Preflight errors and a known rollback of the first transaction admit none of the new list. If activation fails, the command fails and the entire admitted list stays paused, with no new `Added` events or workers; resume it explicitly after fixing the error. Lost commit acknowledgements are read back: a committed first stage is retained paused, and a committed second stage is repaired durably to paused before reporting failure. If the outcome cannot be reconciled, Vise requires reopening the engine. After a crash, every unfinished admitted task recovers paused. Admission and activation are separate transactions; this does not promise rollback to an empty queue after admission has committed.
+
+This whole-list contract applies only to startup with `--input`. Positional-only startup keeps sequential admission and its existing failure behavior; daemon batches keep their indexed per-entry operational results. No version bump accompanies this change.
+
 The combined queue uses the normal `-j`, `-c`, `-o`, proxy, cookie, and rate settings. Without `--interactive` or a server flag, Vise exits after the session's tasks settle and reports failures through its exit code. `--name` and expected-checksum flags require exactly one URL after combining arguments and the file. `--resume-all` retains its normal behavior for saved tasks.
 
 With a running daemon, use [remote file ingestion](remote.md#bulk-ingestion) instead of starting another engine.
