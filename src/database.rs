@@ -177,6 +177,17 @@ impl Database {
         self.call(|state| read_records(&mut state.connection)).await
     }
 
+    // Atomic-input error handling must read the SQL outcome and replace the
+    // comparison cache together before a possible Paused repair transaction.
+    pub(crate) async fn admission_snapshot(&self) -> Result<Vec<Record>> {
+        self.call(|state| {
+            let records = read_records(&mut state.connection)?;
+            state.saved = snapshots(records.clone())?;
+            Ok(records)
+        })
+        .await
+    }
+
     pub(crate) async fn load_rate_limit(&self) -> Result<crate::rate_limiter::RateLimit> {
         self.call(|state| {
             let value: Option<String> = state

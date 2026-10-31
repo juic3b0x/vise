@@ -414,6 +414,12 @@ fn crash_data() -> Vec<u8> {
 }
 
 async fn crash_server() -> (String, tokio::task::JoinHandle<()>) {
+    crash_server_counted(None).await
+}
+
+pub(in crate::engine) async fn crash_server_counted(
+    requests: Option<Arc<std::sync::atomic::AtomicUsize>>,
+) -> (String, tokio::task::JoinHandle<()>) {
     use axum::{
         body::Body,
         extract::State,
@@ -421,7 +427,18 @@ async fn crash_server() -> (String, tokio::task::JoinHandle<()>) {
         response::Response,
         routing::get,
     };
-    async fn serve(State(data): State<Arc<Vec<u8>>>, headers: HeaderMap) -> Response {
+    #[derive(Clone)]
+    struct CrashState {
+        data: Arc<Vec<u8>>,
+        requests: Option<Arc<std::sync::atomic::AtomicUsize>>,
+    }
+    async fn serve(
+        State(CrashState { data, requests }): State<CrashState>,
+        headers: HeaderMap,
+    ) -> Response {
+        if let Some(requests) = requests {
+            requests.fetch_add(1, Ordering::SeqCst);
+        }
         let text = headers
             .get(header::RANGE)
             .unwrap()
@@ -459,7 +476,10 @@ async fn crash_server() -> (String, tokio::task::JoinHandle<()>) {
     let url = format!("http://{}/data.bin", listener.local_addr().unwrap());
     let router = axum::Router::new()
         .route("/data.bin", get(serve))
-        .with_state(Arc::new(crash_data()));
+        .with_state(CrashState {
+            data: Arc::new(crash_data()),
+            requests,
+        });
     let handle = tokio::spawn(async move {
         axum::serve(listener, router).await.unwrap();
     });

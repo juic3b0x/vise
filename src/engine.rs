@@ -28,6 +28,7 @@ pub use batch::{Accepted, BatchResult, Rejected};
 
 mod completion;
 mod http;
+mod input_batch;
 mod journal;
 mod layout;
 mod migration;
@@ -147,6 +148,8 @@ struct Inner {
     checkpoint_hook: Mutex<Option<CheckpointHook>>,
     #[cfg(test)]
     delete_hook: Mutex<Option<CheckpointHook>>,
+    #[cfg(test)]
+    input_hook: Mutex<Option<CheckpointHook>>,
     #[cfg(test)]
     journal_trace: Arc<journal::barriers::Trace>,
 }

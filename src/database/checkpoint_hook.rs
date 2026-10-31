@@ -4,6 +4,10 @@ use crate::error::{Error, Result};
 use std::{sync::Mutex, time::Duration};
 
 impl Database {
+    pub(crate) fn clear_commit_gate(&self) {
+        self.after_commit.lock().unwrap().take();
+    }
+
     pub(crate) fn gate_next_commit(
         &self,
     ) -> (

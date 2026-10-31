@@ -6,6 +6,8 @@ All notable changes to Vise are documented here. The format follows [Keep a Chan
 
 ### Changed
 
+- Admit startup lists supplied with `--input` in two atomic durable stages: all new tasks paused, then all queued. Emit `Added` in input order after the second barrier and before workers start. Known first-stage rollbacks admit none; activation failures and reconciled lost acknowledgements retain the whole admitted list paused. Preserve duplicates, collision-safe names, transports and credential-origin validation. Positional-only and daemon batch contracts stay unchanged. No version bump is made.
+
 - Group ready concurrent checkpoint requests into one capture/file-sync/FULL-WAL-transaction/directory-sync barrier without timers or delayed lifecycle commits. Receipts cover frozen batches; late requests wait for another capture. Enrolled work survives receiver cancellation and drains on shutdown. Reconcile uncertain SQL outcomes before further captures; retain exclusive reset, terminal, deletion and split paths. No schema, request-count or version changes.
 
 - Cache CLI progress styles and unchanged formatted prefixes/messages while preserving progress-bar setter, redraw, finish/reset and redirected-output behavior.

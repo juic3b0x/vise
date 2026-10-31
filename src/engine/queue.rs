@@ -187,6 +187,15 @@ impl Manager {
         job.adaptive
             .reset(&*job.record.read().await, self.0.rate_limiter.limit());
         self.publish_job(action, &job).await;
+        self.schedule(id, job.clone()).await;
+        self.notify();
+        Ok(())
+    }
+
+    // Both callers have already committed Queued and emitted their Added/Resumed
+    // event. Keep spawning separate from persistence so input activation cannot
+    // accidentally introduce per-entry lifecycle commits.
+    pub(super) async fn schedule(&self, id: Uuid, job: Arc<Job>) {
         self.0.scheduled.write().await.insert(id);
         let cancel = CancellationToken::new();
         let manager = self.clone();
@@ -199,8 +208,6 @@ impl Manager {
             manager.finish(&worker_job, result).await;
         });
         *job.run.lock().await = Some(Run { cancel, handle });
-        self.notify();
-        Ok(())
     }
 
     /// Cancellation closes HTTP streams, then waits for every pending write to finish.
@@ -353,7 +360,7 @@ impl Manager {
     }
 }
 
-async fn destination(
+pub(super) async fn destination(
     root: &std::path::Path,
     base: &str,
     explicit: bool,
