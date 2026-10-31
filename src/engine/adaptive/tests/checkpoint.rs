@@ -229,3 +229,52 @@ async fn checkpoint_death_after_file_sync_recovers_previous_offsets() {
 async fn checkpoint_death_after_sql_commit_recovers_new_offsets() {
     check_death(AFTER_COMMIT, NEW_OFFSET).await;
 }
+
+#[tokio::test]
+async fn successful_single_range_file_keeps_seven_durable_barriers() {
+    use crate::engine::journal::barriers::Phase;
+    use std::sync::atomic::Ordering;
+    let root = tempfile::tempdir().unwrap();
+    let manager = Manager::open(config(root.path())).await.unwrap();
+    let (url, server) = crash_server().await;
+    manager.0.journal_trace.take();
+    let baseline = manager.0.database.snapshot_commits.load(Ordering::SeqCst);
+    let mut events = manager.subscribe_events();
+    manager.add(&url, None).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let event = events.recv().await.unwrap();
+            if event.kind == crate::events::EventKind::Completed {
+                break;
+            }
+            assert_ne!(event.kind, crate::events::EventKind::Failed);
+        }
+    })
+    .await
+    .unwrap();
+    let phases = manager.0.journal_trace.take();
+    let count = |phase| phases.iter().filter(|p| **p == phase).count();
+    assert_eq!(
+        count(Phase::Capture),
+        7,
+        "each lifecycle/reset/publication barrier remains"
+    );
+    assert_eq!(
+        count(Phase::Directory),
+        7,
+        "every barrier includes journal directory sync"
+    );
+    assert_eq!(
+        count(Phase::File),
+        3,
+        "prepare, downloading and prepublication sync staging data"
+    );
+    assert_eq!(count(Phase::StagingDirectory), 3);
+    assert_eq!(
+        manager.0.database.snapshot_commits.load(Ordering::SeqCst) - baseline,
+        7
+    );
+    manager.shutdown().await.unwrap();
+    server.abort();
+    let _ = server.await;
+}

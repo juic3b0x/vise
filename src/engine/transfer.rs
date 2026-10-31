@@ -711,6 +711,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reset_does_not_truncate_before_durable_offsets() {
+        let (_dir, manager, job) = staged_job().await;
+        job.record.write().await.chunks[0].written = 3;
+        manager
+            .0
+            .jobs
+            .write()
+            .await
+            .insert(job.record.read().await.id, job.clone());
+        fs::write(&job.part_path, b"abc").await.unwrap();
+        manager.checkpoint().await.unwrap();
+        let (entered, ready) = tokio::sync::oneshot::channel();
+        let (release, wait) = tokio::sync::oneshot::channel();
+        *manager.0.checkpoint_hook.lock().await = Some((entered, wait));
+        let worker = manager.clone();
+        let task = job.clone();
+        let pending = tokio::spawn(async move {
+            worker
+                .prepare_partial(
+                    &task,
+                    Metadata {
+                        total: Some(5),
+                        ranged: true,
+                        validator: Some("new".into()),
+                        expected: Default::default(),
+                    },
+                )
+                .await
+        });
+        ready.await.unwrap();
+        assert_eq!(
+            manager.0.database.load().await.unwrap()[0].chunks[0].written,
+            3
+        );
+        assert_eq!(
+            fs::read(&job.part_path).await.unwrap(),
+            b"abc",
+            "truncate preceded durable offset invalidation"
+        );
+        release.send(()).unwrap();
+        pending.await.unwrap().unwrap();
+        assert_eq!(
+            manager.0.database.load().await.unwrap()[0].chunks[0].written,
+            0
+        );
+        assert_eq!(fs::metadata(&job.part_path).await.unwrap().len(), 5);
+        manager.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn missing_chunks_fail_workers_and_do_not_commit_progress() {
         let (_dir, manager, job) = staged_job().await;
         let cancel = CancellationToken::new();
