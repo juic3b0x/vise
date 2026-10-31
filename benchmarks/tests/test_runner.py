@@ -96,12 +96,15 @@ class RunnerTests(unittest.TestCase):
                     self.assertFalse(any(arg.startswith(("--allow-overwrite", "--continue", "--auto-file-renaming", "--no-netrc")) for arg in command))
                 self.assertIn(b"/file/0.bin", stdin)
 
-    def test_many_urls_use_interactive_eof_not_input_file(self):
-        urls = [f"http://127.0.0.1:1/file/{i}.bin" for i in range(2000)]
+    def test_small_default_uses_1000_urls_over_interactive_eof(self):
+        config = json.loads((run.ROOT / "benchmarks/scenarios.json").read_text(encoding="utf-8"))
+        sizes = run.fixture_config(config, "small", config["seed"])["sizes"]
+        self.assertEqual(len(sizes), 1000)
+        urls = [f"http://127.0.0.1:1/file/{i}.bin" for i in range(len(sizes))]
         command, stdin = adapters.command("vise", "vise", urls, Path("target"), Path("target"), 1, 5, 5, 30, True)
         self.assertIn("--interactive", command)
         self.assertNotIn("--input", command)
-        self.assertEqual(len(stdin.splitlines()), 2000)
+        self.assertEqual(len(stdin.splitlines()), 1000)
         self.assertNotIn(b"quit", stdin)
 
     def test_isolation_drops_credentials_proxy_and_logs(self):

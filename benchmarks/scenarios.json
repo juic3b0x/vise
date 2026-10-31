@@ -6,7 +6,7 @@
   "timeout": 30,
   "run_timeout": 600,
   "large_bytes": 536870912,
-  "small_count": 2000,
+  "small_count": 1000,
   "small_min_bytes": 65536,
   "small_max_bytes": 1048576,
   "rate_bytes_per_second": 8388608,
