@@ -158,7 +158,31 @@ async fn input_preflight_and_transaction_a_failures_leave_no_prefix() {
         0
     );
     sql.execute_batch("DROP TRIGGER refuse_input").unwrap();
+    let permits = manager.0.pool.acquire_many(5).await.unwrap();
+    manager
+        .add_input(urls(), None, Default::default())
+        .await
+        .unwrap();
+    let mut names: Vec<_> = manager
+        .list()
+        .await
+        .into_iter()
+        .map(|item| item.filename)
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        [
+            "data (1).bin",
+            "data (2).bin",
+            "data (3).bin",
+            "data (4).bin",
+            "data.bin"
+        ],
+        "rolled-back admission leaked reservations"
+    );
     manager.shutdown().await.unwrap();
+    drop(permits);
 }
 
 #[tokio::test]
@@ -181,7 +205,25 @@ async fn failed_transaction_b_retains_every_task_paused_without_events_or_worker
     assert_not_started(&manager, &mut events).await;
     sql.execute_batch("DROP TRIGGER refuse_input_start")
         .unwrap();
+    let permits = manager.0.pool.acquire_many(5).await.unwrap();
+    manager
+        .add_input(urls(), None, Default::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        manager.list().await.len(),
+        10,
+        "paused activation-failure destinations lost their reservations"
+    );
+    assert!(
+        manager
+            .list()
+            .await
+            .iter()
+            .any(|item| item.filename == "data (9).bin")
+    );
     manager.shutdown().await.unwrap();
+    drop(permits);
 }
 
 #[tokio::test]

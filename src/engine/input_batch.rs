@@ -127,14 +127,8 @@ impl Manager {
     ) -> Result<Vec<(Uuid, Arc<Job>)>> {
         let (output, staging) =
             super::storage::admission_directories(self.0.config.output_dir.clone()).await?;
-        let mut used: Vec<_> = self
-            .0
-            .jobs
-            .read()
-            .await
-            .values()
-            .map(|job| job.output_path.clone())
-            .collect();
+        let existing = self.0.jobs.read().await;
+        let mut used = BTreeSet::new();
         let mut jobs = Vec::with_capacity(urls.len());
         for (url, (client, cookies_file)) in urls.into_iter().zip(transports) {
             let url = validate_url(&url)?;
@@ -145,8 +139,11 @@ impl Manager {
                 }
                 None => default_filename(&url),
             };
-            let (name, target) = destination(&output, &base, filename.is_some(), &used).await?;
-            used.push(target.clone());
+            let (name, target) = destination(&output, &base, filename.is_some(), |path| {
+                existing.contains_path(path) || used.contains(path)
+            })
+            .await?;
+            used.insert(target.clone());
             let id = Uuid::new_v4();
             let record = Record {
                 id,
@@ -167,7 +164,7 @@ impl Manager {
                 speed: 0.0,
                 created_at: timestamp_millis(),
             };
-            jobs.push((id, Arc::new(Job::new(record, client))));
+            jobs.push((id, Arc::new(Job::fresh(record, client))));
         }
         Ok(jobs)
     }
@@ -235,6 +232,7 @@ impl Manager {
 fn input_unresolved(jobs: &[(Uuid, Arc<Job>)]) -> Result<()> {
     for (_, job) in jobs {
         job.journal_blocked.store(true, Ordering::Release);
+        job.record.block_journal();
     }
     Err(Error::Worker(
         "input batch outcome is unresolved; reopen the engine before continuing".into(),

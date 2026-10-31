@@ -5,6 +5,8 @@ use tokio::sync::oneshot;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::engine) enum Phase {
     Capture,
+    RecordCapture,
+    StagingInspection,
     File,
     StagingDirectory,
     BeforeDirectory,

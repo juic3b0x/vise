@@ -1,7 +1,7 @@
 //! Durable, normalized SQLite state journal. Every SQLite operation (including
 //! mutex acquisition and connection teardown) runs outside Tokio's async workers.
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -65,6 +65,24 @@ struct State {
     // Durable snapshots only; transient speed samples are excluded. Unchanged
     // downloads don't cause row rewrites or idle WAL transactions.
     saved: BTreeMap<Uuid, Record>,
+    credentialed: BTreeSet<Uuid>,
+}
+
+impl State {
+    fn cache_committed_delta(&mut self, changed: Vec<&Arc<Record>>, removed: Vec<Uuid>) {
+        for id in removed {
+            self.saved.remove(&id);
+            self.credentialed.remove(&id);
+        }
+        for record in changed {
+            if record.request_credentials.is_some() {
+                self.credentialed.insert(record.id);
+            } else {
+                self.credentialed.remove(&record.id);
+            }
+            self.saved.insert(record.id, record.as_ref().clone());
+        }
+    }
 }
 
 struct Shared(Mutex<Option<State>>);
@@ -103,6 +121,8 @@ pub struct Database {
     #[cfg(test)]
     pub(crate) snapshot_commits: Arc<std::sync::atomic::AtomicUsize>,
     #[cfg(test)]
+    pub(crate) records_compared: Arc<std::sync::atomic::AtomicUsize>,
+    #[cfg(test)]
     before_commit: Arc<Mutex<Option<CommitHook>>>,
     #[cfg(test)]
     after_commit: Arc<Mutex<Option<CommitHook>>>,
@@ -126,6 +146,8 @@ impl Database {
             reject_commit_ack: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             #[cfg(test)]
             snapshot_commits: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            #[cfg(test)]
+            records_compared: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             #[cfg(test)]
             before_commit: Arc::new(Mutex::new(None)),
             #[cfg(test)]
@@ -183,6 +205,7 @@ impl Database {
         self.call(|state| {
             let records = read_records(&mut state.connection)?;
             state.saved = snapshots(records.clone())?;
+            state.credentialed = credential_ids(&state.saved);
             Ok(records)
         })
         .await
@@ -237,17 +260,24 @@ impl Database {
         let unsettled = self.unreconciled.clone();
         self.call(move |state| {
             state.saved = snapshots(read_records(&mut state.connection)?)?;
+            state.credentialed = credential_ids(&state.saved);
             unsettled.store(false, Ordering::Release);
             Ok(())
         })
         .await
     }
 
-    pub(crate) async fn persist(&self, mut records: Vec<Arc<Record>>) -> Result<()> {
+    pub(crate) async fn persist_delta(
+        &self,
+        mut records: Vec<Arc<Record>>,
+        removed: Vec<Uuid>,
+    ) -> Result<()> {
         let path = self.path.clone();
         let unsettled = self.unreconciled.clone();
         #[cfg(test)]
         let snapshot_commits = self.snapshot_commits.clone();
+        #[cfg(test)]
+        let records_compared = self.records_compared.clone();
         #[cfg(test)]
         let reject_ack = self.reject_commit_ack.clone();
         #[cfg(test)]
@@ -255,39 +285,21 @@ impl Database {
         #[cfg(test)]
         let after_commit = self.after_commit.clone();
         self.call(move |state| {
-            // Retain permission checks even for an otherwise unchanged snapshot.
-            if records.iter().any(|r| r.request_credentials.is_some()) {
-                setup::credentials_permissions(&path)?;
-            }
-            records.sort_unstable_by_key(|record| record.id);
-            if records
-                .windows(2)
-                .any(|pair| matches!(pair, [left, right] if left.id == right.id))
-            {
-                return Err(Error::Invalid(
-                    "duplicate download ID in journal snapshot".into(),
-                ));
-            }
-            for record in &mut records {
-                if record.speed != 0.0 {
-                    Arc::make_mut(record).speed = 0.0;
-                }
-            }
-            // Keep the full comparison/deletion scan. Only changed records are
-            // cloned into the durable cache, after the SQL commit succeeds.
+            let removed =
+                validate_delta(&path, !state.credentialed.is_empty(), &mut records, removed)?;
+            // Compare only explicitly dirty candidates. Absence from a delta
+            // never means deletion; tombstones carry that intent separately.
             let changed: Vec<_> = records
                 .iter()
-                .filter(|record| state.saved.get(&record.id) != Some(record.as_ref()))
-                .collect();
-            let removed: Vec<_> = state
-                .saved
-                .keys()
-                .filter(|id| {
-                    records
-                        .binary_search_by_key(*id, |record| record.id)
-                        .is_err()
+                .filter(|record| {
+                    #[cfg(test)]
+                    records_compared.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    state.saved.get(&record.id) != Some(record.as_ref())
                 })
-                .copied()
+                .collect();
+            let removed: Vec<_> = removed
+                .into_iter()
+                .filter(|id| state.saved.contains_key(id))
                 .collect();
             if changed.is_empty() && removed.is_empty() {
                 return Ok(());
@@ -319,12 +331,7 @@ impl Database {
             if reject_ack.swap(false, std::sync::atomic::Ordering::SeqCst) {
                 return Err(Error::Worker("injected lost commit acknowledgement".into()));
             }
-            for id in removed {
-                state.saved.remove(&id);
-            }
-            for record in changed {
-                state.saved.insert(record.id, record.as_ref().clone());
-            }
+            state.cache_committed_delta(changed, removed);
             unsettled.store(false, std::sync::atomic::Ordering::Release);
             Ok(())
         })
@@ -333,7 +340,20 @@ impl Database {
 
     #[cfg(test)]
     async fn persist_records(&self, records: Vec<Record>) -> Result<()> {
-        self.persist(records.into_iter().map(Arc::new).collect())
+        // Legacy full-snapshot test fixtures explicitly synthesize tombstones.
+        // Production callers supply deltas and never scan saved history.
+        let ids: BTreeSet<_> = records.iter().map(|record| record.id).collect();
+        let removed = self
+            .call(move |state| {
+                Ok(state
+                    .saved
+                    .keys()
+                    .filter(|id| !ids.contains(id))
+                    .copied()
+                    .collect())
+            })
+            .await?;
+        self.persist_delta(records.into_iter().map(Arc::new).collect(), removed)
             .await
     }
 
@@ -342,6 +362,51 @@ impl Database {
         self.reject_commit_ack
             .store(true, std::sync::atomic::Ordering::SeqCst);
     }
+}
+
+fn validate_delta(
+    path: &Path,
+    saved_credentials: bool,
+    records: &mut [Arc<Record>],
+    removed: Vec<Uuid>,
+) -> Result<BTreeSet<Uuid>> {
+    // Retain permission checks even for an otherwise unchanged snapshot.
+    if saved_credentials
+        || records
+            .iter()
+            .any(|record| record.request_credentials.is_some())
+    {
+        setup::credentials_permissions(path)?;
+    }
+    records.sort_unstable_by_key(|record| record.id);
+    if records
+        .windows(2)
+        .any(|pair| matches!(pair, [left, right] if left.id == right.id))
+    {
+        return Err(Error::Invalid(
+            "duplicate download ID in journal snapshot".into(),
+        ));
+    }
+    let removed: BTreeSet<_> = removed.into_iter().collect();
+    if records.iter().any(|record| removed.contains(&record.id)) {
+        return Err(Error::Invalid(
+            "journal delta both updates and deletes a download".into(),
+        ));
+    }
+    for record in records {
+        if record.speed != 0.0 {
+            Arc::make_mut(record).speed = 0.0;
+        }
+    }
+    Ok(removed)
+}
+
+fn credential_ids(saved: &BTreeMap<Uuid, Record>) -> BTreeSet<Uuid> {
+    saved
+        .values()
+        .filter(|record| record.request_credentials.is_some())
+        .map(|record| record.id)
+        .collect()
 }
 
 #[cfg(test)]

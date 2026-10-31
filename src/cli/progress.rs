@@ -7,17 +7,45 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 
-#[derive(Default)]
+#[cfg_attr(not(test), derive(Default))]
 pub struct ProgressDisplay {
     progress: MultiProgress,
     bars: BTreeMap<Uuid, CachedBar>,
     styles: BTreeMap<bool, ProgressStyle>,
+}
+
+#[cfg(test)]
+thread_local! {
+    static DISPLAY_WORK: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
+}
+
+#[cfg(test)]
+pub(super) fn display_work() -> (usize, usize) {
+    DISPLAY_WORK.get()
+}
+
+#[cfg(test)]
+impl Default for ProgressDisplay {
+    fn default() -> Self {
+        let (created, rendered) = DISPLAY_WORK.get();
+        DISPLAY_WORK.set((created + 1, rendered));
+        Self {
+            progress: MultiProgress::default(),
+            bars: BTreeMap::new(),
+            styles: BTreeMap::new(),
+        }
+    }
 }
 impl ProgressDisplay {
     pub fn messages(&self) -> MultiProgress {
         self.progress.clone()
     }
     pub fn render(&mut self, downloads: &[Download]) -> Result<()> {
+        #[cfg(test)]
+        {
+            let (created, rendered) = DISPLAY_WORK.get();
+            DISPLAY_WORK.set((created, rendered + 1));
+        }
         render(&self.progress, &mut self.bars, &mut self.styles, downloads)
     }
     pub fn finish(&self) {

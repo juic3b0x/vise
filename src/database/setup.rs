@@ -23,7 +23,12 @@ pub(super) fn open(path: PathBuf) -> Result<State> {
         .into_iter()
         .map(|record| (record.id, record))
         .collect();
-    Ok(State { connection, saved })
+    let credentialed = super::credential_ids(&saved);
+    Ok(State {
+        connection,
+        saved,
+        credentialed,
+    })
 }
 
 pub(super) fn validate_identity(connection: &Connection) -> Result<i32> {

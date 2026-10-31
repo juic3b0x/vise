@@ -111,11 +111,27 @@ impl Manager {
     /// Batch exit status concerns tasks scheduled by this process, not history.
     pub(crate) async fn session_downloads(&self) -> Vec<Download> {
         let scheduled = self.0.scheduled.read().await.clone();
-        self.list()
-            .await
-            .into_iter()
-            .filter(|task| scheduled.contains(&task.id))
-            .collect()
+        let jobs: Vec<_> = {
+            let jobs = self.0.jobs.read().await;
+            scheduled
+                .iter()
+                .filter_map(|id| jobs.get(id).cloned())
+                .collect()
+        };
+        let mut downloads = Vec::with_capacity(jobs.len());
+        for job in jobs {
+            downloads.push(job.snapshot().await);
+        }
+        downloads
+    }
+
+    pub(crate) fn session_pending(&self) -> bool {
+        !self
+            .0
+            .running
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty()
     }
 
     pub(super) async fn job(&self, id: Uuid) -> Result<Arc<Job>> {

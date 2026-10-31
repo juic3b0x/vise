@@ -3,7 +3,7 @@ use std::{
     time::Duration,
 };
 
-use indicatif::MultiProgress;
+use indicatif::{MultiProgress, ProgressDrawTarget};
 
 mod progress;
 pub use progress::ProgressDisplay;
@@ -18,6 +18,9 @@ use crate::{
 };
 
 pub async fn run(manager: Manager, interactive: bool, stop: CancellationToken) -> Result<bool> {
+    if !interactive && ProgressDrawTarget::stderr().is_hidden() {
+        return run_hidden(manager, stop).await;
+    }
     let mut display = ProgressDisplay::default();
     let progress = display.messages();
     let mut events = manager.subscribe();
@@ -74,6 +77,31 @@ pub async fn run(manager: Manager, interactive: bool, stop: CancellationToken) -
         }
     }
     display.finish();
+    session_result(&manager, &progress, cancelled).await
+}
+
+async fn run_hidden(manager: Manager, stop: CancellationToken) -> Result<bool> {
+    // Subscribe before checking: watch coalescing cannot lose the last wakeup.
+    let mut events = manager.subscribe();
+    let mut cancelled = false;
+    while manager.session_pending() {
+        tokio::select! {
+            _ = stop.cancelled() => { cancelled = true; break; }
+            changed = events.changed() => {
+                changed.map_err(|_| Error::Worker("progress channel closed".into()))?;
+            }
+        }
+    }
+    // Keep the existing redirected-message policy without constructing bars.
+    let messages = MultiProgress::with_draw_target(ProgressDrawTarget::hidden());
+    session_result(&manager, &messages, cancelled).await
+}
+
+async fn session_result(
+    manager: &Manager,
+    progress: &MultiProgress,
+    cancelled: bool,
+) -> Result<bool> {
     let downloads = manager.session_downloads().await;
     for item in &downloads {
         if matches!(item.status, Status::Failed | Status::Corrupt) {
@@ -189,6 +217,81 @@ pub fn stdin_is_terminal() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn hidden_batch_skips_display_work_and_handles_coalesced_or_early_completion() {
+        use axum::{Router, routing::get};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route("/ok", get(|| async { "payload" })),
+            )
+            .await
+            .unwrap();
+        });
+        for early in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let manager = Manager::open(crate::engine::Config {
+                home_dir: Some(root.path().join("home")),
+                output_dir: root.path().join("out"),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+            manager
+                .add_input(
+                    vec![
+                        format!("http://{address}/ok"),
+                        format!("http://{address}/missing"),
+                    ],
+                    None,
+                    Default::default(),
+                )
+                .await
+                .unwrap();
+            if early {
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    while manager.session_pending() {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap();
+            }
+            let before = progress::display_work();
+            let success = tokio::time::timeout(
+                Duration::from_secs(10),
+                run_hidden(manager.clone(), CancellationToken::new()),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert!(!success, "a failed download must make batch mode fail");
+            assert_eq!(
+                progress::display_work(),
+                before,
+                "hidden batch constructed or rendered progress bars"
+            );
+            assert_eq!(
+                std::fs::read(
+                    manager
+                        .session_downloads()
+                        .await
+                        .into_iter()
+                        .find(|item| item.status == Status::Completed)
+                        .unwrap()
+                        .output_path
+                )
+                .unwrap(),
+                b"payload"
+            );
+            manager.shutdown().await.unwrap();
+        }
+        server.abort();
+        let _ = server.await;
+    }
     #[tokio::test]
     async fn runtime_rate_commands_update_and_clear_the_shared_limiter() {
         let dir = tempfile::tempdir().unwrap();

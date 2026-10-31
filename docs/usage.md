@@ -77,7 +77,7 @@ With a running daemon, use [remote file ingestion](remote.md#bulk-ingestion) ins
 
 | Mode | Command | Controller |
 | --- | --- | --- |
-| Terminal batch | `vise --batch URL` | Indicatif progress; no terminal input |
+| Terminal batch | `vise --batch URL` | Indicatif progress when drawing is available; no terminal input |
 | Interactive queue | `vise --interactive` | Terminal commands and progress bars |
 | Local WebUI | `vise --webui` | Browser dashboard with terminal telemetry |
 | Foreground daemon | `vise --daemon` | Authenticated API/dashboard; suitable for systemd |
@@ -89,6 +89,8 @@ With a running daemon, use [remote file ingestion](remote.md#bulk-ingestion) ins
 Stop a session with Ctrl+C; a service manager can send SIGTERM. Vise stops workers and commits their progress before exiting. One engine owns the journal at a time: use the running daemon's API rather than launching another Vise process against the same home.
 
 ## CLI reference
+
+Batch mode skips progress-bar construction and rendering when terminal drawing is unavailable. It waits for scheduled tasks to finish terminal persistence and publication cleanup, including tasks that finish during startup. Exit codes and the redirected-output policy are unchanged. Completed history does not participate in repeated batch-completion checks.
 
 | Option | Behavior / initial default |
 | --- | --- |

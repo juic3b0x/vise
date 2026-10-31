@@ -74,6 +74,14 @@ impl Manager {
     async fn prepare_partial(&self, job: &Job, metadata: Metadata) -> Result<(fs::File, PathBuf)> {
         validate_size(metadata.total)?;
         let path = job.part_path.clone();
+        let _checkpoint = self.0.checkpoint.lock().await;
+        let record = job.record.read().await.clone();
+        // Fresh jobs skip checkpoint inspection until this first access. Validate
+        // here, under the same gate as creation and captured staging eligibility.
+        tokio::task::spawn_blocking(move || paths_for_partial(&record))
+            .await
+            .map_err(|error| Error::Worker(error.to_string()))??;
+        job.staged.store(true, std::sync::atomic::Ordering::Release);
         let file = fs::OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -81,7 +89,6 @@ impl Manager {
             .write(true)
             .open(&path)
             .await?;
-        let _checkpoint = self.0.checkpoint.lock().await;
         let total = metadata.total;
         let reusable = apply_metadata(
             &mut *job.record.write().await,
@@ -350,6 +357,12 @@ impl Manager {
         body.account_discarded();
         result
     }
+}
+
+fn paths_for_partial(record: &Record) -> Result<()> {
+    crate::paths::staging_files(record)?
+        .ok_or_else(|| Error::Invalid("staging directory is unavailable".into()))?;
+    Ok(())
 }
 
 /// One response's file buffer and offsets; the HTTP request end remains fixed
@@ -708,6 +721,68 @@ mod tests {
             reqwest::Client::new(),
         ));
         (dir, manager, job)
+    }
+
+    #[tokio::test]
+    async fn fresh_staging_creation_waits_for_the_capture_gate() {
+        let (_root, manager, template) = staged_job().await;
+        let record = template.record.read().await.clone();
+        let job = Arc::new(Job::fresh(record.clone(), reqwest::Client::new()));
+        manager.0.jobs.write().await.insert(record.id, job.clone());
+        manager.checkpoint().await.unwrap();
+        assert!(!job.staged.load(std::sync::atomic::Ordering::Acquire));
+        let checkpoint = manager.0.checkpoint.lock().await;
+        let mut creation = Box::pin(manager.prepare_partial(
+            &job,
+            Metadata {
+                total: Some(3),
+                ranged: true,
+                validator: Some("new".into()),
+                expected: Default::default(),
+            },
+        ));
+        assert!(futures_util::poll!(creation.as_mut()).is_pending());
+        assert!(
+            !job.part_path.exists(),
+            "creation bypassed the capture gate"
+        );
+        assert!(!job.staged.load(std::sync::atomic::Ordering::Acquire));
+        drop(checkpoint);
+        creation.await.unwrap();
+        assert!(job.staged.load(std::sync::atomic::Ordering::Acquire));
+        assert_eq!(std::fs::metadata(&job.part_path).unwrap().len(), 3);
+        manager.shutdown().await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn first_open_of_fresh_staging_rejects_a_substituted_symlink() {
+        let (root, manager, template) = staged_job().await;
+        let record = template.record.read().await.clone();
+        let job = Arc::new(Job::fresh(record.clone(), reqwest::Client::new()));
+        manager.0.jobs.write().await.insert(record.id, job.clone());
+        manager.checkpoint().await.unwrap();
+        let unrelated = root.path().join("unrelated");
+        std::fs::write(&unrelated, b"keep").unwrap();
+        std::os::unix::fs::symlink(&unrelated, &job.part_path).unwrap();
+        assert!(
+            manager
+                .prepare_partial(
+                    &job,
+                    Metadata {
+                        total: Some(3),
+                        ranged: true,
+                        validator: Some("new".into()),
+                        expected: Default::default()
+                    }
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(std::fs::read(&unrelated).unwrap(), b"keep");
+        assert!(!job.staged.load(std::sync::atomic::Ordering::Acquire));
+        std::fs::remove_file(&job.part_path).unwrap();
+        manager.shutdown().await.unwrap();
     }
 
     #[tokio::test]

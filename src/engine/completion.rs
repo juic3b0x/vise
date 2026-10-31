@@ -81,6 +81,11 @@ impl Manager {
             );
         }
         self.publish(event.0, Some(event.1));
+        self.0
+            .running
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&id);
         self.notify();
     }
 }
@@ -156,6 +161,7 @@ mod tests {
         let job = published_job(&manager).await;
         let id = job.record.read().await.id;
         let connection = rusqlite::Connection::open(manager.database_path()).unwrap();
+        manager.0.running.lock().unwrap().insert(id);
         if reject {
             connection.execute_batch("CREATE TRIGGER reject_completion BEFORE UPDATE OF status ON downloads WHEN NEW.status='completed' BEGIN SELECT RAISE(ABORT, 'injected completion failure'); END;").unwrap();
         }
@@ -184,10 +190,18 @@ mod tests {
             matches!(futures_util::poll!(&mut list), Poll::Pending),
             "list exposed an uncommitted terminal state"
         );
+        assert!(
+            manager.session_pending(),
+            "batch completed before terminal settlement"
+        );
         connection.execute_batch("ROLLBACK").unwrap();
         finishing.await.unwrap();
         let snapshot = get.await.unwrap();
         let listed: Vec<Download> = list.await;
+        assert!(
+            !manager.session_pending(),
+            "settled task retained batch work"
+        );
         let expected = if reject {
             Status::Failed
         } else {
