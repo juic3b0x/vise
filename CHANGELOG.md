@@ -6,6 +6,8 @@ All notable changes to Vise are documented here. The format follows [Keep a Chan
 
 ### Changed
 
+- Group ready concurrent checkpoint requests into one capture/file-sync/FULL-WAL-transaction/directory-sync barrier without timers or delayed lifecycle commits. Receipts cover frozen batches; late requests wait for another capture. Enrolled work survives receiver cancellation and drains on shutdown. Reconcile uncertain SQL outcomes before further captures; retain exclusive reset, terminal, deletion and split paths. No schema, request-count or version changes.
+
 - Cache CLI progress styles and unchanged formatted prefixes/messages while preserving progress-bar setter, redraw, finish/reset and redirected-output behavior.
 - Reuse successfully checkpointed completed snapshots and update only changed/deleted entries in the SQLite saved cache. Retain whole-queue validation/comparison scans, immediate lifecycle commits, permission checks, and existing file/publication ordering; no schema or request changes.
 - Avoid acquiring the global checkpoint lock when an adaptive split cannot fit a serving tail; retain authoritative eligibility and cancellation checks under the lock.

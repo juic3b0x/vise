@@ -94,6 +94,10 @@ pub struct Database {
     state: Arc<Shared>,
     path: Arc<Path>,
     gate: Arc<tokio::sync::Mutex<()>>,
+    // A dispatched transaction may commit even if its acknowledgement is lost.
+    unreconciled: Arc<std::sync::atomic::AtomicBool>,
+    #[cfg(test)]
+    pub(crate) reject_reconciliation: Arc<std::sync::atomic::AtomicBool>,
     #[cfg(test)]
     reject_commit_ack: Arc<std::sync::atomic::AtomicBool>,
     #[cfg(test)]
@@ -115,6 +119,9 @@ impl Database {
             state: Arc::new(Shared(Mutex::new(Some(state)))),
             path: Arc::from(path.into_boxed_path()),
             gate: Arc::new(tokio::sync::Mutex::new(())),
+            unreconciled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            #[cfg(test)]
+            reject_reconciliation: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             #[cfg(test)]
             reject_commit_ack: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             #[cfg(test)]
@@ -204,8 +211,30 @@ impl Database {
             .await
     }
 
+    /// Must succeed before an engine capture can follow an uncertain SQL outcome.
+    pub(crate) async fn reconcile_checkpoint(&self) -> Result<()> {
+        use std::sync::atomic::Ordering;
+        if !self.unreconciled.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        #[cfg(test)]
+        if self.reject_reconciliation.load(Ordering::Acquire) {
+            return Err(Error::Worker(
+                "injected checkpoint reconciliation failure".into(),
+            ));
+        }
+        let unsettled = self.unreconciled.clone();
+        self.call(move |state| {
+            state.saved = snapshots(read_records(&mut state.connection)?)?;
+            unsettled.store(false, Ordering::Release);
+            Ok(())
+        })
+        .await
+    }
+
     pub(crate) async fn persist(&self, mut records: Vec<Arc<Record>>) -> Result<()> {
         let path = self.path.clone();
+        let unsettled = self.unreconciled.clone();
         #[cfg(test)]
         let snapshot_commits = self.snapshot_commits.clone();
         #[cfg(test)]
@@ -258,6 +287,7 @@ impl Database {
                     !old.chunks.is_empty() && next.chunks.len() > old.chunks.len()
                 })
             }));
+            unsettled.store(true, std::sync::atomic::Ordering::Release);
             let transaction = state
                 .connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -284,6 +314,7 @@ impl Database {
             for record in changed {
                 state.saved.insert(record.id, record.as_ref().clone());
             }
+            unsettled.store(false, std::sync::atomic::Ordering::Release);
             Ok(())
         })
         .await

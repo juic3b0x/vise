@@ -136,6 +136,7 @@ struct Inner {
     scheduled: RwLock<BTreeSet<Uuid>>,
     pool: Semaphore,
     checkpoint: Mutex<()>,
+    journal_group: Arc<journal::group::Group>,
     admission: Mutex<()>,
     events: watch::Sender<u64>,
     activity: broadcast::Sender<Event>,
@@ -144,6 +145,8 @@ struct Inner {
     _output_locks: Vec<std::fs::File>,
     #[cfg(test)]
     checkpoint_hook: Mutex<Option<CheckpointHook>>,
+    #[cfg(test)]
+    delete_hook: Mutex<Option<CheckpointHook>>,
     #[cfg(test)]
     journal_trace: Arc<journal::barriers::Trace>,
 }

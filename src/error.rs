@@ -32,6 +32,8 @@ pub enum Error {
     PayloadTooLarge,
     #[error("download interrupted")]
     Cancelled,
+    #[error(transparent)]
+    Checkpoint(std::sync::Arc<Error>),
     #[error("worker failed: {0}")]
     Worker(String),
 }
@@ -60,6 +62,7 @@ impl Error {
     }
     pub(crate) fn retryable(&self) -> bool {
         match self {
+            Self::Checkpoint(error) => error.retryable(),
             Self::Http(e) => {
                 e.is_timeout() || e.is_connect() || e.is_body() || e.is_request() || e.is_decode()
             }
@@ -77,3 +80,23 @@ impl Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+#[cfg(test)]
+mod tests {
+    use super::Error;
+    #[test]
+    fn shared_checkpoint_error_preserves_display_source_and_retry_classification() {
+        let original = Error::Io(std::io::Error::other("journal failure"));
+        let display = original.to_string();
+        let source = std::error::Error::source(&original).map(ToString::to_string);
+        let retryable = original.retryable();
+        let shared = Error::Checkpoint(std::sync::Arc::new(original));
+        assert_eq!(shared.to_string(), display);
+        assert_eq!(
+            std::error::Error::source(&shared).map(ToString::to_string),
+            source,
+            "shared checkpoint errors changed the source chain"
+        );
+        assert_eq!(shared.retryable(), retryable);
+    }
+}

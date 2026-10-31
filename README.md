@@ -389,7 +389,7 @@ The package's Rust library target exists for Vise's binary and tests. Its entire
 
 CLI progress rendering reuses parsed styles and unchanged formatted text while preserving its output and lifecycle updates.
 
-Checkpoints reuse unchanged completed snapshots while retaining immediate lifecycle commits, whole-queue validation and the same SQLite/file durability barriers.
+Ready concurrent checkpoints share one captured snapshot and durable transaction, without a batching timer or delayed lifecycle commits. Each caller waits for its own batch, including journal-directory synchronization. Dropping an enrolled caller no longer cancels the shared checkpoint; shutdown drains enrolled work. Checkpoints retain whole-queue validation, credential permission checks and completed-snapshot reuse.
 
 Adaptive splitting skips checkpoint-lock acquisition for impossible tails and retains eligibility checks under the lock.
 

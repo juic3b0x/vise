@@ -263,6 +263,11 @@ impl Manager {
         let staging = tokio::task::spawn_blocking(move || paths::staging_files(&record))
             .await
             .map_err(|error| Error::Worker(error.to_string()))??;
+        #[cfg(test)]
+        if let Some((entered, release)) = self.0.delete_hook.lock().await.take() {
+            let _ = entered.send(());
+            let _ = release.await;
+        }
         {
             // Serialize removal with checkpoints and destructive file resets.
             let _checkpoint = self.0.checkpoint.lock().await;
@@ -327,6 +332,7 @@ impl Manager {
         if let Err(error) = self.checkpoint().await {
             failure.get_or_insert(error);
         }
+        self.0.journal_group.drain().await;
         failure.map_or(Ok(()), Err)
     }
 
