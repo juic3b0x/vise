@@ -3,7 +3,9 @@ import hashlib
 import io
 import json
 import os
+import re
 from pathlib import Path
+from types import SimpleNamespace
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -36,7 +38,7 @@ class RunnerTests(unittest.TestCase):
                     profile = "aria2-matched" if name == "aria2" else name
                     command, _ = adapters.command(profile, tools[name],
                                                   ["http://127.0.0.1:1/file/0.bin"],
-                                                  directory, directory, 1, 1, 5, 30, False)
+                                                  directory, directory, 1, 1, 5, 30)
                     self.assertEqual(entry["path"], command[0])
 
     def test_missing_comparison_tools_is_a_clear_skip(self):
@@ -85,7 +87,7 @@ class RunnerTests(unittest.TestCase):
             root = Path(temporary)
             for profile in ("aria2-matched", "aria2-defaults"):
                 command, stdin = adapters.command(profile, "aria2c", ["http://127.0.0.1:1/file/0.bin"],
-                                                  root, root, 4, 5, 3, 30, False)
+                                                  root, root, 4, 5, 3, 30)
                 self.assertNotIn("--disk-cache=0", command)
                 self.assertNotIn("--enable-mmap=false", command)
                 self.assertIn("--max-tries=4", command)
@@ -96,16 +98,47 @@ class RunnerTests(unittest.TestCase):
                     self.assertFalse(any(arg.startswith(("--allow-overwrite", "--continue", "--auto-file-renaming", "--no-netrc")) for arg in command))
                 self.assertIn(b"/file/0.bin", stdin)
 
-    def test_small_default_uses_1000_urls_over_interactive_eof(self):
+    def test_small_default_uses_1000_urls_via_input(self):
         config = json.loads((run.ROOT / "benchmarks/scenarios.json").read_text(encoding="utf-8"))
         sizes = run.fixture_config(config, "small", config["seed"])["sizes"]
         self.assertEqual(len(sizes), 1000)
         urls = [f"http://127.0.0.1:1/file/{i}.bin" for i in range(len(sizes))]
-        command, stdin = adapters.command("vise", "vise", urls, Path("target"), Path("target"), 1, 5, 5, 30, True)
-        self.assertIn("--interactive", command)
-        self.assertNotIn("--input", command)
-        self.assertEqual(len(stdin.splitlines()), 1000)
-        self.assertNotIn(b"quit", stdin)
+        with tempfile.TemporaryDirectory(dir="target") as temporary:
+            root = Path(temporary)
+            command, stdin = adapters.command("vise", "vise", urls, root, root, 1, 5, 5, 30)
+            self.assertIn("--batch", command)
+            self.assertNotIn("--interactive", command)
+            listing = Path(command[command.index("--input") + 1])
+            self.assertEqual(listing.read_text(encoding="utf-8").splitlines(), urls)
+            self.assertIsNone(stdin)
+            self.assertEqual(command[command.index("--connections") + 1], "1")
+            self.assertEqual(command[command.index("--jobs") + 1], "5")
+
+    def test_small_files_override_and_production_limit(self):
+        source = (run.ROOT / "src/input.rs").read_text(encoding="utf-8")
+        limit = int(re.search(r"const MAX_URLS: usize = (\d+);", source).group(1))
+        args = SimpleNamespace(config=run.ROOT / "benchmarks/scenarios.json", smoke=False,
+                               connections=None, jobs=None, seed=None, scenarios=None, small_files=None)
+        baseline = run.parameters(args)
+        for count in (250, 500, 1000):
+            args.small_files = count
+            config = run.parameters(args)
+            self.assertEqual(config["small_count"], count)
+            self.assertEqual(config["seed"], baseline["seed"])
+            expected = run.fixture_config(baseline, "small", baseline["seed"])["sizes"][:count]
+            self.assertEqual(run.fixture_config(config, "small", config["seed"])["sizes"], expected)
+        for count in (0, -1, limit + 1):
+            args.small_files = count
+            with self.assertRaisesRegex(ValueError, "outside bounds"):
+                run.parameters(args)
+        args.small_files = limit
+        self.assertEqual(run.parameters(args)["small_count"], limit)
+        with tempfile.TemporaryDirectory(dir="target") as temporary:
+            config_path = Path(temporary) / "scenarios.json"
+            config_path.write_text(json.dumps(dict(baseline, small_count=limit + 1)))
+            args.config, args.small_files = config_path, None
+            with self.assertRaisesRegex(ValueError, "outside bounds"):
+                run.parameters(args)
 
     def test_isolation_drops_credentials_proxy_and_logs(self):
         with tempfile.TemporaryDirectory(dir="target") as temporary:

@@ -387,7 +387,7 @@ See [architecture, recovery behavior, and API documentation](docs/architecture.m
 
 The package's Rust library target exists for Vise's binary and tests. Its entire public Rust surface is internal and unstable throughout 0.x; it is not a supported embedding API. See [library and binary boundaries](docs/architecture.md#library-and-binary-boundaries) for target ownership, visibility decisions, and the shared logger's protection boundary.
 
-Use the independent [benchmark harness and methodology](docs/benchmarking.md) for controlled Vise/aria2 comparisons and an optional curl C=1 cohort. The full small-file scenario defaults to 1,000 URLs. Reports record resolved executable paths, versions and SHA-256 hashes. Smoke results validate the harness and are not publishable performance evidence.
+Use the independent [benchmark harness and methodology](docs/benchmarking.md) for controlled Vise/aria2 comparisons and an optional curl C=1 cohort. The full small-file scenario uses `--batch --input` and defaults to 1,000 URLs; use the harness's `--small-files N` (1–1000) or `small_count` configuration key for scaling comparisons. Reports record resolved executable paths, versions and SHA-256 hashes. Smoke results validate the harness and are not publishable performance evidence.
 
 ```sh
 cargo build --release --locked

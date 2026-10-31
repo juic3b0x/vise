@@ -6,6 +6,7 @@ All notable changes to Vise are documented here. The format follows [Keep a Chan
 
 ### Fixed
 
+- Replace the small benchmark's interactive workaround with `--batch --input`; add `--small-files N` and bound both it and `small_count` by the production 1,000-URL limit. Preserve seed, sizes and connection/job budgets; earlier interactive results need a new baseline.
 - Reduce the full small-file benchmark from 2,000 URLs to 1,000 URLs to avoid Vise failures with the larger workload; keep the smoke workload unchanged.
 
 ## [0.8.0] - 2026-10-30
