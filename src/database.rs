@@ -98,6 +98,8 @@ pub struct Database {
     reject_commit_ack: Arc<std::sync::atomic::AtomicBool>,
     #[cfg(test)]
     before_commit: Arc<Mutex<Option<CommitHook>>>,
+    #[cfg(test)]
+    after_commit: Arc<Mutex<Option<CommitHook>>>,
 }
 
 impl Database {
@@ -115,6 +117,8 @@ impl Database {
             reject_commit_ack: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             #[cfg(test)]
             before_commit: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            after_commit: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -202,6 +206,8 @@ impl Database {
         let reject_ack = self.reject_commit_ack.clone();
         #[cfg(test)]
         let before_commit = self.before_commit.clone();
+        #[cfg(test)]
+        let after_commit = self.after_commit.clone();
         self.call(move |state| {
             // Retain permission checks even for an otherwise unchanged snapshot.
             if records.iter().any(|r| r.request_credentials.is_some()) {
@@ -258,6 +264,8 @@ impl Database {
             #[cfg(test)]
             wait_before_commit(&before_commit);
             transaction.commit()?;
+            #[cfg(test)]
+            checkpoint_hook::wait_after_commit(&after_commit)?;
             #[cfg(test)]
             if reject_ack.swap(false, std::sync::atomic::Ordering::SeqCst) {
                 return Err(Error::Worker("injected lost commit acknowledgement".into()));
@@ -939,6 +947,8 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+mod checkpoint_hook;
 #[cfg(test)]
 mod credentials_tests;
 #[cfg(test)]

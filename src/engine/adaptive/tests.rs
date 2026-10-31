@@ -1,5 +1,7 @@
 use super::*;
 
+mod checkpoint;
+
 fn candidate(end: u64, written: u64) -> Candidate {
     Candidate {
         start: 0,

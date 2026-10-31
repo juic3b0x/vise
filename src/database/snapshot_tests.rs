@@ -246,3 +246,74 @@ async fn cancelled_caller_cannot_advance_cache_ahead_of_an_inflight_commit() {
         Some(&expected)
     );
 }
+
+#[tokio::test]
+async fn post_commit_gate_is_one_shot_per_database_and_disconnect_safe() {
+    let root = tempfile::tempdir().unwrap();
+    let first = Database::open(root.path().join("first.sqlite3"))
+        .await
+        .unwrap();
+    let second = Database::open(root.path().join("second.sqlite3"))
+        .await
+        .unwrap();
+    let original = record();
+    first.persist_records(vec![original.clone()]).await.unwrap();
+    let (mut ready, release) = first.gate_next_commit();
+    second
+        .persist_records(vec![original.clone()])
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            ready.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ),
+        "another database must not consume the armed gate"
+    );
+    let mut changed = original;
+    changed.error = Some("post-commit snapshot".into());
+    let worker = first.clone();
+    let snapshot = changed.clone();
+    let pending = tokio::spawn(async move { worker.persist_records(vec![snapshot]).await });
+    tokio::time::timeout(std::time::Duration::from_secs(5), ready)
+        .await
+        .unwrap()
+        .unwrap();
+    let external = Connection::open(first.path()).unwrap();
+    let error: Option<String> = external
+        .query_row("SELECT error FROM downloads", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(
+        error, changed.error,
+        "gate must acknowledge only committed SQL"
+    );
+    release.send(()).unwrap();
+    pending.await.unwrap().unwrap();
+    changed.error = Some("gate consumed".into());
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        first.persist_records(vec![changed.clone()]),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(first.load().await.unwrap(), vec![changed.clone()]);
+
+    let (ready, release) = first.gate_next_commit();
+    drop(release);
+    changed.error = Some("release disconnected".into());
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        first.persist_records(vec![changed.clone()]),
+    )
+    .await
+    .unwrap();
+    ready.await.unwrap();
+    assert!(
+        outcome
+            .unwrap_err()
+            .to_string()
+            .contains("checkpoint test release failed")
+    );
+    assert_eq!(first.load().await.unwrap(), vec![changed]);
+}
