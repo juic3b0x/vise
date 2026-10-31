@@ -483,6 +483,12 @@ impl Manager {
         if cancel.is_cancelled() || self.0.stopping.load(Ordering::Acquire) {
             return Ok(None);
         }
+        // This conservative check only avoids the gate when no serving tail can
+        // fit both minimum portions and the donor margin. Recheck authoritatively
+        // after acquiring the gate: progress/cancellation may change while waiting.
+        if !job.adaptive.has_tail(self.0.config.min_split_size) {
+            return Ok(None);
+        }
         let _checkpoint = self.0.checkpoint.lock().await;
         if cancel.is_cancelled() {
             return Ok(None);
