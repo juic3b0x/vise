@@ -98,6 +98,8 @@ vise remote add --input urls.txt --wait --json
 
 Startup with `--input` preflights the complete combined list, durably inserts it paused in one transaction, and durably queues it in a second transaction before emitting ordered `Added` events or starting workers. Activation failure retains the whole admitted list paused. Positional-only startup and daemon batches keep their existing contracts; see [input admission and recovery](docs/usage.md#input-files).
 
+Batch runs with unavailable terminal drawing skip progress-bar construction and rendering. Completion still waits for terminal persistence and publication cleanup, with the existing exit codes and redirected-output policy. Checkpoints process changed tasks and explicit deletions instead of repeatedly scanning unchanged queued tasks and completed history; fresh unstarted tasks require no staging-file inspection.
+
 URL lists are UTF-8 text, one HTTP(S) URL per line. Whitespace, blank lines, and `#` comments are handled automatically. Lists may contain up to 1,000 URLs and 1 MiB of text; positional URLs are queued before file entries. Names, hashes, proxies, cookies, and destinations follow the normal [CLI rules](docs/usage.md#input-files).
 
 URL arguments run until the queue settles. `--batch` explicitly disables terminal input.

@@ -120,6 +120,7 @@ impl Database {
             tx.execute("INSERT INTO metadata(key,value) VALUES(?1,'1')", [source])?;
             tx.commit()?;
             state.saved.extend(records);
+            state.credentialed = super::credential_ids(&state.saved);
             Ok(())
         })
         .await

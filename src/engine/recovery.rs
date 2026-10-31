@@ -61,6 +61,8 @@ impl Manager {
         } = restore_jobs(&database, &config, &stateless_client).await?;
         let (events, _) = watch::channel(0);
         let (activity, _) = broadcast::channel(2048);
+        let changes = Arc::new(super::tracking::Changes::default());
+        let jobs = super::tracking::Jobs::new(jobs, changes.clone());
         let manager = Self(Arc::new(Inner {
             pool: Semaphore::new(config.concurrent_downloads),
             config,
@@ -69,6 +71,8 @@ impl Manager {
             rate_limiter: RateLimiter::new(rate),
             settings: Mutex::new(()),
             jobs: RwLock::new(jobs),
+            changes,
+            running: std::sync::Mutex::new(std::collections::BTreeSet::new()),
             scheduled: RwLock::new(std::collections::BTreeSet::new()),
             checkpoint: Mutex::new(()),
             journal_group: Arc::new(super::journal::group::Group::default()),

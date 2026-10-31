@@ -10,7 +10,7 @@ use crate::{
     rate_limiter::{RateLimit, RateLimiter},
 };
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeSet,
     path::PathBuf,
     sync::{Arc, atomic::AtomicBool},
     time::Duration,
@@ -36,6 +36,7 @@ mod queue;
 mod recovery;
 mod state;
 mod storage;
+mod tracking;
 mod transfer;
 
 #[derive(Debug, Clone)]
@@ -83,10 +84,9 @@ struct Run {
 struct Job {
     output_path: PathBuf,
     part_path: PathBuf,
-    record: RwLock<Record>,
-    // Reuse only successfully checkpointed immutable completed snapshots.
-    // Capture still compares the live record, including mutations during commit.
-    completed_snapshot: std::sync::Mutex<Option<Arc<Record>>>,
+    record: tracking::TrackedRecord,
+    // Fresh admission alone proves absence. Recovery always starts conservative.
+    staged: AtomicBool,
     // Readers must not observe provisional terminal state during its journal commit.
     settlement: RwLock<()>,
     client: RwLock<Transport>,
@@ -110,14 +110,21 @@ impl Job {
             journal_blocked: AtomicBool::new(false),
             output_path: record.output_path.clone(),
             part_path: record.part_path.clone(),
-            record: RwLock::new(record),
-            completed_snapshot: std::sync::Mutex::new(None),
+            record: tracking::TrackedRecord::new(record),
+            staged: AtomicBool::new(true),
             settlement: RwLock::new(()),
             client: RwLock::new(client.into()),
             control: Mutex::new(()),
             run: Mutex::new(None),
             removed: AtomicBool::new(false),
         }
+    }
+
+    fn fresh(record: Record, client: impl Into<Transport>) -> Self {
+        let job = Self::new(record, client);
+        job.staged
+            .store(false, std::sync::atomic::Ordering::Release);
+        job
     }
 }
 
@@ -133,7 +140,10 @@ struct Inner {
     stateless_client: tokio::sync::OnceCell<Transport>,
     rate_limiter: RateLimiter,
     settings: Mutex<()>,
-    jobs: RwLock<BTreeMap<Uuid, Arc<Job>>>,
+    jobs: RwLock<tracking::Jobs>,
+    changes: Arc<tracking::Changes>,
+    // Remains populated through terminal commit and publication cleanup.
+    running: std::sync::Mutex<BTreeSet<Uuid>>,
     scheduled: RwLock<BTreeSet<Uuid>>,
     pool: Semaphore,
     checkpoint: Mutex<()>,

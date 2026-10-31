@@ -8,8 +8,9 @@ use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
     sync::Arc,
-    time::{Duration, Instant},
+    time::Duration,
 };
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -26,23 +27,28 @@ impl Manager {
         let mut last_save = Instant::now();
         loop {
             tokio::select! { _ = stop.cancelled() => return Ok(()), _ = interval.tick() => {} }
-            let jobs: Vec<_> = self.0.jobs.read().await.values().cloned().collect();
-            for job in jobs {
-                let mut record = job.record.write().await;
+            let ids = self.0.changes.sampling();
+            let present: std::collections::BTreeSet<_> = ids.iter().copied().collect();
+            samples.retain(|id, _| present.contains(id));
+            let jobs: Vec<_> = {
+                let jobs = self.0.jobs.read().await;
+                ids.iter().filter_map(|id| jobs.get(id).cloned()).collect()
+            };
+            for job in &jobs {
+                let record = job.record.read().await;
                 let now = Instant::now();
                 let bytes = record.downloaded();
-                if let Some((old, when)) = samples.insert(record.id, (bytes, now)) {
-                    let speed = bytes.saturating_sub(old) as f64
-                        / now.duration_since(when).as_secs_f64().max(0.001);
-                    record.speed = if record.status == Status::Downloading {
-                        record.speed * 0.6 + speed * 0.4
-                    } else {
-                        0.0
-                    };
-                }
+                let speed = samples.insert(record.id, (bytes, now)).map(|(old, when)| {
+                    bytes.saturating_sub(old) as f64
+                        / now.duration_since(when).as_secs_f64().max(0.001)
+                });
+                drop(record);
+                job.record.sample_speed(speed).await;
             }
-            self.notify();
-            if last_save.elapsed() >= Duration::from_secs(1) {
+            if !jobs.is_empty() {
+                self.notify();
+            }
+            if last_save.elapsed() >= Duration::from_secs(1) && self.0.changes.has_pending() {
                 self.checkpoint().await?;
                 last_save = Instant::now();
             }
@@ -73,7 +79,10 @@ impl Manager {
                 let _ = release.await;
             }
         }
-        self.0.database.persist(downloads.clone()).await?;
+        self.0
+            .database
+            .persist_delta(downloads.records.clone(), downloads.deleted.clone())
+            .await?;
         #[cfg(test)]
         self.0
             .journal_trace
@@ -82,62 +91,81 @@ impl Manager {
         sync_directory(super::storage::parent(self.0.database.path())?.to_path_buf()).await?;
         #[cfg(test)]
         self.0.journal_trace.at(barriers::Phase::Directory).await;
-        let jobs = self.0.jobs.read().await;
-        for snapshot in downloads {
-            if snapshot.status == Status::Completed
-                && let Some(job) = jobs.get(&snapshot.id)
-            {
-                *job.completed_snapshot
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(snapshot);
-            }
-        }
+        self.acknowledge_snapshots(&downloads);
         Ok(())
     }
 
-    pub(super) async fn capture_snapshots(
-        &self,
-        replacement: Option<Record>,
-    ) -> Result<Vec<Arc<Record>>> {
-        self.0.database.reconcile_checkpoint().await?;
-        let jobs: Vec<_> = self.0.jobs.read().await.values().cloned().collect();
-        let mut downloads = Vec::with_capacity(jobs.len());
-        for job in &jobs {
-            if job
-                .journal_blocked
-                .load(std::sync::atomic::Ordering::Acquire)
-            {
-                return Err(Error::Worker(
-                    "cannot checkpoint an unresolved split transaction; reopen the engine".into(),
-                ));
-            }
-            let record = job.record.read().await;
-            let candidate = replacement
-                .as_ref()
-                .filter(|r| r.id == record.id)
-                .unwrap_or(&record);
-            let cached = job
-                .completed_snapshot
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let snapshot = cached.as_ref().filter(|saved| {
-                candidate.status == Status::Completed && saved.as_ref() == candidate
-            });
-            downloads.push(
-                snapshot
-                    .cloned()
-                    .unwrap_or_else(|| Arc::new(candidate.clone())),
-            );
-        }
-        Ok(downloads)
+    pub(super) fn acknowledge_snapshots(&self, snapshots: &Snapshots) {
+        self.0.changes.acknowledge(&snapshots.generations);
     }
+
+    pub(super) async fn capture_snapshots(&self, replacement: Option<Record>) -> Result<Snapshots> {
+        self.0.database.reconcile_checkpoint().await?;
+        if self
+            .0
+            .changes
+            .blocked
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(Error::Worker(
+                "cannot checkpoint an unresolved transaction; reopen the engine".into(),
+            ));
+        }
+        let mut pending = self.0.changes.pending();
+        if let Some(record) = &replacement
+            && !pending.iter().any(|(id, _)| *id == record.id)
+        {
+            pending.push((record.id, 0));
+        }
+        let jobs: Vec<_> = {
+            let jobs = self.0.jobs.read().await;
+            pending
+                .into_iter()
+                .map(|(id, generation)| (id, generation, jobs.get(&id).cloned()))
+                .collect()
+        };
+        let mut snapshots = Snapshots::default();
+        for (id, generation, job) in jobs {
+            let Some(job) = job else {
+                snapshots.deleted.push(id);
+                snapshots.generations.push((id, generation));
+                continue;
+            };
+            #[cfg(test)]
+            self.0.journal_trace.record(barriers::Phase::RecordCapture);
+            let record = job.record.read().await;
+            let candidate = replacement.as_ref().filter(|record| record.id == id);
+            // The replacement layout was captured earlier. Never acknowledge
+            // its generation using a later live-record generation.
+            if candidate.is_none()
+                && let Some(generation) = self.0.changes.generation(id)
+            {
+                snapshots.generations.push((id, generation));
+            }
+            let mut snapshot = candidate.unwrap_or(&record).clone();
+            snapshot.speed = 0.0;
+            if job.staged.load(std::sync::atomic::Ordering::Acquire) {
+                snapshots.staged.insert(id);
+            }
+            snapshots.records.push(Arc::new(snapshot));
+        }
+        Ok(snapshots)
+    }
+}
+
+#[derive(Default)]
+pub(super) struct Snapshots {
+    pub records: Vec<Arc<Record>>,
+    pub deleted: Vec<Uuid>,
+    generations: Vec<(Uuid, u64)>,
+    staged: std::collections::BTreeSet<Uuid>,
 }
 
 // Snapshot offsets must be captured before entering this durability barrier.
 pub(super) async fn sync_snapshots(
-    downloads: Vec<Arc<Record>>,
+    downloads: Snapshots,
     #[cfg(test)] trace: Option<Arc<barriers::Trace>>,
-) -> Result<Vec<Arc<Record>>> {
+) -> Result<Snapshots> {
     #[cfg(test)]
     let file_trace = trace.clone();
     let (downloads, directories) = tokio::task::spawn_blocking(move || {
@@ -163,14 +191,18 @@ pub(super) async fn sync_snapshots(
 }
 
 fn sync_partials(
-    downloads: Vec<Arc<Record>>,
+    downloads: Snapshots,
     #[cfg(test)] trace: Option<Arc<barriers::Trace>>,
-) -> Result<(Vec<Arc<Record>>, std::collections::BTreeSet<PathBuf>)> {
+) -> Result<(Snapshots, std::collections::BTreeSet<PathBuf>)> {
     let mut directories = std::collections::BTreeSet::new();
-    for record in &downloads {
+    for record in &downloads.records {
         paths::validate(record)?;
-        if record.status == Status::Completed {
+        if record.status == Status::Completed || !downloads.staged.contains(&record.id) {
             continue;
+        }
+        #[cfg(test)]
+        if let Some(trace) = &trace {
+            trace.record(barriers::Phase::StagingInspection);
         }
         let Some([part, _]) = paths::staging_files(record)? else {
             continue;
@@ -271,22 +303,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn completed_history_reuses_committed_snapshots_and_deletion_cannot_resurrect_it() {
+    async fn completed_history_is_not_recaptured_and_deletion_cannot_resurrect_it() {
         let (_root, manager, job) = completed_job().await;
-        let first = manager.capture_snapshots(None).await.unwrap();
+        assert!(
+            manager
+                .capture_snapshots(None)
+                .await
+                .unwrap()
+                .records
+                .is_empty()
+        );
         manager.checkpoint().await.unwrap();
-        let next = manager.capture_snapshots(None).await.unwrap();
-        assert!(Arc::ptr_eq(&first[0], &next[0]));
+        assert!(
+            manager
+                .capture_snapshots(None)
+                .await
+                .unwrap()
+                .records
+                .is_empty()
+        );
         let id = job.record.read().await.id;
         manager.delete(id).await.unwrap();
         manager.checkpoint().await.unwrap();
         assert!(manager.0.database.load().await.unwrap().is_empty());
-        assert!(manager.capture_snapshots(None).await.unwrap().is_empty());
+        assert!(
+            manager
+                .capture_snapshots(None)
+                .await
+                .unwrap()
+                .records
+                .is_empty()
+        );
         manager.shutdown().await.unwrap();
     }
 
     #[tokio::test]
-    async fn mutation_during_checkpoint_is_not_hidden_by_completed_cache() {
+    async fn mutation_during_checkpoint_keeps_its_new_generation() {
         let (_root, manager, job) = completed_job().await;
         job.record.write().await.error = Some("captured".into());
         let (entered, release) = gate(&manager).await;
@@ -309,17 +361,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_checkpoint_preserves_cache_and_dropped_receiver_does_not_cancel_commit() {
+    async fn failed_checkpoint_preserves_dirty_generation_and_dropped_receiver_does_not_cancel_commit()
+     {
         let (_root, manager, job) = completed_job().await;
-        let saved = manager.capture_snapshots(None).await.unwrap().remove(0);
         job.record.write().await.error = Some("must be committed".into());
         let external = rusqlite::Connection::open(manager.database_path()).unwrap();
         external.execute_batch("CREATE TRIGGER reject_cache BEFORE UPDATE ON downloads BEGIN SELECT RAISE(ABORT, 'injected journal failure'); END;").unwrap();
         assert!(manager.checkpoint().await.is_err());
-        assert!(Arc::ptr_eq(
-            job.completed_snapshot.lock().unwrap().as_ref().unwrap(),
-            &saved
-        ));
+        assert!(manager.0.changes.has_pending());
         assert_eq!(manager.0.database.load().await.unwrap()[0].error, None);
         external.execute_batch("DROP TRIGGER reject_cache").unwrap();
         let (entered, release) = gate(&manager).await;
@@ -328,10 +377,7 @@ mod tests {
         entered.await.unwrap();
         pending.abort();
         assert!(pending.await.unwrap_err().is_cancelled());
-        assert!(Arc::ptr_eq(
-            job.completed_snapshot.lock().unwrap().as_ref().unwrap(),
-            &saved
-        ));
+        assert!(manager.0.changes.has_pending());
         assert_eq!(manager.0.database.load().await.unwrap()[0].error, None);
         release.send(()).unwrap();
         manager.checkpoint().await.unwrap();
@@ -343,9 +389,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn receipt_and_completed_cache_wait_for_journal_directory() {
+    async fn receipt_and_generation_acknowledgement_wait_for_journal_directory() {
         let (_root, manager, job) = completed_job().await;
-        let saved = manager.capture_snapshots(None).await.unwrap().remove(0);
         job.record.write().await.error = Some("directory barrier".into());
         let (entered, release) = manager
             .0
@@ -363,24 +408,12 @@ mod tests {
             "receipt escaped before journal-directory sync"
         );
         assert!(
-            Arc::ptr_eq(
-                job.completed_snapshot.lock().unwrap().as_ref().unwrap(),
-                &saved
-            ),
-            "completed cache advanced before journal-directory sync"
+            manager.0.changes.has_pending(),
+            "generation acknowledged before journal-directory sync"
         );
         release.send(()).unwrap();
         pending.await.unwrap().unwrap();
-        assert_eq!(
-            job.completed_snapshot
-                .lock()
-                .unwrap()
-                .as_ref()
-                .unwrap()
-                .error
-                .as_deref(),
-            Some("directory barrier")
-        );
+        assert!(!manager.0.changes.has_pending());
         manager.shutdown().await.unwrap();
     }
 
@@ -461,7 +494,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn cached_completed_credentials_still_check_journal_permissions() {
+    async fn clean_completed_credentials_still_check_journal_permissions() {
         use std::os::unix::fs::PermissionsExt;
         let (_root, manager, job) = completed_job().await;
         let context = crate::net::credentials::RequestOverrides::from_cli(
@@ -475,17 +508,13 @@ mod tests {
         .unwrap();
         job.record.write().await.request_credentials = Some(Arc::new(context));
         manager.checkpoint().await.unwrap();
-        let saved = manager.capture_snapshots(None).await.unwrap().remove(0);
         std::fs::set_permissions(
             manager.database_path(),
             std::fs::Permissions::from_mode(0o644),
         )
         .unwrap();
         assert!(manager.checkpoint().await.is_err());
-        assert!(Arc::ptr_eq(
-            job.completed_snapshot.lock().unwrap().as_ref().unwrap(),
-            &saved
-        ));
+        assert!(!manager.0.changes.has_pending());
         std::fs::set_permissions(
             manager.database_path(),
             std::fs::Permissions::from_mode(0o600),
@@ -518,4 +547,5 @@ mod tests {
     }
 
     mod grouping;
+    mod incremental;
 }

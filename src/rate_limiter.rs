@@ -3,7 +3,10 @@ use std::{
     fmt,
     num::NonZeroU64,
     str::FromStr,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
@@ -171,6 +174,9 @@ impl Bucket {
 }
 
 struct Inner {
+    // Zero is unlimited. A grant linearizes at this load, like the old bucket
+    // read; an already granted frame may finish across a live limit change.
+    rate: AtomicU64,
     bucket: Mutex<Bucket>,
     // FIFO admission prevents fast segments from starving other chunk readers.
     turn: AsyncMutex<()>,
@@ -184,6 +190,7 @@ impl RateLimiter {
     pub(crate) fn new(rate: RateLimit) -> Self {
         let (changed, _) = watch::channel(0);
         Self(Arc::new(Inner {
+            rate: AtomicU64::new(rate.bytes_per_second().unwrap_or(0)),
             bucket: Mutex::new(Bucket {
                 rate,
                 credit: 0,
@@ -195,11 +202,7 @@ impl RateLimiter {
     }
 
     pub(crate) fn limit(&self) -> RateLimit {
-        self.0
-            .bucket
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .rate
+        RateLimit::from_bytes_per_second(Some(self.0.rate.load(Ordering::Acquire)))
     }
 
     /// Changing a limit discards old credits and wakes the current token waiter.
@@ -217,6 +220,9 @@ impl RateLimiter {
             bucket.rate = rate;
             bucket.credit = 0;
             bucket.updated = Instant::now();
+            self.0
+                .rate
+                .store(rate.bytes_per_second().unwrap_or(0), Ordering::Release);
         }
         self.0
             .changed
@@ -232,6 +238,12 @@ impl RateLimiter {
     ) -> Result<usize> {
         if maximum == 0 {
             return Ok(0);
+        }
+        if cancel.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        if self.0.rate.load(Ordering::Acquire) == 0 {
+            return Ok(maximum.min(MAX_GRANT as usize));
         }
         let _turn = tokio::select! { biased;
             _ = cancel.cancelled() => return Err(Error::Cancelled),
@@ -332,6 +344,50 @@ impl RateLimiter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn unlimited_grants_bypass_both_locks_and_respect_cancellation() {
+        let limiter = RateLimiter::new(RateLimit::UNLIMITED);
+        let _turn = limiter.0.turn.lock().await;
+        let _bucket = limiter.0.bucket.lock().unwrap();
+        let waker = futures_util::task::noop_waker();
+        let mut context = std::task::Context::from_waker(&waker);
+        let cancel = CancellationToken::new();
+        let mut grant = Box::pin(limiter.acquire(usize::MAX, &cancel));
+        assert!(matches!(
+            std::future::Future::poll(grant.as_mut(), &mut context),
+            std::task::Poll::Ready(Ok(65_536))
+        ));
+        cancel.cancel();
+        let mut grant = Box::pin(limiter.acquire(1, &cancel));
+        assert!(matches!(
+            std::future::Future::poll(grant.as_mut(), &mut context),
+            std::task::Poll::Ready(Err(Error::Cancelled))
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn enabling_a_limit_after_unlimited_grants_uses_one_shared_budget() {
+        let limiter = RateLimiter::new(RateLimit::UNLIMITED);
+        consume(&limiter, 1_000_000, &CancellationToken::new()).await;
+        limiter.set_limit("1000".parse().unwrap());
+        let start = Instant::now();
+        let first = limiter.clone();
+        let second = limiter.clone();
+        let a = tokio::spawn(async move { consume(&first, 500, &CancellationToken::new()).await });
+        let b = tokio::spawn(async move { consume(&second, 500, &CancellationToken::new()).await });
+        a.await.unwrap();
+        b.await.unwrap();
+        assert!(start.elapsed() >= Duration::from_secs(1));
+        limiter.set_limit(RateLimit::UNLIMITED);
+        assert_eq!(
+            limiter
+                .acquire(1000, &CancellationToken::new())
+                .await
+                .unwrap(),
+            1000
+        );
+    }
 
     #[test]
     fn parses_byte_rates_without_float_rounding_or_overflow() {

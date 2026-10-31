@@ -84,16 +84,14 @@ impl Manager {
         let (output, staging) =
             super::storage::admission_directories(self.0.config.output_dir.clone()).await?;
         let mut jobs = self.0.jobs.write().await;
-        let used: Vec<_> = jobs.values().cloned().collect();
-        let mut paths = Vec::new();
-        for job in used {
-            paths.push(job.output_path.clone());
-        }
-        let (name, target) = destination(&output, &base, filename.is_some(), &paths).await?;
+        let (name, target) = destination(&output, &base, filename.is_some(), |path| {
+            jobs.contains_path(path)
+        })
+        .await?;
         let id = Uuid::new_v4();
         jobs.insert(
             id,
-            Arc::new(Job::new(
+            Arc::new(Job::fresh(
                 Record {
                     id,
                     url: url.into(),
@@ -197,6 +195,11 @@ impl Manager {
     // accidentally introduce per-entry lifecycle commits.
     pub(super) async fn schedule(&self, id: Uuid, job: Arc<Job>) {
         self.0.scheduled.write().await.insert(id);
+        self.0
+            .running
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(id);
         let cancel = CancellationToken::new();
         let manager = self.clone();
         let worker_job = job.clone();
@@ -364,14 +367,14 @@ pub(super) async fn destination(
     root: &std::path::Path,
     base: &str,
     explicit: bool,
-    used: &[std::path::PathBuf],
+    used: impl Fn(&std::path::Path) -> bool,
 ) -> Result<(String, std::path::PathBuf)> {
     let mut name = base.to_owned();
     let mut suffix = 1;
     loop {
         validate_filename(&name)?;
         let target = paths::bounded_file(root, &name)?;
-        if !occupied(&target).await? && !used.contains(&target) {
+        if !used(&target) && !occupied(&target).await? {
             return Ok((name, target));
         }
         if explicit {
@@ -401,3 +404,6 @@ async fn wait_for_run(job: &Job) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

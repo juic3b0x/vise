@@ -129,9 +129,8 @@ async fn late_mutation_requires_its_own_frozen_batch_receipt() {
 }
 
 #[tokio::test]
-async fn shared_sql_failure_fails_every_covered_receipt_without_advancing_cache() {
+async fn shared_sql_failure_fails_every_covered_receipt_without_acknowledging_generations() {
     let (_root, manager, job) = completed_job().await;
-    let saved = job.completed_snapshot.lock().unwrap().clone().unwrap();
     job.record.write().await.error = Some("rejected group".into());
     let connection = rusqlite::Connection::open(manager.database_path()).unwrap();
     connection.execute_batch("CREATE TRIGGER reject_group BEFORE UPDATE ON downloads BEGIN SELECT RAISE(ABORT, 'rejected group'); END;").unwrap();
@@ -145,10 +144,7 @@ async fn shared_sql_failure_fails_every_covered_receipt_without_advancing_cache(
         assert!(result.unwrap_err().to_string().contains("rejected group"));
     }
     assert_eq!(manager.0.database.load().await.unwrap()[0].error, None);
-    assert!(Arc::ptr_eq(
-        job.completed_snapshot.lock().unwrap().as_ref().unwrap(),
-        &saved
-    ));
+    assert!(manager.0.changes.has_pending());
     connection
         .execute_batch("DROP TRIGGER reject_group")
         .unwrap();
@@ -270,9 +266,8 @@ async fn deletion_waits_for_older_captured_snapshots_and_cannot_resurrect() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn directory_failure_fails_the_receipt_and_preserves_completed_cache() {
+async fn directory_failure_fails_the_receipt_and_preserves_pending_generations() {
     let (root, manager, job) = completed_job().await;
-    let saved = job.completed_snapshot.lock().unwrap().clone().unwrap();
     job.record.write().await.error = Some("SQL only".into());
     let (entered, release) = manager.0.database.gate_next_commit();
     let worker = manager.clone();
@@ -288,11 +283,8 @@ async fn directory_failure_fails_the_receipt_and_preserves_completed_cache() {
         "directory failure acknowledged success"
     );
     assert!(
-        Arc::ptr_eq(
-            job.completed_snapshot.lock().unwrap().as_ref().unwrap(),
-            &saved
-        ),
-        "directory failure advanced completed cache"
+        manager.0.changes.has_pending(),
+        "directory failure acknowledged the pending generation"
     );
     std::fs::remove_file(directory).unwrap();
     std::fs::rename(backup, directory).unwrap();

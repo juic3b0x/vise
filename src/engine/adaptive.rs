@@ -518,7 +518,12 @@ impl Manager {
         .await?;
         #[cfg(test)]
         tests::hook("after-sync");
-        if let Err(error) = self.0.database.persist(snapshots).await {
+        if let Err(error) = self
+            .0
+            .database
+            .persist_delta(snapshots.records.clone(), snapshots.deleted.clone())
+            .await
+        {
             // A failed/ambiguous commit must be reconciled before another snapshot can overwrite it.
             match self.0.database.load().await {
                 Ok(records) => {
@@ -530,6 +535,7 @@ impl Manager {
                 }
                 Err(_) => {
                     job.journal_blocked.store(true, Ordering::Release);
+                    job.record.block_journal();
                 }
             }
             return Err(error);
@@ -543,6 +549,7 @@ impl Manager {
             super::storage::parent(self.0.database.path())?.to_path_buf(),
         )
         .await?;
+        self.acknowledge_snapshots(&snapshots);
         if cancel.is_cancelled() {
             return Err(Error::Cancelled);
         }
