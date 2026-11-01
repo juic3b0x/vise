@@ -87,6 +87,7 @@ def run_one(output, executable, fixture_executable, profile, scenario, cohort, c
         fixture = None
         try:
             fixture = Fixture(fixture_executable, fixture_settings, work, env)
+            run["fixture_version"] = fixture.ready.get("version", "unknown (legacy fixture)")
             ready_hashes = fixture.ready["hashes"]
             urls = [f'http://127.0.0.1:{fixture.ready["port"]}/file/{i}.bin'
                     for i in range(len(fixture_settings["sizes"]))]
@@ -94,7 +95,12 @@ def run_one(output, executable, fixture_executable, profile, scenario, cohort, c
                                               connections, jobs, config["retries"], config["timeout"])
             # Store exact flags but replace local ephemeral paths/ports; no environment dump.
             run["argv"] = [part.replace(str(work), "<run>").replace(str(fixture.ready["port"]), "<port>") for part in command]
+            fixture_before = measurement.process_cpu(fixture.process.pid)
             counters = measurement.launch(command, env, work, stdin, config["run_timeout"])
+            fixture_cpu = measurement.cpu_delta(fixture_before, measurement.process_cpu(fixture.process.pid))
+            run["fixture_cpu_user_s"] = fixture_cpu[0] if fixture_cpu else None
+            run["fixture_cpu_system_s"] = fixture_cpu[1] if fixture_cpu else None
+            run["fixture_cpu_total_s"] = sum(fixture_cpu) if fixture_cpu else None
             run.update(counters)
             stats = fixture.finish()
             fixture = None
@@ -160,7 +166,10 @@ def main(argv=None):
     executables = environment.tools(args.vise.resolve(), args.fixture.resolve(), args.curl)
     skips = [p for p in profiles if p.startswith("aria2-") and "aria2" not in executables]
     profiles = [p for p in profiles if p not in skips]
-    env = environment.collect(ROOT, output, executables, args.storage)
+    try:
+        env = environment.collect(ROOT, output, executables, args.storage)
+    except ValueError as error:
+        parser.error(str(error))
     measured = 3 if args.smoke else args.runs
     print("NON-PUBLISHABLE SMOKE" if args.smoke else "FULL PROFILE")
     runs = []

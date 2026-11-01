@@ -40,12 +40,23 @@ impl Manager {
         self.refresh_cookies(&job).await?;
         let url = job.record.read().await.url.clone();
         let client = job.client.read().await.clone();
-        let metadata = self.probe(&client, &url, &cancel).await?;
+        let fresh_single = self.0.config.connections_per_download == 1
+            && job.record.read().await.chunks.is_empty();
+        let (metadata, response) = if fresh_single {
+            self.initial_response(&client, &url, &cancel, false).await?
+        } else {
+            (self.probe(&client, &url, &cancel).await?, None)
+        };
         let (file, path) = self.prepare_partial(&job, metadata).await?;
         job.adaptive
             .reset(&*job.record.read().await, self.0.rate_limiter.limit());
         self.transition(&job, Status::Downloading).await?;
-        self.run_chunks(&job, &cancel).await?;
+        if let Some(response) = response {
+            self.transfer_chunk_with_response(job.clone(), 0, &cancel, Some(response))
+                .await?;
+        } else {
+            self.run_chunks(&job, &cancel).await?;
+        }
         self.publish_file(&job, file, path, &cancel).await
     }
 
@@ -76,19 +87,34 @@ impl Manager {
         let path = job.part_path.clone();
         let _checkpoint = self.0.checkpoint.lock().await;
         let record = job.record.read().await.clone();
+        let fresh =
+            !job.staged.load(std::sync::atomic::Ordering::Acquire) && record.chunks.is_empty();
         // Fresh jobs skip checkpoint inspection until this first access. Validate
         // here, under the same gate as creation and captured staging eligibility.
         tokio::task::spawn_blocking(move || paths_for_partial(&record))
             .await
             .map_err(|error| Error::Worker(error.to_string()))??;
-        job.staged.store(true, std::sync::atomic::Ordering::Release);
-        let file = fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
+        // Only atomic creation plus an offset-free admission proves that no
+        // durable progress can refer to the bytes we are about to initialize.
+        let (file, created) = match fs::OpenOptions::new()
+            .create_new(true)
             .read(true)
             .write(true)
             .open(&path)
-            .await?;
+            .await
+        {
+            Ok(file) => (file, true),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => (
+                fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&path)
+                    .await?,
+                false,
+            ),
+            Err(error) => return Err(error.into()),
+        };
+        job.staged.store(true, std::sync::atomic::Ordering::Release);
         let total = metadata.total;
         let reusable = apply_metadata(
             &mut *job.record.write().await,
@@ -97,11 +123,17 @@ impl Manager {
         );
         if !reusable {
             // Invalidate durable offsets before destroying their corresponding data.
-            self.checkpoint_locked().await?;
+            if !(fresh && created) {
+                self.checkpoint_locked().await?;
+            }
             file.set_len(0).await?;
         }
         if let Some(total) = total {
             file.set_len(total).await?;
+        }
+        #[cfg(test)]
+        if fresh && created {
+            crate::database::split_test_hook("after-fresh-preparation");
         }
         Ok((file, path))
     }
@@ -180,6 +212,17 @@ impl Manager {
         index: u64,
         cancel: &CancellationToken,
     ) -> Result<()> {
+        self.transfer_chunk_with_response(job, index, cancel, None)
+            .await
+    }
+
+    async fn transfer_chunk_with_response(
+        &self,
+        job: Arc<Job>,
+        index: u64,
+        cancel: &CancellationToken,
+        mut initial: Option<Response>,
+    ) -> Result<()> {
         let mut attempt = 0;
         loop {
             if cancel.is_cancelled() {
@@ -187,7 +230,16 @@ impl Manager {
             }
             job.adaptive.resolved(index, cancel).await?;
             chunk_at_mut(&mut *job.record.write().await, index)?.status = ChunkStatus::Downloading;
-            let result = self.transfer_once(&job, index, cancel).await;
+            let result = if let Some(response) = initial.take() {
+                // Metadata, checksums and range bounds were validated before
+                // staging preparation. Charge every payload byte as usual.
+                let end = chunk_at(&*job.record.read().await, index)?.end;
+                job.adaptive.begin_body(index, 0);
+                self.stream_chunk(&job, index, response, 0, end, cancel)
+                    .await
+            } else {
+                self.transfer_once(&job, index, cancel).await
+            };
             if let Err(error) = &result {
                 job.adaptive.refused(error);
             }
@@ -674,237 +726,4 @@ fn validate_validator(response: &Response, expected: Option<&str>) -> Result<()>
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::engine::Config;
-
-    async fn staged_job() -> (tempfile::TempDir, Manager, Arc<Job>) {
-        let dir = tempfile::tempdir().unwrap();
-        let manager = Manager::open(Config {
-            output_dir: dir.path().into(),
-            home_dir: Some(dir.path().join("test-home")),
-            ..Config::default()
-        })
-        .await
-        .unwrap();
-        let id = Uuid::new_v4();
-        let job = Arc::new(Job::new(
-            Record {
-                id,
-                url: "http://127.0.0.1:1/unused".into(),
-                filename: "payload.bin".into(),
-                output_path: manager.0.config.output_dir.join("payload.bin"),
-                part_path: manager
-                    .0
-                    .config
-                    .output_dir
-                    .join(".vise")
-                    .join(format!("{id}.part")),
-                proxy_url: None,
-                cookies_file: None,
-                request_credentials: None,
-                status: Status::Downloading,
-                total_bytes: Some(3),
-                ranged: true,
-                validator: Some("test".into()),
-                chunks: vec![Chunk {
-                    start: 0,
-                    end: Some(3),
-                    written: 0,
-                    status: ChunkStatus::Queued,
-                }],
-                error: None,
-                checksums: Default::default(),
-                speed: 0.0,
-                created_at: timestamp_millis(),
-            },
-            reqwest::Client::new(),
-        ));
-        (dir, manager, job)
-    }
-
-    #[tokio::test]
-    async fn fresh_staging_creation_waits_for_the_capture_gate() {
-        let (_root, manager, template) = staged_job().await;
-        let record = template.record.read().await.clone();
-        let job = Arc::new(Job::fresh(record.clone(), reqwest::Client::new()));
-        manager.0.jobs.write().await.insert(record.id, job.clone());
-        manager.checkpoint().await.unwrap();
-        assert!(!job.staged.load(std::sync::atomic::Ordering::Acquire));
-        let checkpoint = manager.0.checkpoint.lock().await;
-        let mut creation = Box::pin(manager.prepare_partial(
-            &job,
-            Metadata {
-                total: Some(3),
-                ranged: true,
-                validator: Some("new".into()),
-                expected: Default::default(),
-            },
-        ));
-        assert!(futures_util::poll!(creation.as_mut()).is_pending());
-        assert!(
-            !job.part_path.exists(),
-            "creation bypassed the capture gate"
-        );
-        assert!(!job.staged.load(std::sync::atomic::Ordering::Acquire));
-        drop(checkpoint);
-        creation.await.unwrap();
-        assert!(job.staged.load(std::sync::atomic::Ordering::Acquire));
-        assert_eq!(std::fs::metadata(&job.part_path).unwrap().len(), 3);
-        manager.shutdown().await.unwrap();
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn first_open_of_fresh_staging_rejects_a_substituted_symlink() {
-        let (root, manager, template) = staged_job().await;
-        let record = template.record.read().await.clone();
-        let job = Arc::new(Job::fresh(record.clone(), reqwest::Client::new()));
-        manager.0.jobs.write().await.insert(record.id, job.clone());
-        manager.checkpoint().await.unwrap();
-        let unrelated = root.path().join("unrelated");
-        std::fs::write(&unrelated, b"keep").unwrap();
-        std::os::unix::fs::symlink(&unrelated, &job.part_path).unwrap();
-        assert!(
-            manager
-                .prepare_partial(
-                    &job,
-                    Metadata {
-                        total: Some(3),
-                        ranged: true,
-                        validator: Some("new".into()),
-                        expected: Default::default()
-                    }
-                )
-                .await
-                .is_err()
-        );
-        assert_eq!(std::fs::read(&unrelated).unwrap(), b"keep");
-        assert!(!job.staged.load(std::sync::atomic::Ordering::Acquire));
-        std::fs::remove_file(&job.part_path).unwrap();
-        manager.shutdown().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn reset_does_not_truncate_before_durable_offsets() {
-        let (_dir, manager, job) = staged_job().await;
-        job.record.write().await.chunks[0].written = 3;
-        manager
-            .0
-            .jobs
-            .write()
-            .await
-            .insert(job.record.read().await.id, job.clone());
-        fs::write(&job.part_path, b"abc").await.unwrap();
-        manager.checkpoint().await.unwrap();
-        let (entered, ready) = tokio::sync::oneshot::channel();
-        let (release, wait) = tokio::sync::oneshot::channel();
-        *manager.0.checkpoint_hook.lock().await = Some((entered, wait));
-        let worker = manager.clone();
-        let task = job.clone();
-        let pending = tokio::spawn(async move {
-            worker
-                .prepare_partial(
-                    &task,
-                    Metadata {
-                        total: Some(5),
-                        ranged: true,
-                        validator: Some("new".into()),
-                        expected: Default::default(),
-                    },
-                )
-                .await
-        });
-        ready.await.unwrap();
-        assert_eq!(
-            manager.0.database.load().await.unwrap()[0].chunks[0].written,
-            3
-        );
-        assert_eq!(
-            fs::read(&job.part_path).await.unwrap(),
-            b"abc",
-            "truncate preceded durable offset invalidation"
-        );
-        release.send(()).unwrap();
-        pending.await.unwrap().unwrap();
-        assert_eq!(
-            manager.0.database.load().await.unwrap()[0].chunks[0].written,
-            0
-        );
-        assert_eq!(fs::metadata(&job.part_path).await.unwrap().len(), 5);
-        manager.shutdown().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn missing_chunks_fail_workers_and_do_not_commit_progress() {
-        let (_dir, manager, job) = staged_job().await;
-        let cancel = CancellationToken::new();
-        for index in [1, u64::MAX] {
-            assert!(
-                matches!(manager.transfer_chunk(job.clone(), index, &cancel).await, Err(Error::Worker(message)) if message.contains("missing chunk"))
-            );
-            assert!(
-                matches!(manager.transfer_once(&job, index, &cancel).await, Err(Error::Worker(message)) if message.contains("missing chunk"))
-            );
-        }
-        assert!(!job.part_path.exists());
-        let mut file = fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&job.part_path)
-            .await
-            .unwrap();
-        let mut pending = BytesMut::from(b"abc".as_slice());
-        assert!(matches!(
-            write_pending(&mut file, &job, 1, &mut pending).await,
-            Err(Error::Worker(_))
-        ));
-        assert_eq!(pending.as_ref(), b"abc");
-        assert_eq!(chunk_at(&*job.record.read().await, 0).unwrap().written, 0);
-        manager.shutdown().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn publication_finishes_staging_rename_before_returning() {
-        let (_dir, manager, job) = staged_job().await;
-        manager
-            .0
-            .jobs
-            .write()
-            .await
-            .insert(job.record.read().await.id, job.clone());
-        chunk_at_mut(&mut *job.record.write().await, 0)
-            .unwrap()
-            .written = 3;
-        let mut file = fs::File::create(&job.part_path).await.unwrap();
-        file.write_all(b"abc").await.unwrap();
-        manager
-            .publish_file(&job, file, job.part_path.clone(), &CancellationToken::new())
-            .await
-            .unwrap();
-        // No polling here: publish_file must await this rename, independently of
-        // queue scheduling, SQL completion, or any later cleanup task.
-        assert!(!job.part_path.try_exists().unwrap());
-        assert_eq!(fs::read(&job.output_path).await.unwrap(), b"abc");
-        assert!(
-            same_file::is_same_file(
-                &job.output_path,
-                super::super::journal::publication_path(&job.part_path)
-            )
-            .unwrap()
-        );
-        assert_eq!(
-            manager
-                .0
-                .database
-                .list()
-                .await
-                .unwrap()
-                .first()
-                .unwrap()
-                .status,
-            Status::Downloading
-        );
-        manager.shutdown().await.unwrap();
-    }
-}
+mod tests;

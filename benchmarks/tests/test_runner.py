@@ -15,6 +15,20 @@ from benchmarks.runner import adapters, environment, metrics, report, measuremen
 
 
 class RunnerTests(unittest.TestCase):
+    def test_storage_declarations_require_matching_evidence(self):
+        for fs in ("ext4", "btrfs", "apfs", "overlay"):
+            with self.assertRaisesRegex(ValueError, "contradicts"):
+                environment.validate_storage("ramdisk", fs)
+            self.assertEqual(environment.validate_storage("real-disk", fs), "real-disk")
+        for fs in ("tmpfs", "ramfs"):
+            self.assertEqual(environment.validate_storage("ramdisk", fs), "ramdisk")
+            self.assertEqual(environment.validate_storage("auto", fs), "ramdisk")
+            with self.assertRaisesRegex(ValueError, "contradicts"):
+                environment.validate_storage("real-disk", fs)
+        for fs in ("unknown", "unknown (supply --storage description)", ""):
+            for declaration in ("auto", "ramdisk", "real-disk"):
+                self.assertIn("filesystem unverified", environment.validate_storage(declaration, fs))
+
     def test_environment_records_executed_absolute_paths_and_hashes(self):
         with tempfile.TemporaryDirectory(dir="target") as temporary:
             directory = Path(os.path.relpath(temporary))
@@ -34,6 +48,7 @@ class RunnerTests(unittest.TestCase):
                 self.assertEqual(entry["path"], expected)
                 self.assertTrue(Path(entry["path"]).is_absolute())
                 self.assertEqual(entry["sha256"], hashlib.sha256(name.encode()).hexdigest())
+                self.assertEqual(entry["version"], "test version")
                 if name != "fixture":
                     profile = "aria2-matched" if name == "aria2" else name
                     command, _ = adapters.command(profile, tools[name],
@@ -155,6 +170,20 @@ class RunnerTests(unittest.TestCase):
         profiles = ["vise", "aria2-matched", "aria2-defaults"]
         observed = [adapters.order(profiles, i) for i in range(6)]
         self.assertEqual(len({tuple(order) for order in observed}), 6)
+
+    def test_fixture_cpu_samples_exclude_preparation_and_parse_process_names(self):
+        fields = ["0"] * 50
+        fields[11], fields[12] = "250", "75"
+        with patch.object(measurement.sys, "platform", "linux"), \
+                patch.object(Path, "read_text", return_value="123 (name with ) spaces) " + " ".join(fields)), \
+                patch.object(os, "sysconf", return_value=100):
+            self.assertEqual(measurement.process_cpu(123), (2.5, 0.75))
+        self.assertEqual(measurement.cpu_delta((2.5, 0.75), (3, 1)), (0.5, 0.25))
+        self.assertIsNone(measurement.cpu_delta(None, (3, 1)))
+        with patch.object(measurement.sys, "platform", "darwin"):
+            self.assertIsNone(measurement.process_cpu(123))
+        with patch.object(measurement.sys, "platform", "linux"), patch.object(Path, "read_text", side_effect=OSError):
+            self.assertIsNone(measurement.process_cpu(123))
 
     def test_per_process_measurement_and_timeout(self):
         import sys

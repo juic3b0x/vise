@@ -3,6 +3,8 @@ import hashlib
 import http.client
 import json
 import os
+import subprocess
+import tomllib
 from pathlib import Path
 import tempfile
 import time
@@ -35,6 +37,16 @@ class FixtureTests(unittest.TestCase):
         connection = http.client.HTTPConnection("127.0.0.1", fixture.ready["port"], timeout=10)
         self.addCleanup(connection.close)
         return connection
+
+    def test_version_identifies_the_executable_and_startup_record(self):
+        with (ROOT / "benchmarks/fixture/Cargo.toml").open("rb") as manifest:
+            expected = tomllib.load(manifest)["package"]["version"]
+        fixture = self.start()
+        self.assertEqual(fixture.ready["version"], expected)
+        output = subprocess.check_output([str(EXE), "--version"],
+                                         env=adapters.environment(ROOT / "target"), text=True)
+        self.assertEqual(output.strip(), f"vise-bench-fixture {expected}")
+        fixture.finish()
 
     def test_hash_ranges_if_range_keepalive_and_redacted_logs(self):
         fixture = self.start()

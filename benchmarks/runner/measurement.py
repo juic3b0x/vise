@@ -1,10 +1,29 @@
 """Per-process counters; never subtract cumulative RUSAGE_CHILDREN snapshots."""
+from pathlib import Path
 import os
 import signal
 import subprocess
 import sys
 import threading
 import time
+
+
+def process_cpu(pid):
+    """Linux process-wide CPU ticks; no hash-preparation or child subtraction."""
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+        ticks = os.sysconf("SC_CLK_TCK")
+        return (int(fields[11]) / ticks, int(fields[12]) / ticks)
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def cpu_delta(before, after):
+    if before is None or after is None:
+        return None
+    return tuple(max(0, end - start) for start, end in zip(before, after, strict=True))
 
 
 def windows_counters(process):

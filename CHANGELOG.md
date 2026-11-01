@@ -6,6 +6,10 @@ All notable changes to Vise are documented here. The format follows [Keep a Chan
 
 ### Changed
 
+- Use one metadata-and-payload request for fresh single-connection downloads, retaining the initial open-ended response through staging preparation and preserving bounded retries, validator-based resume, checksums, credentials and proxy isolation. Consume validated one-byte range probes through EOF with cancellation and a deadline to preserve connection pooling.
+- Skip the destructive-reset checkpoint only for atomically created, offset-free fresh staging files. Keep lifecycle commits, FULL/WAL durability, checksum-before-publication and completion-after-commit ordering.
+- Bump the benchmark fixture to 0.1.1, expose its executable version and startup version, and query the selected binary rather than the checkout manifest in reports. Remove zero-latency benchmark timers; reject RAM-disk declarations contradicted by the detected filesystem, label unknown storage unverified, and record Linux fixture CPU around the timed client interval separately from hash preparation.
+
 - Checkpoint only dirty record generations and explicit deletions, acknowledging captured generations after file synchronization, the atomic SQLite commit and journal-directory synchronization. Avoid staging inspection for fresh unstarted tasks; validate their staging paths before first access and retain conservative recovery/resume handling. Keep atomic input admission, grouped receipts, lifecycle barriers and publication ordering without a schema change.
 - Skip progress-bar construction and rendering for batch runs without terminal drawing; use settlement-aware session completion and sample speeds only for downloading tasks. Keep exit codes, failure formatting and redirected-output behavior. Skip idle monitor checkpoints when no persistent changes remain.
 - Index destination reservations across admission, rollback and deletion, and bypass grant locks for unlimited transfers while preserving live shared rate limits and cancellation. No dependency or version changes.

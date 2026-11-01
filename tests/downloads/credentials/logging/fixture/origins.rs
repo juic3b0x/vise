@@ -163,10 +163,12 @@ async fn serve(
     OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
 ) -> Response {
-    data.requests
-        .lock()
-        .unwrap()
-        .push((uri.path().into(), headers.clone()));
+    let first_payload = {
+        let mut requests = data.requests.lock().unwrap();
+        let first = uri.path() == "/file" && !requests.iter().any(|(path, _)| path == "/file");
+        requests.push((uri.path().into(), headers.clone()));
+        first
+    };
     data.changed.notify_one();
     if uri.path() == "/stall" {
         return std::future::pending().await;
@@ -179,6 +181,15 @@ async fn serve(
                 header::SET_COOKIE,
                 format!("learned={}; Path=/; HttpOnly", data.cookie),
             )
+            .body(Body::empty())
+            .unwrap();
+    }
+    if first_payload {
+        // Force a retry so response cookies are exercised even when fresh C=1
+        // downloads use a single metadata-and-payload request.
+        return Response::builder()
+            .status(StatusCode::SERVICE_UNAVAILABLE)
+            .header(header::RETRY_AFTER, "1")
             .body(Body::empty())
             .unwrap();
     }

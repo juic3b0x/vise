@@ -40,6 +40,7 @@ pub(super) fn command(root: &std::path::Path) -> std::process::Command {
 #[derive(Clone, Copy)]
 pub(super) enum Mode {
     Ranges,
+    DelayedProbe,
     Heterogeneous,
     SplitValidator,
     Split429,
@@ -72,6 +73,7 @@ pub(super) struct ServerState {
     pub(super) data: Vec<u8>,
     pub(super) mode: Mode,
     pub(super) fail_once: AtomicBool,
+    pub(super) requests: AtomicUsize,
     pub(super) version: AtomicUsize,
     pub(super) ranges: Mutex<Vec<(usize, usize)>>,
     pub(super) if_ranges: Mutex<Vec<Option<String>>>,
@@ -103,12 +105,17 @@ impl Fixture {
             ) {
                 32 * 1024 * 1024
             } else {
-                8 * 1024 * 1024 + 137
+                if matches!(mode, Mode::DelayedProbe) {
+                    32 * 1024
+                } else {
+                    8 * 1024 * 1024 + 137
+                }
             })
                 .map(|i| (i % 251) as u8)
                 .collect(),
             mode,
             fail_once: AtomicBool::new(true),
+            requests: AtomicUsize::new(0),
             version: AtomicUsize::new(0),
             ranges: Mutex::new(vec![]),
             if_ranges: Mutex::new(vec![]),
@@ -158,6 +165,7 @@ async fn serve_connected(
 }
 
 pub(super) async fn serve(State(state): State<Arc<ServerState>>, headers: HeaderMap) -> Response {
+    state.requests.fetch_add(1, Ordering::SeqCst);
     if headers.contains_key("proxy-authorization") {
         state.proxy_auth_leaked.store(true, Ordering::SeqCst);
     }
@@ -210,6 +218,14 @@ pub(super) async fn serve(State(state): State<Arc<ServerState>>, headers: Header
     let version = state.version.load(Ordering::SeqCst);
     let builder = response_headers(&state, &range, version);
     if range.probe && range.honors_range {
+        if matches!(state.mode, Mode::DelayedProbe) {
+            let body = futures_util::stream::once(async move {
+                // Headers precede the byte, exposing dropped-probe pool churn.
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                Ok::<_, std::io::Error>(Bytes::from_static(b"\0"))
+            });
+            return builder.body(Body::from_stream(body)).unwrap();
+        }
         return builder.body(Body::from(vec![state.data[0]])).unwrap();
     }
     builder.body(transfer_body(state, range, version)).unwrap()
@@ -246,7 +262,11 @@ fn transfer_range(state: &ServerState, headers: &HeaderMap) -> Option<TransferRa
         .map(|(start, end)| {
             (
                 start.parse::<usize>().unwrap(),
-                end.parse::<usize>().unwrap(),
+                if end.is_empty() {
+                    state.data.len() - 1
+                } else {
+                    end.parse::<usize>().unwrap()
+                },
             )
         });
     let honors_range = !matches!(

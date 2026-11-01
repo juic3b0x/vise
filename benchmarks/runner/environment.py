@@ -36,6 +36,20 @@ def filesystem(path):
     return "unknown (supply --storage description)"
 
 
+def validate_storage(storage, fs):
+    unknown = not fs or fs.startswith("unknown")
+    memory = fs in ("tmpfs", "ramfs")
+    if storage == "ramdisk" and not memory and not unknown:
+        raise ValueError("declared ramdisk contradicts detected filesystem")
+    if storage == "real-disk" and memory:
+        raise ValueError("declared real-disk contradicts detected memory filesystem")
+    if unknown:
+        return f"{storage}; filesystem unverified" if storage != "auto" else "unknown; filesystem unverified"
+    if storage == "auto":
+        return "ramdisk" if memory else "unknown; declare real-disk or ramdisk with --storage"
+    return storage
+
+
 def collect(root, output, executables, storage):
     env = environment(output)
     def git(*args):
@@ -51,8 +65,7 @@ def collect(root, output, executables, storage):
         except (OSError, StopIteration):
             pass
     fs = filesystem(output)
-    if storage == "auto":
-        storage = "ramdisk" if fs in ("tmpfs", "ramfs") else "unknown; declare real-disk or ramdisk with --storage"
+    storage = validate_storage(storage, fs)
     metadata = {"os": platform.platform(), "cpu": cpu, "logical_cpus": os.cpu_count(),
                 # rustup needs its real toolchain home for this read-only version
                 # query. No Vise process ever receives that home.
@@ -62,12 +75,9 @@ def collect(root, output, executables, storage):
     for name, executable in executables.items():
         with open(executable, "rb") as stream:
             digest = hashlib.file_digest(stream, "sha256").hexdigest()
-        if name == "fixture":
-            import tomllib
-            with (root / "benchmarks/fixture/Cargo.toml").open("rb") as manifest:
-                tool_version = "vise-bench-fixture " + tomllib.load(manifest)["package"]["version"]
-        else:
-            tool_version = version([executable, "--version"], output)
+        # Query the executable itself: an old --fixture binary must never be
+        # mislabeled using the current checkout's manifest version.
+        tool_version = version([executable, "--version"], output)
         metadata["tools"][name] = {"path": str(Path(executable).resolve()),
                                    "version": tool_version, "sha256": digest}
     if os.name == "posix":
