@@ -13,6 +13,7 @@ const OLD_OFFSET: u64 = 65_536;
 const NEW_OFFSET: u64 = 131_072;
 const AFTER_SYNC: &str = "checkpoint-after-sync";
 const AFTER_COMMIT: &str = "checkpoint-after-commit";
+const FRESH: &str = "after-fresh-preparation";
 const CHILD: &str = "engine::adaptive::tests::checkpoint::checkpoint_crash_child";
 
 struct Child(std::process::Child);
@@ -42,6 +43,21 @@ async fn checkpoint_crash_child() {
     let phase = std::env::var("VISE_TEST_CHECKPOINT_PHASE").unwrap();
     let manager = Manager::open(config(&root)).await.unwrap();
     let data = crash_data();
+    if phase == FRESH {
+        manager
+            .add_with_checksums(
+                &url,
+                None,
+                crate::checksum::ExpectedChecksums {
+                    sha256: Some(format!("{:x}", Sha256::digest(&data))),
+                    md5: None,
+                },
+            )
+            .await
+            .unwrap();
+        std::future::pending::<()>().await;
+        return;
+    }
     let id = Uuid::new_v4();
     let record = Record {
         id,
@@ -231,7 +247,7 @@ async fn checkpoint_death_after_sql_commit_recovers_new_offsets() {
 }
 
 #[tokio::test]
-async fn successful_single_range_file_keeps_seven_durable_barriers() {
+async fn fresh_single_range_file_keeps_all_required_durable_barriers() {
     use crate::engine::journal::barriers::Phase;
     use std::sync::atomic::Ordering;
     let root = tempfile::tempdir().unwrap();
@@ -256,23 +272,110 @@ async fn successful_single_range_file_keeps_seven_durable_barriers() {
     let count = |phase| phases.iter().filter(|p| **p == phase).count();
     assert_eq!(
         count(Phase::Capture),
-        7,
-        "each lifecycle/reset/publication barrier remains"
+        6,
+        "admission, queued, probing, downloading, prepublication and terminal barriers remain"
     );
     assert_eq!(
         count(Phase::Directory),
-        7,
+        6,
         "every barrier includes journal directory sync"
     );
     assert_eq!(
         count(Phase::File),
-        3,
-        "prepare, downloading and prepublication sync staging data"
+        2,
+        "downloading and prepublication sync staging data; fresh creation needs no reset barrier"
     );
-    assert_eq!(count(Phase::StagingDirectory), 3);
+    assert_eq!(count(Phase::StagingDirectory), 2);
+    // Both offset-bearing snapshots retain file -> staging directory -> SQL ->
+    // journal directory order. Only the offset-free fresh reset was removed.
+    for window in phases.split(|phase| *phase == Phase::Capture) {
+        if let Some(file) = window.iter().position(|phase| *phase == Phase::File) {
+            let staging = window
+                .iter()
+                .position(|phase| *phase == Phase::StagingDirectory)
+                .unwrap();
+            let sql = window
+                .iter()
+                .position(|phase| *phase == Phase::BeforeDirectory)
+                .unwrap();
+            let directory = window
+                .iter()
+                .position(|phase| *phase == Phase::Directory)
+                .unwrap();
+            assert!(file < staging && staging < sql && sql < directory);
+        }
+    }
     assert_eq!(
         manager.0.database.snapshot_commits.load(Ordering::SeqCst) - baseline,
-        7
+        6
+    );
+    manager.shutdown().await.unwrap();
+    server.abort();
+    let _ = server.await;
+}
+
+#[tokio::test]
+async fn death_after_fresh_preparation_recovers_offset_free_and_redownloads() {
+    let root = tempfile::tempdir().unwrap();
+    let (url, server) = crash_server().await;
+    let ack = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut child = Child(
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--ignored", "--exact", CHILD])
+            .env("HOME", root.path())
+            .env("USERPROFILE", root.path())
+            .env("VISE_TEST_CHECKPOINT_ROOT", root.path())
+            .env("VISE_TEST_CHECKPOINT_URL", url)
+            .env("VISE_TEST_CHECKPOINT_PHASE", FRESH)
+            .env("VISE_TEST_SPLIT_PHASE", FRESH)
+            .env("VISE_TEST_SPLIT_ACK", ack.local_addr().unwrap().to_string())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let (mut socket, _) = ack.accept().await.unwrap();
+        read_split_ack(&mut socket, FRESH).await.unwrap();
+    })
+    .await
+    .unwrap();
+    child.0.kill().unwrap();
+    child.0.wait().unwrap();
+    let manager = Manager::open(config(root.path())).await.unwrap();
+    let records = manager.0.database.load().await.unwrap();
+    assert_eq!(records.len(), 1);
+    let record = &records[0];
+    assert_eq!(record.status, Status::Paused);
+    assert!(record.chunks.is_empty());
+    assert_eq!(record.downloaded(), 0);
+    assert!(!record.output_path.exists());
+    let mut events = manager.subscribe_events();
+    manager.resume(record.id).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let event = events.recv().await.unwrap();
+            assert_ne!(event.kind, crate::events::EventKind::Failed);
+            assert_ne!(event.kind, crate::events::EventKind::Corrupt);
+            if event.kind == crate::events::EventKind::Completed {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        tokio::fs::read(&record.output_path).await.unwrap(),
+        crash_data()
+    );
+    assert!(
+        manager
+            .get(record.id)
+            .await
+            .unwrap()
+            .checksums
+            .verified_at
+            .is_some()
     );
     manager.shutdown().await.unwrap();
     server.abort();

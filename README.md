@@ -397,9 +397,11 @@ Ready concurrent checkpoints share one captured snapshot and durable transaction
 
 Adaptive splitting skips checkpoint-lock acquisition for impossible tails and retains eligibility checks under the lock.
 
-Stateless downloads with no explicit proxy, cookie file or request context share an HTTP connection pool. Downloads with any of those settings retain isolated transports.
+Fresh single-connection downloads use one open-ended GET for metadata and payload. Resumes and parallel transfers retain validator probes; validated one-byte probes are consumed through completion so their connections can be reused. Stateless downloads with no explicit proxy, cookie file or request context share an HTTP connection pool. Downloads with any of those settings retain isolated transports.
 
-Use the independent [benchmark harness and methodology](docs/benchmarking.md) for controlled Vise/aria2 comparisons and an optional curl C=1 cohort. The full small-file scenario uses `--batch --input` and defaults to 1,000 URLs; use the harness's `--small-files N` (1–1000) or `small_count` configuration key for scaling comparisons. Reports record resolved executable paths, versions and SHA-256 hashes. Smoke results validate the harness and are not publishable performance evidence.
+Atomically created staging files with no saved offsets skip the destructive-reset checkpoint. The downloading transition still synchronizes the file and staging directory before committing its layout; recovery and existing files retain conservative reset barriers.
+
+Use the independent [benchmark harness and methodology](docs/benchmarking.md) for controlled Vise/aria2 comparisons and an optional curl C=1 cohort. The full small-file scenario uses `--batch --input` and defaults to 1,000 URLs; use the harness's `--small-files N` (1–1000) or `small_count` configuration key for scaling comparisons. Corrected fixture 0.1.1 identifies itself with `--version` and in its startup record. Reports record resolved executable paths, actual executable versions and SHA-256 hashes. A declared RAM disk must match the detected filesystem; unknown filesystems are marked unverified. Smoke results validate the harness and are not publishable performance evidence.
 
 ```sh
 cargo build --release --locked

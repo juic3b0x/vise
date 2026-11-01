@@ -448,7 +448,11 @@ pub(in crate::engine) async fn crash_server_counted(
             .unwrap();
         let (start, end) = text.split_once('-').unwrap();
         let start: usize = start.parse().unwrap();
-        let end: usize = end.parse().unwrap();
+        let end: usize = if end.is_empty() {
+            data.len() - 1
+        } else {
+            end.parse().unwrap()
+        };
         let slow = start == data.len() / 2;
         let stream = futures_util::stream::unfold((start, data), move |(at, data)| async move {
             if at > end {

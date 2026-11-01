@@ -462,7 +462,7 @@ async fn input_preserves_private_transports_and_rejects_mixed_credential_origins
 }
 
 #[tokio::test]
-async fn atomic_input_keeps_one_probe_and_one_body_request_per_file() {
+async fn atomic_input_uses_one_payload_request_per_fresh_single_connection_file() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let (_root, manager) = manager().await;
     let requests = Arc::new(AtomicUsize::new(0));
@@ -488,8 +488,8 @@ async fn atomic_input_keeps_one_probe_and_one_body_request_per_file() {
     .unwrap();
     assert_eq!(
         requests.load(Ordering::SeqCst),
-        10,
-        "atomic input changed probe/body request counts"
+        5,
+        "fresh C=1 input must retain the initial payload response"
     );
     manager.shutdown().await.unwrap();
     server.abort();

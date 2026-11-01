@@ -4,6 +4,7 @@ from .metrics import comparison, span
 from .validation import eligible
 
 METRICS = ("wall_s", "throughput_mib_s", "cpu_user_s", "cpu_system_s", "cpu_total_s",
+           "fixture_cpu_user_s", "fixture_cpu_system_s", "fixture_cpu_total_s",
            "peak_rss_bytes", "requests", "connections", "wasted_bytes", "tail_s",
            "retry_requests", "slow_connections_with_body", "slow_body_share")
 
@@ -80,7 +81,7 @@ def write(output, runs, environment, smoke, config, skips):
         lines.append(f'- {result["scenario"]} / {result["cohort"]}: {result["reference"]} / Vise = '
                      f'{result["reference_over_candidate_median"]:.3f}; {result["label"]}.')
     lines += ["", "## Environment", "", "```json", json.dumps(environment, indent=2), "```", "",
-              "Loopback is not the internet. Client CPU excludes runner/fixture. Fixture lifetime CPU (including hash preparation) is recorded per run; shared CPU/cache contention can dominate.",
+              "Loopback is not the internet. Client CPU excludes runner/fixture. Linux fixture CPU around the timed client interval and separate lifetime CPU (including hash preparation) are recorded per run; shared CPU/cache contention can dominate.",
               "Socket write counts exclude headers/TCP retransmissions and are not confirmed delivery counts. See the benchmarking guide for definitions.", ""]
     (output / "summary.md").write_text("\n".join(lines), encoding="utf-8")
     return rows

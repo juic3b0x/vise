@@ -56,6 +56,7 @@ struct Shared {
 
 #[derive(Serialize)]
 struct Ready {
+    version: &'static str,
     port: u16,
     hashes: Vec<String>,
 }
@@ -79,6 +80,7 @@ pub async fn run() -> io::Result<()> {
     // Numeric loopback only; this is never a public server.
     let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
     let ready = Ready {
+        version: env!("CARGO_PKG_VERSION"),
         port: listener.local_addr()?.port(),
         hashes,
     };
@@ -194,7 +196,7 @@ async fn connection(
                 return Ok(());
             }
         };
-        tokio::time::sleep(Duration::from_millis(shared.config.latency_ms)).await;
+        response_delay(shared.config.latency_ms).await;
         let close = request.close;
         if !serve(&mut stream, id, slow, &shared, &request, &mut pace).await? || close {
             return Ok(());
@@ -312,6 +314,12 @@ async fn serve(
     Ok(alive)
 }
 
+async fn response_delay(latency_ms: u64) {
+    if latency_ms != 0 {
+        tokio::time::sleep(Duration::from_millis(latency_ms)).await;
+    }
+}
+
 struct Pacer {
     rate: u64,
     next: Instant,
@@ -344,6 +352,21 @@ mod tests {
         pacer.wait(512).await;
         pacer.wait(512).await;
         assert!(start.elapsed() >= Duration::from_secs(1));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn response_delay_skips_zero_and_preserves_intentional_latency() {
+        let start = Instant::now();
+        assert!(
+            std::future::poll_fn(|cx| {
+                let mut delay = std::pin::pin!(response_delay(0));
+                std::task::Poll::Ready(std::future::Future::poll(delay.as_mut(), cx).is_ready())
+            })
+            .await
+        );
+        assert_eq!(start.elapsed(), Duration::ZERO);
+        response_delay(80).await;
+        assert_eq!(start.elapsed(), Duration::from_millis(80));
     }
 
     #[test]

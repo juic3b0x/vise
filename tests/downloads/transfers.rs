@@ -219,24 +219,85 @@ async fn missing_completed_file_is_redownloaded_without_reusing_stale_offsets() 
 }
 
 #[tokio::test]
-async fn stateless_downloads_reuse_connections_across_tasks() {
+async fn delayed_probes_reuse_a_bounded_pool_across_many_tasks() {
+    let case = DownloadCase::start(Mode::DelayedProbe, 2).await;
+    for _ in 0..24 {
+        let item = case.add().await;
+        case.assert_complete_bytes(item.id).await;
+    }
+    assert!(case.fixture.state.peers.lock().unwrap().len() <= 2);
+    assert_eq!(case.fixture.state.requests.load(Ordering::SeqCst), 24 * 2);
+    case.close().await;
+}
+
+#[tokio::test]
+async fn fresh_single_connection_uses_one_request_and_correct_bytes() {
+    for mode in [
+        Mode::Ranges,
+        Mode::IgnoreRanges,
+        Mode::UnknownLength,
+        Mode::Empty,
+        Mode::NoValidator,
+        Mode::MetadataRepr,
+        Mode::MetadataContent,
+    ] {
+        let case = DownloadCase::start(mode, 1).await;
+        let item = case.add().await;
+        if matches!(mode, Mode::Empty) {
+            assert_eq!(case.wait(item.id).await.status, Status::Completed);
+            assert!(tokio::fs::read(&item.output_path).await.unwrap().is_empty());
+        } else {
+            case.assert_complete_bytes(item.id).await;
+        }
+        assert_eq!(case.fixture.state.requests.load(Ordering::SeqCst), 1);
+        case.close().await;
+    }
+}
+
+#[tokio::test]
+async fn fresh_single_connection_pool_stays_bounded_across_many_tasks() {
+    let case = DownloadCase::start(Mode::DelayedProbe, 1).await;
+    for _ in 0..24 {
+        let item = case.add().await;
+        case.assert_complete_bytes(item.id).await;
+    }
+    assert_eq!(case.fixture.state.peers.lock().unwrap().len(), 1);
+    assert_eq!(case.fixture.state.requests.load(Ordering::SeqCst), 24);
+    case.close().await;
+}
+
+#[tokio::test]
+async fn interrupted_single_connection_reprobes_and_resumes_saved_offsets() {
     let fixture = Fixture::start(Mode::Ranges).await;
-    let root = tempfile::tempdir().unwrap();
-    let manager = manager(&root, 1).await;
-    let first = manager.add(&fixture.url, None).await.unwrap();
-    assert_eq!(terminal(&manager, first.id).await.status, Status::Completed);
-    let previous = fixture.state.peers.lock().unwrap().clone();
-    fixture.state.peers.lock().unwrap().clear();
-    let second = manager.add(&fixture.url, None).await.unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let original = manager(&dir, 1).await;
+    let item = original.add(&fixture.url, None).await.unwrap();
+    progress(&original, item.id).await;
+    original.pause(item.id).await.unwrap();
+    assert_eq!(fixture.state.requests.load(Ordering::SeqCst), 1);
+    original.shutdown().await.unwrap();
+    drop(original);
+    let resumed = manager(&dir, 1).await;
+    assert_eq!(resumed.get(item.id).await.unwrap().status, Status::Paused);
+    resumed.resume(item.id).await.unwrap();
+    let done = terminal(&resumed, item.id).await;
+    assert_eq!(done.status, Status::Completed, "{:?}", done.error);
     assert_eq!(
-        terminal(&manager, second.id).await.status,
-        Status::Completed
+        tokio::fs::read(dir.path().join(done.filename))
+            .await
+            .unwrap(),
+        fixture.state.data
     );
-    let next = fixture.state.peers.lock().unwrap().clone();
+    assert_eq!(fixture.state.requests.load(Ordering::SeqCst), 3);
     assert!(
-        !previous.is_disjoint(&next),
-        "a completed task's pooled connection was not reused"
+        fixture
+            .state
+            .ranges
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(start, _)| *start > 0)
     );
-    manager.shutdown().await.unwrap();
+    resumed.shutdown().await.unwrap();
     fixture.close().await;
 }
