@@ -33,7 +33,7 @@ def parameters(args):
         config["small_count"] = args.small_files
     if args.scenarios:
         config["scenarios"] = args.scenarios.split(",")
-    known = {"large", "capped", "heterogeneous", "small", "latency", "flaky"}
+    known = {"large", "capped", "heterogeneous", "small", "small-defaults", "latency", "flaky"}
     scenarios = config.get("scenarios")
     if not isinstance(scenarios, list) or not scenarios or any(not isinstance(s, str) for s in scenarios):
         raise ValueError("scenarios must be a nonempty string list")
@@ -62,7 +62,7 @@ def parameters(args):
 def fixture_config(config, scenario, seed):
     rng = random.Random(seed)
     sizes = [rng.randint(config["small_min_bytes"], config["small_max_bytes"])
-             for _ in range(config["small_count"])] if scenario == "small" else [config["large_bytes"]]
+             for _ in range(config["small_count"])] if scenario in ("small", "small-defaults") else [config["large_bytes"]]
     return {"seed": seed, "sizes": sizes,
             "rate": config["rate_bytes_per_second"] if scenario in ("capped", "heterogeneous") else 0,
             "latency_ms": config["latency_ms"] if scenario == "latency" else 0,
@@ -71,11 +71,11 @@ def fixture_config(config, scenario, seed):
             "faults_per_file": config["faults_per_file"] if scenario == "flaky" else 0}
 
 
-def run_one(output, executable, fixture_executable, profile, scenario, cohort, config, round_index, warmup):
+def run_one(output, executable, fixture_executable, profile, scenario, cohort, config, round_index, warmup, diagnostics=False):
     seed = config["seed"] + round_index
     fixture_settings = fixture_config(config, scenario, seed)
-    connections = 1 if cohort == "C1" or scenario == "small" else config["connections"]
-    jobs = config["jobs"] if scenario == "small" else 1
+    connections = 8 if scenario == "small-defaults" else (1 if cohort == "C1" or scenario == "small" else config["connections"])
+    jobs = config["jobs"] if scenario in ("small", "small-defaults") else 1
     run = {"scenario": scenario, "cohort": cohort, "profile": profile, "round": round_index,
            "warmup": warmup, "seed": seed, "connection_budget_per_file": connections, "jobs": jobs}
     with tempfile.TemporaryDirectory(prefix="work-", dir=output) as directory:
@@ -92,11 +92,12 @@ def run_one(output, executable, fixture_executable, profile, scenario, cohort, c
             urls = [f'http://127.0.0.1:{fixture.ready["port"]}/file/{i}.bin'
                     for i in range(len(fixture_settings["sizes"]))]
             command, stdin = adapters.command(profile, executable, urls, destination, work,
-                                              connections, jobs, config["retries"], config["timeout"])
+                                              connections, jobs, config["retries"], config["timeout"],
+                                              default_connections=scenario == "small-defaults")
             # Store exact flags but replace local ephemeral paths/ports; no environment dump.
             run["argv"] = [part.replace(str(work), "<run>").replace(str(fixture.ready["port"]), "<port>") for part in command]
             fixture_before = measurement.process_cpu(fixture.process.pid)
-            counters = measurement.launch(command, env, work, stdin, config["run_timeout"])
+            counters = measurement.launch(command, env, work, stdin, config["run_timeout"], diagnostics=diagnostics and profile == "vise")
             fixture_cpu = measurement.cpu_delta(fixture_before, measurement.process_cpu(fixture.process.pid))
             run["fixture_cpu_user_s"] = fixture_cpu[0] if fixture_cpu else None
             run["fixture_cpu_system_s"] = fixture_cpu[1] if fixture_cpu else None
@@ -124,6 +125,7 @@ def run_one(output, executable, fixture_executable, profile, scenario, cohort, c
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--diagnostics", action="store_true", help="collect numeric timings from a perf-diagnostics Vise build")
     parser.add_argument("--smoke", action="store_true", help="3 measured runs, NON-PUBLISHABLE")
     parser.add_argument("--self-test", choices=("wrong-byte", "truncated", "missing", "all"),
                         help="deliberate corruption checks; expected exit status 1")
@@ -178,11 +180,13 @@ def main(argv=None):
         cohorts.append(("C1", profiles + ["curl"]))
     for scenario in config["scenarios"]:
         for cohort, selected in cohorts:
+            if scenario == "small-defaults" and cohort == "C1":
+                continue
             for repetition in range(measured + 1):
                 for profile in adapters.order(selected, repetition):
                     key = "aria2" if profile.startswith("aria2-") else profile
                     run = run_one(output, executables[key], executables["fixture"], profile,
-                                  scenario, cohort, config, repetition, repetition == 0)
+                                  scenario, cohort, config, repetition, repetition == 0, args.diagnostics)
                     runs.append(run)
                     filename = f'{scenario}-{cohort}-{repetition}-{profile}.json'
                     (output / filename).write_text(json.dumps(run, indent=2) + "\n", encoding="utf-8")

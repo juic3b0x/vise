@@ -301,3 +301,67 @@ async fn interrupted_single_connection_reprobes_and_resumes_saved_offsets() {
     resumed.shutdown().await.unwrap();
     fixture.close().await;
 }
+
+#[tokio::test]
+async fn default_budget_preserves_probes_and_reuses_ignored_range_bodies() {
+    for size in [1, 1024 * 1024, 1024 * 1024 + 1] {
+        for mode in [
+            Mode::Ranges,
+            Mode::NoValidator,
+            Mode::IgnoreRanges,
+            Mode::UnknownLength,
+            Mode::MetadataRepr,
+            Mode::MetadataContent,
+            Mode::PartialDigest,
+        ] {
+            let fixture = Fixture::with_size(mode, Some(size)).await;
+            let root = tempfile::tempdir().unwrap();
+            let manager = manager(&root, Config::default().connections_per_download).await;
+            let item = manager.add(&fixture.url, None).await.unwrap();
+            let done = terminal(&manager, item.id).await;
+            assert_eq!(done.status, Status::Completed, "{:?}", done.error);
+            assert_eq!(
+                tokio::fs::read(&done.output_path).await.unwrap(),
+                fixture.state.data
+            );
+            let requests = fixture.state.requests.load(Ordering::SeqCst);
+            if matches!(
+                mode,
+                Mode::IgnoreRanges | Mode::UnknownLength | Mode::MetadataContent
+            ) {
+                assert_eq!(requests, 1, "size {size}");
+            } else {
+                assert!(requests >= 2);
+            }
+            manager.shutdown().await.unwrap();
+            fixture.close().await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn default_small_fixed_body_retries_and_remains_rate_limited() {
+    let fixture = Fixture::with_size(Mode::Truncated, Some(1024 * 1024)).await;
+    let root = tempfile::tempdir().unwrap();
+    let manager = manager(&root, 8).await;
+    manager.set_rate_limit("8M".parse().unwrap()).await.unwrap();
+    let item = manager.add(&fixture.url, None).await.unwrap();
+    let done = terminal(&manager, item.id).await;
+    assert_eq!(done.status, Status::Completed, "{:?}", done.error);
+    assert_eq!(
+        tokio::fs::read(&done.output_path).await.unwrap(),
+        fixture.state.data
+    );
+    assert_eq!(fixture.state.requests.load(Ordering::SeqCst), 3);
+    assert!(
+        fixture
+            .state
+            .ranges
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(start, _)| *start > 0)
+    );
+    manager.shutdown().await.unwrap();
+    fixture.close().await;
+}

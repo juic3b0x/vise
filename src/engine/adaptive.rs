@@ -1,5 +1,5 @@
 //! Tail ownership decisions and runtime write reservations. No controller types.
-const MARGIN: u64 = 256 * 1024;
+pub(super) const MARGIN: u64 = 256 * 1024;
 const ALIGNMENT: u64 = 64 * 1024;
 pub(super) const MAX_CHUNKS: usize = 1024;
 
@@ -489,7 +489,7 @@ impl Manager {
         if !job.adaptive.has_tail(self.0.config.min_split_size) {
             return Ok(None);
         }
-        let _checkpoint = self.0.checkpoint.lock().await;
+        let _checkpoint = self.checkpoint_gate().await;
         if cancel.is_cancelled() {
             return Ok(None);
         }

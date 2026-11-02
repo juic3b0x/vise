@@ -45,7 +45,7 @@ impl Group {
     async fn run(self: Arc<Self>, manager: Manager) {
         loop {
             // Exclusive reset/settlement/delete/split paths retain their old gate.
-            let checkpoint = manager.0.checkpoint.lock().await;
+            let checkpoint = manager.checkpoint_gate().await;
             let receipts = {
                 let mut pending = self
                     .pending

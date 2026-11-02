@@ -68,6 +68,14 @@ def write(output, runs, environment, smoke, config, skips):
                                    display(m["cpu_total_s"]), display(m["peak_rss_bytes"], 1024 ** 2),
                                    display(m["requests"]), display(m["connections"]), display(m["wasted_bytes"]),
                                    display(m["tail_s"]), display(m["slow_connections_with_body"]) + " / " + display(m["slow_body_share"])]) + " |")
+    lines += ["", "## CPU diagnostics", "",
+              "| Scenario / cohort | Profile | Client user s | Client system s | Fixture interval CPU s |",
+              "|---|---|---|---|---|"]
+    for row in rows:
+        m = row["metrics"]
+        lines.append(f'| {row["scenario"]} / {row["cohort"]} | {row["profile"]} | '
+                     + " | ".join(display(m[key]) for key in
+                                  ("cpu_user_s", "cpu_system_s", "fixture_cpu_total_s")) + " |")
     lines += ["", "Flaky runs are excluded from throughput comparisons and rankings: clients have different native retry schedules.",
               "Their wall time is time to correct completion for successful runs only; success rate includes all attempts.", "",
               "| Flaky cohort / profile | Success rate | Time to correct completion s | Observed retry requests |",

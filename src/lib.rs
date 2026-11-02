@@ -20,6 +20,7 @@ pub mod logging;
 pub mod model;
 pub mod net;
 mod paths;
+pub mod performance;
 pub mod proxy;
 pub mod rate_limiter;
 pub mod telemetry;

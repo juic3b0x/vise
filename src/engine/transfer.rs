@@ -1,7 +1,7 @@
 use super::{
     Job, Manager, Metadata,
     http::{check_response, content_range},
-    journal::sync_directory,
+    journal::sync_directory_blocking,
     layout::make_chunks,
 };
 use crate::{
@@ -40,23 +40,29 @@ impl Manager {
         self.refresh_cookies(&job).await?;
         let url = job.record.read().await.url.clone();
         let client = job.client.read().await.clone();
-        let fresh_single = self.0.config.connections_per_download == 1
-            && job.record.read().await.chunks.is_empty();
-        let (metadata, response) = if fresh_single {
-            self.initial_response(&client, &url, &cancel, false).await?
+        let fresh = job.record.read().await.chunks.is_empty();
+        let (metadata, response) = if fresh {
+            let range = if self.0.config.connections_per_download == 1 {
+                super::http::InitialRange::Whole
+            } else {
+                super::http::InitialRange::FreshProbe
+            };
+            self.initial_response(&client, &url, &cancel, range).await?
         } else {
             (self.probe(&client, &url, &cancel).await?, None)
         };
-        let (file, path) = self.prepare_partial(&job, metadata).await?;
+        let (mut file, path) = self.prepare_partial(&job, metadata).await?;
         job.adaptive
             .reset(&*job.record.read().await, self.0.rate_limiter.limit());
         self.transition(&job, Status::Downloading).await?;
+        let transfer_timing = crate::performance::Timer::new(crate::performance::Phase::Transfer);
         if let Some(response) = response {
-            self.transfer_chunk_with_response(job.clone(), 0, &cancel, Some(response))
+            self.transfer_chunk_with_response(job.clone(), 0, &cancel, Some((response, &mut file)))
                 .await?;
         } else {
             self.run_chunks(&job, &cancel).await?;
         }
+        transfer_timing.finish();
         self.publish_file(&job, file, path, &cancel).await
     }
 
@@ -83,37 +89,20 @@ impl Manager {
     }
 
     async fn prepare_partial(&self, job: &Job, metadata: Metadata) -> Result<(fs::File, PathBuf)> {
+        let _timing = crate::performance::Timer::new(crate::performance::Phase::Preparation);
         validate_size(metadata.total)?;
         let path = job.part_path.clone();
-        let _checkpoint = self.0.checkpoint.lock().await;
+        let _checkpoint = self.checkpoint_gate().await;
         let record = job.record.read().await.clone();
         let fresh =
             !job.staged.load(std::sync::atomic::Ordering::Acquire) && record.chunks.is_empty();
         // Fresh jobs skip checkpoint inspection until this first access. Validate
         // here, under the same gate as creation and captured staging eligibility.
-        tokio::task::spawn_blocking(move || paths_for_partial(&record))
-            .await
-            .map_err(|error| Error::Worker(error.to_string()))??;
-        // Only atomic creation plus an offset-free admission proves that no
-        // durable progress can refer to the bytes we are about to initialize.
-        let (file, created) = match fs::OpenOptions::new()
-            .create_new(true)
-            .read(true)
-            .write(true)
-            .open(&path)
-            .await
-        {
-            Ok(file) => (file, true),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => (
-                fs::OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .open(&path)
-                    .await?,
-                false,
-            ),
-            Err(error) => return Err(error.into()),
-        };
+        let open_path = path.clone();
+        let (file, created) =
+            tokio::task::spawn_blocking(move || open_partial(&record, &open_path))
+                .await
+                .map_err(|error| Error::Worker(error.to_string()))??;
         job.staged.store(true, std::sync::atomic::Ordering::Release);
         let total = metadata.total;
         let reusable = apply_metadata(
@@ -126,11 +115,12 @@ impl Manager {
             if !(fresh && created) {
                 self.checkpoint_locked().await?;
             }
-            file.set_len(0).await?;
         }
-        if let Some(total) = total {
-            file.set_len(total).await?;
-        }
+        job.durability.invalidate();
+        let file =
+            tokio::task::spawn_blocking(move || size_partial(file, total, reusable, created))
+                .await
+                .map_err(|error| Error::Worker(error.to_string()))??;
         #[cfg(test)]
         if fresh && created {
             crate::database::split_test_hook("after-fresh-preparation");
@@ -145,6 +135,7 @@ impl Manager {
         path: PathBuf,
         cancel: &CancellationToken,
     ) -> Result<()> {
+        let _timing = crate::performance::Timer::new(crate::performance::Phase::Publication);
         let record = job.record.read().await;
         let downloaded = record.downloaded();
         if record.total_bytes.is_some_and(|total| total != downloaded) {
@@ -155,31 +146,70 @@ impl Manager {
         let target = job.output_path.clone();
         drop(record);
         job.record.write().await.total_bytes = Some(downloaded);
-        file.set_len(downloaded).await?;
+        // Known-length files were sized at preparation; unknown streams need
+        // their final length established before the snapshot durability barrier.
+        if file.metadata().await?.len() != downloaded {
+            job.durability.invalidate();
+            file.set_len(downloaded).await?;
+        }
         file.flush().await?;
-        file.sync_all().await?;
+        let file = self.certify_partial(job, file).await?;
         self.verify_staged(job, &path, cancel).await?;
         // Save all offsets before publishing, making an interrupted commit recoverable.
         self.checkpoint().await?;
         if cancel.is_cancelled() {
             return Err(Error::Cancelled);
         }
+        job.durability.forget();
         // Close the staging handle before changing its name (notably on Windows).
         drop(file);
-        fs::hard_link(&path, &target).await.map_err(|e| {
-            if e.kind() == std::io::ErrorKind::AlreadyExists {
-                Error::Conflict(format!("output already exists: {}", target.display()))
-            } else {
-                e.into()
-            }
-        })?;
-        sync_directory(super::storage::parent(&target)?.to_path_buf()).await?;
-        // Await the staging rename before execute succeeds and the queue can
-        // expose Completed. Retain the same-inode evidence under a private name
-        // until SQLite commits, so a crash here is recoverable without HTTP.
-        fs::rename(&path, super::journal::publication_path(&path)).await?;
-        sync_directory(super::storage::parent(&path)?.to_path_buf()).await?;
+        tokio::task::spawn_blocking(move || {
+            std::fs::hard_link(&path, &target).map_err(|e| {
+                if e.kind() == std::io::ErrorKind::AlreadyExists {
+                    Error::Conflict(format!("output already exists: {}", target.display()))
+                } else {
+                    e.into()
+                }
+            })?;
+            sync_directory_blocking(super::storage::parent(&target)?)?;
+            // Retain same-inode recovery evidence until terminal SQL commit.
+            std::fs::rename(&path, super::journal::publication_path(&path))?;
+            sync_directory_blocking(super::storage::parent(&path)?)
+        })
+        .await
+        .map_err(|e| Error::Worker(e.to_string()))??;
         Ok(())
+    }
+
+    async fn certify_partial(&self, job: &Job, file: fs::File) -> Result<std::fs::File> {
+        let snapshot = job.record.read().await.clone();
+        let revision = job.durability.revision();
+        let durability = job.durability.clone();
+        let file = file.into_std().await;
+        #[cfg(test)]
+        let trace = self.0.journal_trace.clone();
+        // Keep the expensive barrier parallel across ready jobs. Its data-only
+        // certificate lets the grouped checkpoint avoid repeating it, without
+        // trusting the pathname or claiming namespace durability here.
+        let file = tokio::task::spawn_blocking(move || {
+            let synced = durability.certify_data(&file, &snapshot, revision, || {
+                let _timing = crate::performance::Timer::new(crate::performance::Phase::FileSync);
+                #[cfg(test)]
+                trace.check_file()?;
+                file.sync_all()?;
+                Ok(())
+            })?;
+            #[cfg(not(test))]
+            let _ = synced;
+            #[cfg(test)]
+            if synced {
+                trace.record(super::journal::barriers::Phase::PublicationFile);
+            }
+            Ok::<_, Error>(file)
+        })
+        .await
+        .map_err(|e| Error::Worker(e.to_string()))??;
+        Ok(file)
     }
 
     async fn verify_staged(
@@ -221,7 +251,7 @@ impl Manager {
         job: Arc<Job>,
         index: u64,
         cancel: &CancellationToken,
-        mut initial: Option<Response>,
+        mut initial: Option<(Response, &mut fs::File)>,
     ) -> Result<()> {
         let mut attempt = 0;
         loop {
@@ -230,12 +260,13 @@ impl Manager {
             }
             job.adaptive.resolved(index, cancel).await?;
             chunk_at_mut(&mut *job.record.write().await, index)?.status = ChunkStatus::Downloading;
-            let result = if let Some(response) = initial.take() {
+            let result = if let Some((response, file)) = initial.take() {
                 // Metadata, checksums and range bounds were validated before
                 // staging preparation. Charge every payload byte as usual.
                 let end = chunk_at(&*job.record.read().await, index)?.end;
                 job.adaptive.begin_body(index, 0);
-                self.stream_chunk(&job, index, response, 0, end, cancel)
+                // The freshly opened preparation handle is still at zero.
+                self.stream_chunk_from_file(&job, index, response, (0, end), cancel, file)
                     .await
             } else {
                 self.transfer_once(&job, index, cancel).await
@@ -356,7 +387,7 @@ impl Manager {
 
     async fn reset_stream(&self, job: &Job, index: u64, response: &Response) -> Result<()> {
         validate_size(response.content_length())?;
-        let _checkpoint = self.0.checkpoint.lock().await;
+        let _checkpoint = self.checkpoint_gate().await;
         let mut record = job.record.write().await;
         let chunk = chunk_at_mut(&mut record, index)?;
         chunk.end = response.content_length();
@@ -365,6 +396,7 @@ impl Manager {
         job.adaptive.reset(&record, self.0.rate_limiter.limit());
         drop(record);
         self.checkpoint_locked().await?;
+        job.durability.invalidate();
         fs::OpenOptions::new()
             .write(true)
             .open(&job.part_path)
@@ -404,17 +436,80 @@ impl Manager {
         request_end: Option<u64>,
         cancel: &CancellationToken,
     ) -> Result<()> {
-        let mut body = ChunkBody::open(self, job, key, offset, request_end).await?;
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .open(&job.part_path)
+            .await?;
+        file.seek(std::io::SeekFrom::Start(offset)).await?;
+        self.stream_chunk_from_file(job, key, response, (offset, request_end), cancel, &mut file)
+            .await
+    }
+
+    async fn stream_chunk_from_file(
+        &self,
+        job: &Job,
+        key: u64,
+        response: Response,
+        bounds: (u64, Option<u64>),
+        cancel: &CancellationToken,
+        file: &mut fs::File,
+    ) -> Result<()> {
+        let record = job.record.read().await;
+        let fixed = self.0.config.connections_per_download == 1
+            || !record.ranged
+            || self.0.config.min_split_size == 0
+            || record.total_bytes.is_some_and(|total| {
+                total
+                    < self
+                        .0
+                        .config
+                        .min_split_size
+                        .saturating_mul(2)
+                        .saturating_add(super::adaptive::MARGIN)
+            });
+        drop(record);
+        let mut body = ChunkBody::new(self, job, key, file, bounds, fixed);
+
         let result = body.receive(response, cancel).await;
         body.account_discarded();
         result
     }
 }
 
-fn paths_for_partial(record: &Record) -> Result<()> {
+fn open_partial(record: &Record, path: &std::path::Path) -> Result<(std::fs::File, bool)> {
     crate::paths::staging_files(record)?
         .ok_or_else(|| Error::Invalid("staging directory is unavailable".into()))?;
-    Ok(())
+    match std::fs::OpenOptions::new()
+        .create_new(true)
+        .read(true)
+        .write(true)
+        .open(path)
+    {
+        Ok(file) => Ok((file, true)),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok((
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(path)?,
+            false,
+        )),
+        Err(error) => Err(Error::Io(error)),
+    }
+}
+
+fn size_partial(
+    file: std::fs::File,
+    total: Option<u64>,
+    reusable: bool,
+    created: bool,
+) -> Result<fs::File> {
+    if !reusable && !created {
+        file.set_len(0)?;
+    }
+    if let Some(total) = total {
+        file.set_len(total)?;
+    }
+    Ok(fs::File::from_std(file))
 }
 
 /// One response's file buffer and offsets; the HTTP request end remains fixed
@@ -423,40 +518,38 @@ struct ChunkBody<'a> {
     manager: &'a Manager,
     job: &'a Job,
     key: u64,
-    file: fs::File,
+    file: &'a mut fs::File,
     pending: BytesMut,
     last_flush: Instant,
     offset: u64,
     request_end: Option<u64>,
     received: u64,
     position: u64,
+    fixed: bool,
 }
 
 impl<'a> ChunkBody<'a> {
-    async fn open(
+    fn new(
         manager: &'a Manager,
         job: &'a Job,
         key: u64,
-        offset: u64,
-        request_end: Option<u64>,
-    ) -> Result<Self> {
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .open(&job.part_path)
-            .await?;
-        file.seek(std::io::SeekFrom::Start(offset)).await?;
-        Ok(Self {
+        file: &'a mut fs::File,
+        bounds: (u64, Option<u64>),
+        fixed: bool,
+    ) -> Self {
+        Self {
             manager,
             job,
             key,
             file,
             pending: BytesMut::with_capacity(BUFFER_SIZE),
             last_flush: Instant::now(),
-            offset,
-            request_end,
+            offset: bounds.0,
+            request_end: bounds.1,
             received: 0,
-            position: offset,
-        })
+            position: bounds.0,
+            fixed,
+        }
     }
 
     async fn receive(&mut self, response: Response, cancel: &CancellationToken) -> Result<()> {
@@ -498,16 +591,18 @@ impl<'a> ChunkBody<'a> {
         {
             return Err(Error::Protocol("response exceeds requested length".into()));
         }
-        self.job
-            .adaptive
-            .received(self.key, self.offset + self.received);
+        if !self.fixed {
+            self.job
+                .adaptive
+                .received(self.key, self.offset + self.received);
+        }
         Ok(())
     }
 
     // Returns true as soon as a shortened ownership boundary is reached.
     async fn write_frame(&mut self, bytes: &mut Bytes, cancel: &CancellationToken) -> Result<bool> {
         while !bytes.is_empty() {
-            let wait = tokio::time::Instant::now();
+            let wait = (!self.fixed).then(tokio::time::Instant::now);
             let grant = self
                 .manager
                 .0
@@ -515,18 +610,24 @@ impl<'a> ChunkBody<'a> {
                 .acquire(bytes.len(), cancel)
                 .await?;
             let piece = bytes.split_to(grant);
-            let end = self.job.adaptive.end(self.key);
+            let end = if self.fixed {
+                self.request_end
+            } else {
+                self.job.adaptive.end(self.key)
+            };
             let useful = end.map_or(grant, |end| {
                 end.saturating_sub(self.position).min(grant as u64) as usize
             });
-            self.job
-                .adaptive
-                .observe(self.key, useful as u64, wait.elapsed());
+            if let Some(wait) = wait {
+                self.job
+                    .adaptive
+                    .observe(self.key, useful as u64, wait.elapsed());
+            }
             let useful_bytes = piece
                 .get(..useful)
                 .ok_or_else(|| Error::Worker("body slice exceeds frame length".into()))?;
             buffer_body(
-                &mut self.file,
+                self.file,
                 self.job,
                 self.key,
                 &mut self.pending,
@@ -569,11 +670,12 @@ impl<'a> ChunkBody<'a> {
     }
 
     async fn flush(&mut self) -> Result<()> {
-        write_pending(&mut self.file, self.job, self.key, &mut self.pending).await
+        write_pending(self.file, self.job, self.key, &mut self.pending).await
     }
 
     fn account_discarded(&self) {
-        if let Some(end) = self.job.adaptive.end(self.key)
+        if !self.fixed
+            && let Some(end) = self.job.adaptive.end(self.key)
             && Some(end) != self.request_end
         {
             self.job
@@ -623,6 +725,7 @@ pub(super) async fn write_pending(
         let bytes = buffer
             .get(..size)
             .ok_or_else(|| Error::Worker("write reservation exceeds buffer length".into()))?;
+        job.durability.invalidate();
         file.write_all(bytes).await?;
         file.flush().await?;
         // Keep the reservation visible through the awaited progress update.

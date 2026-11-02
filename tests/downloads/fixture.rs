@@ -93,24 +93,29 @@ impl Drop for Active {
 
 impl Fixture {
     pub(super) async fn start(mode: Mode) -> Self {
+        Self::with_size(mode, None).await
+    }
+    pub(super) async fn with_size(mode: Mode, size: Option<usize>) -> Self {
         let state = Arc::new(ServerState {
-            data: (0..if matches!(
-                mode,
-                Mode::Heterogeneous
-                    | Mode::SplitValidator
-                    | Mode::Split429
-                    | Mode::Split503
-                    | Mode::SplitRefused
-                    | Mode::SplitDonorRetry
-            ) {
-                32 * 1024 * 1024
-            } else {
-                if matches!(mode, Mode::DelayedProbe) {
-                    32 * 1024
+            data: (0..size.unwrap_or({
+                if matches!(
+                    mode,
+                    Mode::Heterogeneous
+                        | Mode::SplitValidator
+                        | Mode::Split429
+                        | Mode::Split503
+                        | Mode::SplitRefused
+                        | Mode::SplitDonorRetry
+                ) {
+                    32 * 1024 * 1024
                 } else {
-                    8 * 1024 * 1024 + 137
+                    if matches!(mode, Mode::DelayedProbe) {
+                        32 * 1024
+                    } else {
+                        8 * 1024 * 1024 + 137
+                    }
                 }
-            })
+            }))
                 .map(|i| (i % 251) as u8)
                 .collect(),
             mode,
@@ -265,7 +270,7 @@ fn transfer_range(state: &ServerState, headers: &HeaderMap) -> Option<TransferRa
                 if end.is_empty() {
                     state.data.len() - 1
                 } else {
-                    end.parse::<usize>().unwrap()
+                    end.parse::<usize>().unwrap().min(state.data.len() - 1)
                 },
             )
         });
@@ -328,7 +333,7 @@ fn digest_headers(
     range: &TransferRange,
 ) -> axum::http::response::Builder {
     if matches!(state.mode, Mode::MetadataRepr | Mode::PartialDigest)
-        || (matches!(state.mode, Mode::MetadataContent) && !range.probe)
+        || (matches!(state.mode, Mode::MetadataContent) && (!range.probe || !range.honors_range))
     {
         use base64::Engine;
         let data = if matches!(state.mode, Mode::PartialDigest) {

@@ -129,6 +129,45 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(command[command.index("--connections") + 1], "1")
             self.assertEqual(command[command.index("--jobs") + 1], "5")
 
+    def test_small_defaults_uses_same_payload_and_omits_vise_connection_override(self):
+        config = json.loads((run.ROOT / "benchmarks/scenarios.json").read_text())
+        self.assertEqual(run.fixture_config(config, "small-defaults", 42),
+                         run.fixture_config(config, "small", 42))
+        with tempfile.TemporaryDirectory(dir="target") as temporary:
+            root = Path(temporary)
+            command, _ = adapters.command("vise", "vise", ["http://127.0.0.1:1/file/0.bin"],
+                                           root, root, 8, 5, 5, 30, default_connections=True)
+            self.assertNotIn("--connections", command)
+            command, _ = adapters.command("aria2-matched", "aria2c", [], root, root,
+                                           8, 5, 5, 30, default_connections=True)
+            self.assertIn("--split=8", command)
+
+    def test_diagnostic_reader_rejects_unknown_fields_and_non_numeric_values(self):
+        values = {name: dict(count=1, total_ns=2, max_ns=2) for name in measurement.DIAGNOSTIC_PHASES}
+        line = lambda v: b"VISE_PERF " + json.dumps(v).encode()
+        self.assertEqual(measurement.diagnostic_line(line(values)), values)
+        for invalid in ({"url": "secret"}, {**values, "secret": 3},
+                        {**values, "transfer": dict(count=True, total_ns=2, max_ns=2)},
+                        {**values, "transfer": dict(count=1, total_ns=-1, max_ns=2)}):
+            self.assertIsNone(measurement.diagnostic_line(line(invalid)))
+        self.assertIsNone(measurement.diagnostic_line(b"error with credentials"))
+        self.assertIsNone(measurement.diagnostic_line(b"VISE_PERF not json"))
+
+    def test_cpu_diagnostic_report_excludes_failed_and_warmup_runs(self):
+        runs = [dict(status=status, warmup=warm, scenario="small", cohort="matched-C",
+                     profile="vise", wall_s=1, cpu_user_s=n, cpu_system_s=n,
+                     fixture_cpu_total_s=n)
+                for status, warm, n in [("ok", True, 100), ("failed", False, 200), ("ok", False, 2)]]
+        with tempfile.TemporaryDirectory(dir="target") as temporary:
+            root = Path(temporary)
+            report.write(root, runs, {}, False, {}, [])
+            markdown = (root / "summary.md").read_text()
+            self.assertIn("Fixture interval CPU s", markdown)
+            self.assertIn("2.000 [2.000, 2.000]", markdown)
+            self.assertNotIn("200.000", markdown)
+        runs[-1].pop("fixture_cpu_total_s")
+        self.assertIsNone(report.aggregate(runs)[0]["metrics"]["fixture_cpu_total_s"])
+
     def test_small_files_override_and_production_limit(self):
         source = (run.ROOT / "src/input.rs").read_text(encoding="utf-8")
         limit = int(re.search(r"const MAX_URLS: usize = (\d+);", source).group(1))

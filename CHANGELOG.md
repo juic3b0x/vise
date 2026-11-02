@@ -6,6 +6,10 @@ All notable changes to Vise are documented here. The format follows [Keep a Chan
 
 ### Changed
 
+- Reuse staging preparation handles for retained initial bodies, consolidate preparation/publication filesystem work, and avoid per-frame split estimates when boundaries are provably fixed. Fresh downloads with any connection budget retain a complete HTTP 200 when the server ignores Range; range-capable defaults keep bounded byte-zero probes.
+- Reuse successful staging data and namespace barriers only with matching file identity, length, write revision and captured layout/offsets. Invalidate writes/truncations, start recovery cold, and certify parallel prepublication barriers so checkpoints can reuse them without repeating the sync. Preserve FULL/WAL, checksum checks, no-overwrite publication, recovery links and terminal commit visibility.
+- Add compile-time optional numeric performance diagnostics, client user/system and fixture interval CPU Markdown reporting, and a separate `small-defaults` benchmark without Vise’s connection override. Keep the matched C=1 comparison and fixture 0.1.1 unchanged. No dependency or schema changes.
+
 - Use one metadata-and-payload request for fresh single-connection downloads, retaining the initial open-ended response through staging preparation and preserving bounded retries, validator-based resume, checksums, credentials and proxy isolation. Consume validated one-byte range probes through EOF with cancellation and a deadline to preserve connection pooling.
 - Skip the destructive-reset checkpoint only for atomically created, offset-free fresh staging files. Keep lifecycle commits, FULL/WAL durability, checksum-before-publication and completion-after-commit ordering.
 - Bump the benchmark fixture to 0.1.1, expose its executable version and startup version, and query the selected binary rather than the checkout manifest in reports. Remove zero-latency benchmark timers; reject RAM-disk declarations contradicted by the detected filesystem, label unknown storage unverified, and record Linux fixture CPU around the timed client interval separately from hash preparation.

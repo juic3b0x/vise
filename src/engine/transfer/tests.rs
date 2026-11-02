@@ -327,3 +327,31 @@ async fn publication_finishes_staging_rename_before_returning() {
     );
     manager.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn failed_prepublication_data_barrier_never_exposes_output() {
+    use std::sync::atomic::Ordering;
+    let (_root, manager, job) = staged_job().await;
+    let id = job.record.read().await.id;
+    manager.0.jobs.write().await.insert(id, job.clone());
+    let mut file = fs::File::create(&job.part_path).await.unwrap();
+    file.write_all(b"abc").await.unwrap();
+    file.flush().await.unwrap();
+    job.record.write().await.chunks[0].written = 3;
+    manager.checkpoint().await.unwrap();
+    job.durability.invalidate();
+    manager
+        .0
+        .journal_trace
+        .reject_file
+        .store(true, Ordering::SeqCst);
+    assert!(
+        manager
+            .publish_file(&job, file, job.part_path.clone(), &CancellationToken::new())
+            .await
+            .is_err()
+    );
+    assert!(!job.output_path.exists());
+    assert!(job.part_path.exists());
+    manager.shutdown().await.unwrap();
+}

@@ -282,18 +282,18 @@ async fn fresh_single_range_file_keeps_all_required_durable_barriers() {
     );
     assert_eq!(
         count(Phase::File),
-        2,
-        "downloading and prepublication sync staging data; fresh creation needs no reset barrier"
+        1,
+        "downloading syncs staging; prepublication reuses its data certificate"
     );
-    assert_eq!(count(Phase::StagingDirectory), 2);
-    // Both offset-bearing snapshots retain file -> staging directory -> SQL ->
-    // journal directory order. Only the offset-free fresh reset was removed.
+    assert_eq!(count(Phase::PublicationFile), 1);
+    assert_eq!(count(Phase::StagingDirectory), 1);
+    // Creation requires a namespace barrier; later writes reuse that evidence.
+    // Every data barrier still precedes SQL and journal directory sync.
     for window in phases.split(|phase| *phase == Phase::Capture) {
         if let Some(file) = window.iter().position(|phase| *phase == Phase::File) {
             let staging = window
                 .iter()
-                .position(|phase| *phase == Phase::StagingDirectory)
-                .unwrap();
+                .position(|phase| *phase == Phase::StagingDirectory);
             let sql = window
                 .iter()
                 .position(|phase| *phase == Phase::BeforeDirectory)
@@ -302,7 +302,10 @@ async fn fresh_single_range_file_keeps_all_required_durable_barriers() {
                 .iter()
                 .position(|phase| *phase == Phase::Directory)
                 .unwrap();
-            assert!(file < staging && staging < sql && sql < directory);
+            assert!(file < sql && sql < directory);
+            if let Some(staging) = staging {
+                assert!(file < staging && staging < sql);
+            }
         }
     }
     assert_eq!(

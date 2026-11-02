@@ -18,7 +18,22 @@ use uuid::Uuid;
 pub(super) mod barriers;
 pub(super) mod group;
 
+pub(super) struct CheckpointGuard<'a> {
+    _guard: tokio::sync::MutexGuard<'a, ()>,
+    _timing: crate::performance::Timer,
+}
+
 impl Manager {
+    pub(super) async fn checkpoint_gate(&self) -> CheckpointGuard<'_> {
+        let wait = crate::performance::Timer::new(crate::performance::Phase::CheckpointWait);
+        let guard = self.0.checkpoint.lock().await;
+        wait.finish();
+        CheckpointGuard {
+            _guard: guard,
+            _timing: crate::performance::Timer::new(crate::performance::Phase::CheckpointHold),
+        }
+    }
+
     /// Drive progress samples and crash-safe checkpoints until cancellation.
     pub async fn monitor(&self, stop: CancellationToken) -> Result<()> {
         let mut interval = tokio::time::interval(Duration::from_millis(250));
@@ -145,7 +160,9 @@ impl Manager {
             let mut snapshot = candidate.unwrap_or(&record).clone();
             snapshot.speed = 0.0;
             if job.staged.load(std::sync::atomic::Ordering::Acquire) {
-                snapshots.staged.insert(id);
+                snapshots
+                    .staged
+                    .insert(id, (job.durability.clone(), job.durability.revision()));
             }
             snapshots.records.push(Arc::new(snapshot));
         }
@@ -158,7 +175,7 @@ pub(super) struct Snapshots {
     pub records: Vec<Arc<Record>>,
     pub deleted: Vec<Uuid>,
     generations: Vec<(Uuid, u64)>,
-    staged: std::collections::BTreeSet<Uuid>,
+    staged: BTreeMap<Uuid, (Arc<super::durability::Durability>, u64)>,
 }
 
 // Snapshot offsets must be captured before entering this durability barrier.
@@ -177,29 +194,43 @@ pub(super) async fn sync_snapshots(
     })
     .await
     .map_err(|error| Error::Worker(error.to_string()))??;
-    for directory in directories {
+    for (directory, evidence) in directories {
         #[cfg(test)]
         if let Some(trace) = &trace {
             trace.at(barriers::Phase::StagingDirectory).await;
+            if trace
+                .reject_staging_directory
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(std::io::Error::other("injected directory sync failure").into());
+            }
         }
         match sync_directory(directory).await {
-            Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => continue,
             result => result?,
+        }
+        for durability in evidence {
+            durability.directory_synced();
         }
     }
     Ok(downloads)
 }
 
+type Directories = BTreeMap<PathBuf, Vec<Arc<super::durability::Durability>>>;
+
 fn sync_partials(
     downloads: Snapshots,
     #[cfg(test)] trace: Option<Arc<barriers::Trace>>,
-) -> Result<(Snapshots, std::collections::BTreeSet<PathBuf>)> {
-    let mut directories = std::collections::BTreeSet::new();
+) -> Result<(Snapshots, Directories)> {
+    let mut directories = Directories::new();
     for record in &downloads.records {
         paths::validate(record)?;
-        if record.status == Status::Completed || !downloads.staged.contains(&record.id) {
+        if record.status == Status::Completed {
             continue;
         }
+        let Some((durability, revision)) = downloads.staged.get(&record.id) else {
+            continue;
+        };
         #[cfg(test)]
         if let Some(trace) = &trace {
             trace.record(barriers::Phase::StagingInspection);
@@ -209,12 +240,38 @@ fn sync_partials(
         };
         match std::fs::OpenOptions::new().write(true).open(&part) {
             Ok(file) => {
-                file.sync_data()?;
+                let (synced, namespace) = durability.synchronize(
+                    &file,
+                    paths::parent(&part)?,
+                    record,
+                    *revision,
+                    || {
+                        let _timing =
+                            crate::performance::Timer::new(crate::performance::Phase::FileSync);
+                        #[cfg(test)]
+                        if let Some(trace) = &trace {
+                            trace.check_file()?;
+                        }
+                        file.sync_data()?;
+                        Ok(())
+                    },
+                )?;
+                #[cfg(not(test))]
+                let _ = synced;
                 #[cfg(test)]
-                if let Some(trace) = &trace {
+                if synced && let Some(trace) = &trace {
                     trace.record(barriers::Phase::File);
                 }
-                directories.insert(paths::parent(&part)?.to_path_buf());
+                if namespace {
+                    directories
+                        .entry(paths::parent(&part)?.to_path_buf())
+                        .or_default()
+                        .push(durability.clone());
+                }
+                #[cfg(test)]
+                if !synced {
+                    crate::database::split_test_hook("after-reused-data-barrier");
+                }
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
             Err(error) => return Err(error.into()),
@@ -229,20 +286,22 @@ pub(super) fn publication_path(part: &Path) -> PathBuf {
 }
 
 pub(super) async fn sync_directory(path: PathBuf) -> Result<()> {
-    // Directory fsync makes renames/link creation durable on Unix. Windows does not
-    // permit opening a directory as a normal File; individual files are still synced.
-    tokio::task::spawn_blocking(move || {
-        // Check existence, directory type, canonical identity, and traversal
-        // before opening anything, on every platform (including Windows).
-        let path = paths::directory(&path)?;
-        #[cfg(unix)]
+    tokio::task::spawn_blocking(move || sync_directory_blocking(&path))
+        .await
+        .map_err(|e| Error::Worker(e.to_string()))?
+}
+
+pub(super) fn sync_directory_blocking(path: &Path) -> Result<()> {
+    // Always validate canonical identity and traversal, including on Windows,
+    // where ordinary File handles cannot fsync a directory.
+    let path = paths::directory(path)?;
+    #[cfg(unix)]
+    {
+        let _timing = crate::performance::Timer::new(crate::performance::Phase::DirectorySync);
         std::fs::File::open(path)?.sync_all()?;
-        #[cfg(not(unix))]
-        drop(path);
-        Ok::<_, Error>(())
-    })
-    .await
-    .map_err(|e| Error::Worker(e.to_string()))??;
+    }
+    #[cfg(not(unix))]
+    drop(path);
     Ok(())
 }
 
@@ -546,6 +605,7 @@ mod tests {
         assert!(sync_directory(PathBuf::from("relative")).await.is_err());
     }
 
+    mod durability;
     mod grouping;
     mod incremental;
 }

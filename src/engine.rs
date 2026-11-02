@@ -27,6 +27,7 @@ mod batch;
 pub use batch::{Accepted, BatchResult, Rejected};
 
 mod completion;
+mod durability;
 mod http;
 mod input_batch;
 mod journal;
@@ -87,6 +88,7 @@ struct Job {
     record: tracking::TrackedRecord,
     // Fresh admission alone proves absence. Recovery always starts conservative.
     staged: AtomicBool,
+    durability: Arc<durability::Durability>,
     // Readers must not observe provisional terminal state during its journal commit.
     settlement: RwLock<()>,
     client: RwLock<Transport>,
@@ -112,6 +114,7 @@ impl Job {
             part_path: record.part_path.clone(),
             record: tracking::TrackedRecord::new(record),
             staged: AtomicBool::new(true),
+            durability: Arc::new(durability::Durability::default()),
             settlement: RwLock::new(()),
             client: RwLock::new(client.into()),
             control: Mutex::new(()),

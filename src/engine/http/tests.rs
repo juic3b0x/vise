@@ -72,3 +72,17 @@ async fn probe_completion_is_cancellable_and_has_an_overall_deadline() {
         }
     }
 }
+
+#[tokio::test]
+async fn fresh_probe_requires_exact_bounds() {
+    for (wire, valid) in [
+        (&b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-0/3\r\nContent-Length: 1\r\n\r\na"[..], true),
+        (&b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 1-2/3\r\nContent-Length: 2\r\n\r\nbc"[..], false),
+        (&b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-1/3\r\nContent-Length: 2\r\n\r\nab"[..], false),
+        (&b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-1048576/2097152\r\nContent-Length: 0\r\n\r\n"[..], false),
+    ] {
+        let (response, stop, server) = response(wire).await;
+        assert_eq!(initial_metadata(&response, InitialRange::FreshProbe).is_ok(), valid);
+        stop.cancel(); server.await.unwrap();
+    }
+}
