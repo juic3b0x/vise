@@ -6,7 +6,11 @@ All notable changes to Vise are documented here. The format follows [Keep a Chan
 
 ### Changed
 
-- Reuse staging preparation handles for retained initial bodies, consolidate preparation/publication filesystem work, and avoid per-frame split estimates when boundaries are provably fixed. Fresh downloads with any connection budget retain a complete HTTP 200 when the server ignores Range; range-capable defaults keep bounded byte-zero probes.
+- Retain bounded initial payloads with explicit prefix/remainder ownership: fresh range-capable files up to 1 MiB use one request, and larger validated files keep the prefix within the existing worker budget. Preserve restart/checkpoint, checksums, rate limiting and private transports. Validator-free large partial responses safely restart after consuming at most 1 MiB; hardware performance acceptance remains pending.
+- Allow one prompt retry per execution for validator-backed body interruptions with confirmed written progress, shared across workers and charged to the configured retry budget. Keep escalating waits afterward and preserve delayed no-progress/timeout/connect/probe/HTTP errors, Retry-After, cancellation and redacted classification.
+- Wake idle adaptive workers when a queued remainder begins serving, including after retained-prefix workers finish.
+
+- Reuse staging preparation handles for retained initial bodies, consolidate preparation/publication filesystem work, and avoid per-frame split estimates when boundaries are provably fixed. Fresh downloads with any connection budget retain a complete HTTP 200 when the server ignores Range; range-capable defaults now retain useful bounded prefixes.
 - Reuse successful staging data and namespace barriers only with matching file identity, length, write revision and captured layout/offsets. Invalidate writes/truncations, start recovery cold, and certify parallel prepublication barriers so checkpoints can reuse them without repeating the sync. Preserve FULL/WAL, checksum checks, no-overwrite publication, recovery links and terminal commit visibility.
 - Add compile-time optional numeric performance diagnostics, client user/system and fixture interval CPU Markdown reporting, and a separate `small-defaults` benchmark without Vise’s connection override. Keep the matched C=1 comparison and fixture 0.1.1 unchanged. No dependency or schema changes.
 

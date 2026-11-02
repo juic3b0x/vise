@@ -132,3 +132,74 @@ async fn rate_changes_are_durable_and_failed_commits_preserve_the_live_limit() {
     assert_eq!(restored.rate_configuration().limit_bytes_per_second, None);
     restored.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn validator_free_fallback_obeys_live_limits_and_reuses_its_connection() {
+    let fixture = Fixture::with_size(Mode::NoValidator, Some(1024 * 1024 + 1)).await;
+    let root = tempfile::tempdir().unwrap();
+    let manager = Manager::open(Config {
+        output_dir: root.path().into(),
+        home_dir: Some(root.path().join("home")),
+        connections_per_download: 8,
+        retries: 0,
+        read_timeout: Duration::from_millis(200),
+        limit_rate: Some("8K".parse().unwrap()),
+        ..Config::default()
+    })
+    .await
+    .unwrap();
+    let item = manager.add(&fixture.url, None).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while fixture.state.requests.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(manager.get(item.id).await.unwrap().status, Status::Probing);
+    assert_eq!(fixture.state.requests.load(Ordering::SeqCst), 1);
+    manager.set_rate_limit(RateLimit::UNLIMITED).await.unwrap();
+    let done = terminal(&manager, item.id).await;
+    assert_eq!(done.status, Status::Completed, "{:?}", done.error);
+    assert_eq!(
+        tokio::fs::read(&done.output_path).await.unwrap(),
+        fixture.state.data
+    );
+    assert_eq!(fixture.state.requests.load(Ordering::SeqCst), 2);
+    assert_eq!(fixture.state.peers.lock().unwrap().len(), 1);
+    manager.shutdown().await.unwrap();
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn validator_free_fallback_cancels_while_waiting_for_bandwidth() {
+    let fixture = Fixture::with_size(Mode::NoValidator, Some(1024 * 1024 + 1)).await;
+    let root = tempfile::tempdir().unwrap();
+    let manager = manager(&root, 8).await;
+    manager.set_rate_limit("1".parse().unwrap()).await.unwrap();
+    let item = manager.add(&fixture.url, None).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while fixture.state.requests.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(1), manager.pause(item.id))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(manager.get(item.id).await.unwrap().status, Status::Paused);
+    assert!(!item.output_path.exists());
+    manager.set_rate_limit(RateLimit::UNLIMITED).await.unwrap();
+    manager.resume(item.id).await.unwrap();
+    let done = terminal(&manager, item.id).await;
+    assert_eq!(done.status, Status::Completed, "{:?}", done.error);
+    assert_eq!(
+        tokio::fs::read(&done.output_path).await.unwrap(),
+        fixture.state.data
+    );
+    manager.shutdown().await.unwrap();
+    fixture.close().await;
+}

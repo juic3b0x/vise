@@ -49,6 +49,8 @@ impl Error {
             "timeout"
         } else if error.is_connect() {
             "connection failed"
+        } else if error.is_body() || error.is_decode() {
+            "body interrupted"
         } else {
             "request or body failed"
         };
@@ -58,6 +60,20 @@ impl Error {
         match self {
             Self::Http(error) => Self::private_transport(error),
             other => other,
+        }
+    }
+    /// Safe classification survives removal of URLs and transport sources.
+    pub(crate) fn body_interrupted(&self) -> bool {
+        match self {
+            Self::Http(error) => {
+                !error.is_timeout() && !error.is_connect() && (error.is_body() || error.is_decode())
+            }
+            Self::PrivateHttp {
+                kind: "body interrupted",
+                retryable: true,
+            } => true,
+            Self::Protocol(message) => message == "unexpected end of response body",
+            _ => false,
         }
     }
     pub(crate) fn retryable(&self) -> bool {

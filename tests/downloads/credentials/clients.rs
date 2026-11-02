@@ -94,7 +94,7 @@ async fn local_and_remote_multi_origin_batches_fail_before_admission() {
 
 #[tokio::test]
 async fn credential_values_absent_from_vise_trace_and_cli_errors() {
-    let source = Capture::start(Mode::Transient).await;
+    let source = Capture::start(Mode::Truncated).await;
     let root = tempfile::tempdir().unwrap();
     let mut command = crate::fixture::command(root.path());
     command

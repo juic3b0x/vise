@@ -99,7 +99,7 @@ Batch mode skips progress-bar construction and rendering when terminal drawing i
 | `-o, --output <DIR>` | Destination for new tasks; initially `~/Downloads/Vise` |
 | `-n, --name <NAME>` | Plain output filename; requires exactly one URL |
 | `-j, --jobs <COUNT>` | Simultaneous downloads, 1–64; initially 5 from configuration |
-| `-c, --connections <COUNT>` | Maximum chunks per file, 1–64; default 8 |
+| `-c, --connections <COUNT>` | Maximum parallel connections per file, 1–64; default 8 |
 | `--retries <COUNT>` | Retries after the initial segment attempt, 0–20; default 5 |
 | `--timeout <SECONDS>` | Idle read timeout, at least 1 second; default 30 |
 | `--limit-rate <RATE>` | Global response-body bandwidth cap; `off` clears it |
@@ -121,7 +121,9 @@ Batch mode skips progress-bar construction and rendering when terminal drawing i
 
 Bind, host, and port options require `--webui` or `--daemon`. A WebUI bind must be loopback; a non-loopback daemon bind requires authentication. The timeout limits inactivity, so a progressing large download can run longer than 30 seconds.
 
-Parallelism is conditional on verified range support and a representation validator. Servers without them use one streaming request; after interruption that stream restarts safely. See [transfer and recovery details](architecture.md#transfers-and-recovery).
+Fresh files up to 1 MiB use one metadata-and-payload request even with the default eight-connection budget. Larger files retain that prefix and download non-overlapping remainder ranges concurrently when a strong ETag or Last-Modified permits safe splicing. With no usable validator, a partial initial prefix is consumed (up to 1 MiB of duplicated payload) before restarting as a whole stream. Ignored Range and unknown-length HTTP 200 responses stay single-stream. Resumes check identity before using saved offsets. See [transfer and recovery details](architecture.md#per-transfer-proxy-routing).
+
+One progressing, validator-backed body interruption per execution can retry promptly, shared across all chunks. It counts toward `--retries`; later waits keep their escalating attempt number. Timeouts, connection/probe failures, no-progress failures and HTTP errors keep delayed retry behavior and numeric Retry-After. Cancellation remains prompt during those waits.
 
 ## Interactive queue
 

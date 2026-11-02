@@ -63,6 +63,7 @@ async fn fresh_staging_creation_waits_for_the_capture_gate() {
             validator: Some("new".into()),
             expected: Default::default(),
         },
+        None,
     ));
     assert!(futures_util::poll!(creation.as_mut()).is_pending());
     assert!(
@@ -101,6 +102,7 @@ async fn fresh_preparation_durability_counts() {
                 validator: Some("new".into()),
                 expected: Default::default(),
             },
+            None,
         )
         .await
         .unwrap();
@@ -159,6 +161,7 @@ async fn preexisting_staging_never_uses_the_fresh_reset_exemption() {
                 validator: Some("new".into()),
                 expected: Default::default(),
             },
+            None,
         )
         .await
         .unwrap();
@@ -194,7 +197,8 @@ async fn first_open_of_fresh_staging_rejects_a_substituted_symlink() {
                     ranged: true,
                     validator: Some("new".into()),
                     expected: Default::default()
-                }
+                },
+                None,
             )
             .await
             .is_err()
@@ -232,6 +236,7 @@ async fn reset_does_not_truncate_before_durable_offsets() {
                     validator: Some("new".into()),
                     expected: Default::default(),
                 },
+                None,
             )
             .await
     });
@@ -353,5 +358,33 @@ async fn failed_prepublication_data_barrier_never_exposes_output() {
     );
     assert!(!job.output_path.exists());
     assert!(job.part_path.exists());
+    manager.shutdown().await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn prompt_body_recovery_keeps_subsequent_retry_indices_through_redaction() {
+    let (_root, manager, job) = staged_job().await;
+    for private in [false, true] {
+        job.prompt_recovery.reset();
+        job.record.write().await.chunks[0].written = 0;
+        for (attempt, seconds) in [(0, 0), (1, 2), (2, 4)] {
+            let before = job.record.read().await.chunks[0].written;
+            job.record.write().await.chunks[0].written += 1;
+            let error = if private {
+                Error::PrivateHttp {
+                    kind: "body interrupted",
+                    retryable: true,
+                }
+            } else {
+                Error::Protocol("unexpected end of response body".into())
+            };
+            let started = tokio::time::Instant::now();
+            manager
+                .retry_chunk(&job, 0, attempt, before, &error, &CancellationToken::new())
+                .await
+                .unwrap();
+            assert_eq!(started.elapsed(), Duration::from_secs(seconds));
+        }
+    }
     manager.shutdown().await.unwrap();
 }

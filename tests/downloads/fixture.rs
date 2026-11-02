@@ -51,11 +51,15 @@ pub(super) enum Mode {
     UnknownLength,
     BadRange,
     Truncated,
+    BodyFaults,
+    EmptyBodyFaults,
+    CleanBodyFaults,
     Transient,
     Empty,
     NotFound,
     Stalled,
     NoValidator,
+    WeakValidator,
     TruncatedNoValidator,
     SlowRanges,
     MetadataRepr,
@@ -73,6 +77,7 @@ pub(super) struct ServerState {
     pub(super) data: Vec<u8>,
     pub(super) mode: Mode,
     pub(super) fail_once: AtomicBool,
+    pub(super) body_faults: AtomicUsize,
     pub(super) requests: AtomicUsize,
     pub(super) version: AtomicUsize,
     pub(super) ranges: Mutex<Vec<(usize, usize)>>,
@@ -120,6 +125,7 @@ impl Fixture {
                 .collect(),
             mode,
             fail_once: AtomicBool::new(true),
+            body_faults: AtomicUsize::new(0),
             requests: AtomicUsize::new(0),
             version: AtomicUsize::new(0),
             ranges: Mutex::new(vec![]),
@@ -177,6 +183,13 @@ pub(super) async fn serve(State(state): State<Arc<ServerState>>, headers: Header
     if let Some(response) = special_response(state.mode) {
         return response;
     }
+    if state.data.is_empty() {
+        return Response::builder()
+            .status(416)
+            .header(header::CONTENT_RANGE, "bytes */0")
+            .body(Body::empty())
+            .unwrap();
+    }
     let Some(range) = transfer_range(&state, &headers) else {
         return Response::builder().status(416).body(Body::empty()).unwrap();
     };
@@ -207,15 +220,15 @@ pub(super) async fn serve(State(state): State<Arc<ServerState>>, headers: Header
                 .and_then(|v| v.to_str().ok())
                 .map(str::to_owned),
         );
-        let body = state.bodies.fetch_add(1, Ordering::SeqCst);
-        if body >= 4 && matches!(state.mode, Mode::SplitValidator) {
+        state.bodies.fetch_add(1, Ordering::SeqCst);
+        if range.start > state.data.len() * 3 / 4 && matches!(state.mode, Mode::SplitValidator) {
             return Response::builder()
                 .status(200)
                 .header(header::ETAG, "\"version-1\"")
                 .body(Body::empty())
                 .unwrap();
         }
-        if body >= 4
+        if range.start > state.data.len() * 3 / 4
             && matches!(state.mode, Mode::Split429 | Mode::Split503)
             && state.fail_once.swap(false, Ordering::SeqCst)
         {
@@ -299,7 +312,9 @@ fn transfer_range(state: &ServerState, headers: &HeaderMap) -> Option<TransferRa
     Some(TransferRange {
         start,
         end,
-        probe: range == Some((0, 0)),
+        probe: headers
+            .get(header::RANGE)
+            .is_some_and(|value| value == "bytes=0-0"),
         requested: range.is_some(),
         honors_range,
     })
@@ -316,7 +331,9 @@ fn response_headers(
         StatusCode::OK
     });
     let mut builder = digest_headers(builder, state, range);
-    if !matches!(state.mode, Mode::NoValidator | Mode::TruncatedNoValidator) {
+    if matches!(state.mode, Mode::WeakValidator) {
+        builder = builder.header(header::ETAG, format!("W/\"version-{version}\""));
+    } else if !matches!(state.mode, Mode::NoValidator | Mode::TruncatedNoValidator) {
         builder = builder.header(header::ETAG, format!("\"version-{version}\""));
     }
     if range.honors_range && range.requested {
@@ -331,7 +348,7 @@ fn response_headers(
             ),
         );
     }
-    if !matches!(state.mode, Mode::UnknownLength) {
+    if !matches!(state.mode, Mode::UnknownLength | Mode::CleanBodyFaults) {
         builder = builder.header(header::CONTENT_LENGTH, range.end - range.start + 1);
     }
     builder
@@ -371,12 +388,33 @@ fn digest_headers(
 type FrameState = (usize, usize, bool, Active);
 type Frame = (std::io::Result<Bytes>, FrameState);
 
+fn take_fault(faults: &AtomicUsize) -> bool {
+    let mut remaining = faults.load(Ordering::SeqCst);
+    while remaining > 0 {
+        match faults.compare_exchange_weak(
+            remaining,
+            remaining - 1,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        ) {
+            Ok(_) => return true,
+            Err(actual) => remaining = actual,
+        }
+    }
+    false
+}
+
 fn transfer_body(state: Arc<ServerState>, range: TransferRange, version: usize) -> Body {
     state.ranges.lock().unwrap().push((range.start, range.end));
     let active = state.active.fetch_add(1, Ordering::SeqCst) + 1;
     state.peak.fetch_max(active, Ordering::SeqCst);
     let truncated = matches!(state.mode, Mode::Truncated | Mode::TruncatedNoValidator)
         && state.fail_once.swap(false, Ordering::SeqCst);
+    let truncated = truncated
+        || (matches!(
+            state.mode,
+            Mode::BodyFaults | Mode::EmptyBodyFaults | Mode::CleanBodyFaults
+        ) && take_fault(&state.body_faults));
     let slow = range.start == state.data.len() * 3 / 4
         && matches!(
             state.mode,
@@ -445,9 +483,25 @@ async fn next_frame(
         // requests its tail. Frame delays cannot guarantee worker ordering.
         guard.0.split_requested.cancelled().await;
     }
-    if (truncated && pieces == 6)
+    let fault_piece = if matches!(guard.0.mode, Mode::EmptyBodyFaults) {
+        0
+    } else {
+        1
+    };
+    let fault_piece = if matches!(
+        guard.0.mode,
+        Mode::BodyFaults | Mode::EmptyBodyFaults | Mode::CleanBodyFaults
+    ) {
+        fault_piece
+    } else {
+        6
+    };
+    if (truncated && pieces == fault_piece)
         || (retry_donor && guard.0.fail_once.swap(false, Ordering::SeqCst))
     {
+        if matches!(guard.0.mode, Mode::CleanBodyFaults) {
+            return None;
+        }
         return Some((
             Err(std::io::Error::new(
                 std::io::ErrorKind::ConnectionReset,

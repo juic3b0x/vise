@@ -316,7 +316,7 @@ async fn cli_proxy_flag_routes_the_entire_batch_and_debug_logs_hide_credentials(
     }
     assert_eq!(
         proxy.requests.lock().unwrap().len(),
-        fixture.state.ranges.lock().unwrap().len() + 2
+        fixture.state.ranges.lock().unwrap().len()
     );
     for name in ["file.bin", "file (1).bin"] {
         assert_eq!(

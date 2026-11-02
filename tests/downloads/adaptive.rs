@@ -44,6 +44,7 @@ async fn heterogeneous_tail_split_is_byte_exact() {
             .lock()
             .unwrap()
             .iter()
+            .skip(1) // The retained initial prefix establishes the validator.
             .all(|v| v.as_deref() == Some("\"version-0\""))
     );
     manager.shutdown().await.unwrap();

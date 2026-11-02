@@ -12,18 +12,20 @@ use tokio_util::sync::CancellationToken;
 pub(super) enum InitialRange {
     Probe,
     Whole,
-    FreshProbe,
+    FreshPrefix,
 }
 impl InitialRange {
     fn header(self) -> &'static str {
         match self {
-            Self::Probe | Self::FreshProbe => "bytes=0-0",
+            Self::Probe => "bytes=0-0",
+            Self::FreshPrefix => "bytes=0-1048575",
             Self::Whole => "bytes=0-",
         }
     }
     fn end(self, total: u64) -> u64 {
         match self {
-            Self::Probe | Self::FreshProbe => 0,
+            Self::Probe => 0,
+            Self::FreshPrefix => (super::layout::MIN_CHUNK_SIZE - 1).min(total - 1),
             Self::Whole => total - 1,
         }
     }
@@ -41,44 +43,84 @@ impl Manager {
             .map(|(metadata, _)| metadata)
     }
 
-    /// Fresh downloads may retain a complete initial body; resumes probe identity.
+    /// Fresh downloads retain a complete body or validated prefix; resumes probe identity.
     pub(super) async fn initial_response(
         &self,
         client: &Transport,
         url: &str,
         cancel: &CancellationToken,
-        range: InitialRange,
+        mut range: InitialRange,
     ) -> Result<(Metadata, Option<Response>)> {
         let mut attempt = 0;
+        let mut fallback_expected = ExpectedChecksums::default();
         loop {
-            let result: Result<(Metadata, Option<Response>)> = async {
-                let response = self
-                    .request(client, url, Some(range.header()), None, cancel)
-                    .await?;
-                let status = response.status();
-                let metadata = initial_metadata(&response, range)?;
-                if matches!(range, InitialRange::Probe | InitialRange::FreshProbe)
-                    && status == StatusCode::PARTIAL_CONTENT
-                {
-                    consume_probe(response, cancel, self.0.config.read_timeout).await?;
-                    Ok((metadata, None))
-                } else {
-                    let complete = status == StatusCode::OK
-                        || (status == StatusCode::PARTIAL_CONTENT
-                            && content_range(&response)?.1 + 1 == metadata.total.unwrap_or(0));
-                    let retained = !matches!(range, InitialRange::Probe) && complete;
-                    Ok((metadata, retained.then_some(response)))
-                }
-            }
-            .await;
+            let result = self.initial_once(client, url, cancel, range).await;
             match result {
-                Ok(value) => return Ok(value),
+                Ok((mut metadata, response)) => {
+                    if matches!(range, InitialRange::FreshPrefix)
+                        && response.is_none()
+                        && metadata
+                            .total
+                            .is_some_and(|total| total > super::layout::MIN_CHUNK_SIZE)
+                    {
+                        fallback_expected = metadata.expected;
+                        range = InitialRange::Whole;
+                        continue;
+                    }
+                    metadata.expected.sha256 =
+                        fallback_expected.sha256.or(metadata.expected.sha256);
+                    metadata.expected.md5 = fallback_expected.md5.or(metadata.expected.md5);
+                    return Ok((metadata, response));
+                }
                 Err(error) if error.retryable() && attempt < self.0.config.retries => {
                     self.backoff(attempt, &error, cancel).await?;
                     attempt += 1;
                 }
                 Err(error) => return Err(error),
             }
+        }
+    }
+
+    /// Validate headers before handing off an owned body. A missing body on a
+    /// large fresh prefix means a bounded, fully consumed single-stream fallback.
+    async fn initial_once(
+        &self,
+        client: &Transport,
+        url: &str,
+        cancel: &CancellationToken,
+        range: InitialRange,
+    ) -> Result<(Metadata, Option<Response>)> {
+        let response = self
+            .request(client, url, Some(range.header()), None, cancel)
+            .await?;
+        let status = response.status();
+        let metadata = initial_metadata(&response, range)?;
+        if matches!(range, InitialRange::Probe) && status == StatusCode::PARTIAL_CONTENT {
+            consume_probe(response, cancel, self.0.config.read_timeout).await?;
+            Ok((metadata, None))
+        } else {
+            let complete = status == StatusCode::OK
+                || (status == StatusCode::PARTIAL_CONTENT
+                    && content_range(&response)?.1 + 1 == metadata.total.unwrap_or(0));
+            let retained = !matches!(range, InitialRange::Probe) && (complete || metadata.ranged);
+            if !retained
+                && matches!(range, InitialRange::FreshPrefix)
+                && status == StatusCode::PARTIAL_CONTENT
+            {
+                // No identity: never splice the prefix with another
+                // request. Drain only this bounded body for pool reuse,
+                // charging its bytes, then restart as one whole stream.
+                consume_initial_body(
+                    response,
+                    super::layout::MIN_CHUNK_SIZE,
+                    cancel,
+                    self.0.config.read_timeout,
+                    Some(&self.0.rate_limiter),
+                )
+                .await?;
+                return Ok((metadata, None));
+            }
+            Ok((metadata, retained.then_some(response)))
         }
     }
 
@@ -217,24 +259,45 @@ pub(super) fn content_range(response: &Response) -> Result<(u64, u64, u64)> {
 
 // Only a validated 206 for byte zero reaches here. Never drain an ignored Range.
 async fn consume_probe(
-    mut response: Response,
+    response: Response,
     cancel: &CancellationToken,
     timeout: Duration,
 ) -> Result<()> {
-    if response.content_length().is_some_and(|length| length != 1) {
+    consume_initial_body(response, 1, cancel, timeout, None).await
+}
+
+async fn consume_initial_body(
+    mut response: Response,
+    length: u64,
+    cancel: &CancellationToken,
+    timeout: Duration,
+    limiter: Option<&crate::rate_limiter::RateLimiter>,
+) -> Result<()> {
+    if response
+        .content_length()
+        .is_some_and(|actual| actual != length)
+    {
         return Err(Error::Protocol(
-            "range probe body length is not one byte".into(),
+            "initial range body length does not match its bounds".into(),
         ));
     }
     let receive = async {
         let mut received = 0;
         while let Some(bytes) = response.chunk().await.map_err(Error::private_transport)? {
-            if bytes.len() > 1 - received {
-                return Err(Error::Protocol("range probe body exceeds one byte".into()));
+            if bytes.len() as u64 > length - received {
+                return Err(Error::Protocol(
+                    "initial range body exceeds its bounds".into(),
+                ));
             }
-            received += bytes.len();
+            if let Some(limiter) = limiter {
+                let mut remaining = bytes.len();
+                while remaining > 0 {
+                    remaining -= limiter.acquire(remaining, cancel).await?;
+                }
+            }
+            received += bytes.len() as u64;
         }
-        if received != 1 {
+        if received != length {
             return Err(Error::Protocol(
                 "unexpected end of response probe body".into(),
             ));
@@ -243,9 +306,17 @@ async fn consume_probe(
     };
     tokio::select! { biased;
         _ = cancel.cancelled() => Err(Error::Cancelled),
-        result = tokio::time::timeout(timeout, receive) => result.unwrap_or(Err(Error::PrivateHttp {
-            kind: "probe body timeout", retryable: true,
-        })),
+        result = async {
+            if limiter.is_some() {
+                // Reqwest still enforces read_timeout on network reads. An
+                // application bandwidth wait must not exhaust a probe deadline.
+                receive.await
+            } else {
+                tokio::time::timeout(timeout, receive).await.unwrap_or(Err(Error::PrivateHttp {
+                    kind: "probe body timeout", retryable: true,
+                }))
+            }
+        } => result,
     }
 }
 

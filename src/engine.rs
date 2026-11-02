@@ -35,6 +35,7 @@ mod layout;
 mod migration;
 mod queue;
 mod recovery;
+mod retry;
 mod state;
 mod storage;
 mod tracking;
@@ -96,6 +97,7 @@ struct Job {
     run: Mutex<Option<Run>>,
     removed: AtomicBool,
     adaptive: adaptive::Adaptive,
+    prompt_recovery: retry::PromptRecovery,
     journal_blocked: AtomicBool,
 }
 impl Job {
@@ -109,6 +111,7 @@ impl Job {
         adaptive.reset(&record, RateLimit::UNLIMITED);
         Self {
             adaptive,
+            prompt_recovery: retry::PromptRecovery::default(),
             journal_blocked: AtomicBool::new(false),
             output_path: record.output_path.clone(),
             part_path: record.part_path.clone(),
