@@ -191,6 +191,16 @@ pub(super) async fn serve(State(state): State<Arc<ServerState>>, headers: Header
             .unwrap();
     }
     if !range.probe {
+        if range.start > state.data.len() * 3 / 4
+            && matches!(
+                state.mode,
+                Mode::Split429 | Mode::Split503 | Mode::SplitRefused | Mode::SplitDonorRetry
+            )
+        {
+            // Status refusals return before transfer_body, but still prove the
+            // split child requested its tail and can release the donor.
+            state.split_requested.cancel();
+        }
         state.if_ranges.lock().unwrap().push(
             headers
                 .get(header::IF_RANGE)
@@ -363,9 +373,6 @@ type Frame = (std::io::Result<Bytes>, FrameState);
 
 fn transfer_body(state: Arc<ServerState>, range: TransferRange, version: usize) -> Body {
     state.ranges.lock().unwrap().push((range.start, range.end));
-    if matches!(state.mode, Mode::SplitDonorRetry) && range.start > state.data.len() * 3 / 4 {
-        state.split_requested.cancel();
-    }
     let active = state.active.fetch_add(1, Ordering::SeqCst) + 1;
     state.peak.fetch_max(active, Ordering::SeqCst);
     let truncated = matches!(state.mode, Mode::Truncated | Mode::TruncatedNoValidator)
@@ -403,7 +410,19 @@ async fn next_frame(
     if matches!(guard.0.mode, Mode::Stalled) {
         tokio::time::sleep(Duration::from_secs(5)).await;
     }
-    let delay = if slow {
+    let refusal_donor = slow
+        && matches!(
+            guard.0.mode,
+            Mode::Split429 | Mode::Split503 | Mode::SplitRefused
+        );
+    if refusal_donor && pieces > 0 {
+        // Send one frame to establish the serving donor, then wait for a real
+        // split instead of racing platform-dependent frame delays. After a
+        // refusal, the split cooldown can leave the donor to finish its half;
+        // it must no longer pay the artificial 200 ms delay on every frame.
+        guard.0.split_requested.cancelled().await;
+    }
+    let delay = if slow && !refusal_donor {
         200
     } else if matches!(
         guard.0.mode,
@@ -443,6 +462,63 @@ async fn next_frame(
         .map(|b| b.wrapping_add(version as u8))
         .collect();
     Some((Ok(Bytes::from(bytes)), (next, pieces + 1, slow, guard)))
+}
+
+#[tokio::test(start_paused = true)]
+async fn refusal_donors_wait_for_split_requests_then_resume() {
+    for (mode, status) in [
+        (Mode::Split429, StatusCode::TOO_MANY_REQUESTS),
+        (Mode::Split503, StatusCode::SERVICE_UNAVAILABLE),
+        (Mode::SplitRefused, StatusCode::PARTIAL_CONTENT),
+    ] {
+        let fixture = Fixture::start(mode).await;
+        let state = &fixture.state;
+        let donor_start = state.data.len() * 3 / 4;
+        state.active.fetch_add(1, Ordering::SeqCst);
+        let offset = donor_start + 64 * 1024;
+        let mut frame = Box::pin(next_frame(
+            (offset, 1, true, Active(state.clone())),
+            state.data.len() - 1,
+            false,
+            0,
+        ));
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), &mut frame)
+                .await
+                .is_err(),
+            "the donor must wait for an actual split request"
+        );
+        assert!(state.fail_once.load(Ordering::SeqCst));
+
+        // The next request is a child of the four original ranges. HTTP status
+        // refusals return before constructing a response body.
+        state.bodies.store(4, Ordering::SeqCst);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::RANGE,
+            format!(
+                "bytes={}-{}",
+                donor_start + 4 * 1024 * 1024,
+                state.data.len() - 1
+            )
+            .parse()
+            .unwrap(),
+        );
+        let child = serve(State(state.clone()), headers).await;
+        assert_eq!(child.status(), status);
+        assert!(!state.fail_once.load(Ordering::SeqCst));
+        let (bytes, _) = tokio::time::timeout(Duration::from_millis(100), &mut frame)
+            .await
+            .expect("a rejected split request must release the donor at normal frame pace")
+            .unwrap();
+        assert_eq!(
+            bytes.unwrap().as_ref(),
+            &state.data[offset..offset + 64 * 1024]
+        );
+        drop(frame);
+        drop(child);
+        fixture.close().await;
+    }
 }
 
 #[tokio::test(start_paused = true)]
