@@ -8,8 +8,10 @@ pub(crate) enum Phase {
     SqlCommit,
     SqlCommitted,
     FileSync,
+    #[cfg(unix)]
     DirectorySync,
-    Admission,
+    // Keep slot 5 reserved for directory_sync on platforms without that barrier.
+    Admission = 6,
     Preparation,
     Transfer,
     Publication,
@@ -101,5 +103,30 @@ impl Drop for Report {
     fn drop(&mut self) {
         #[cfg(feature = "perf-diagnostics")]
         enabled::report();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Phase;
+
+    #[test]
+    fn diagnostic_slots_remain_stable_across_platforms() {
+        for (phase, slot) in [
+            (Phase::CheckpointWait, 0),
+            (Phase::CheckpointHold, 1),
+            (Phase::SqlCommit, 2),
+            (Phase::SqlCommitted, 3),
+            (Phase::FileSync, 4),
+            (Phase::Admission, 6),
+            (Phase::Preparation, 7),
+            (Phase::Transfer, 8),
+            (Phase::Publication, 9),
+            (Phase::Settlement, 10),
+        ] {
+            assert_eq!(phase as usize, slot);
+        }
+        #[cfg(unix)]
+        assert_eq!(Phase::DirectorySync as usize, 5);
     }
 }
