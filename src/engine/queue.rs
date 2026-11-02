@@ -45,6 +45,7 @@ impl Manager {
         filename: Option<&str>,
         options: TransferOptions,
     ) -> Result<Download> {
+        let _timing = crate::performance::Timer::new(crate::performance::Phase::Admission);
         let expected = options.expected;
         let expected = ExpectedChecksums::new(expected.sha256.as_deref(), expected.md5.as_deref())?;
         let url = validate_url(url)?;
@@ -280,7 +281,7 @@ impl Manager {
         }
         {
             // Serialize removal with checkpoints and destructive file resets.
-            let _checkpoint = self.0.checkpoint.lock().await;
+            let _checkpoint = self.checkpoint_gate().await;
             job.removed.store(true, Ordering::Release);
             self.0.jobs.write().await.remove(&id);
             if let Err(error) = self.checkpoint_locked().await {

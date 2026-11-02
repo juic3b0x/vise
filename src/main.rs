@@ -104,6 +104,7 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    let _performance = vise::performance::Report;
     vise::logging::init();
     match run(Args::parse()).await {
         Ok(code) => ExitCode::from(code),

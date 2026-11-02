@@ -25,9 +25,11 @@ def isolate(home):
     config.chmod(0o600)
 
 
-def command(profile, executable, urls, output, work, connections, jobs, retries, timeout):
+def command(profile, executable, urls, output, work, connections, jobs, retries, timeout, default_connections=False):
     common = ["--connections", str(connections), "--jobs", str(jobs), "--retries", str(retries),
               "--timeout", str(timeout), "--output", str(output), "--limit-rate", "off"]
+    if default_connections:
+        common = common[2:]
     text = "\n".join(urls) + "\n"
     if profile == "vise":
         listing = work / "urls.txt"

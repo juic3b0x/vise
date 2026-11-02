@@ -51,6 +51,7 @@ impl Manager {
         filename: Option<String>,
         expected: ExpectedChecksums,
     ) -> Result<()> {
+        let _timing = crate::performance::Timer::new(crate::performance::Phase::Admission);
         let context = crate::net::credentials::RequestOverrides::default()
             .resolve(&self.0.config.request)?
             .map(Arc::new);
@@ -80,7 +81,7 @@ impl Manager {
         for (_, job) in &jobs {
             controls.push(job.control.lock().await);
         }
-        let _checkpoint = self.0.checkpoint.lock().await;
+        let _checkpoint = self.checkpoint_gate().await;
         {
             let mut queue = self.0.jobs.write().await;
             for (id, job) in &jobs {

@@ -10,11 +10,18 @@ use tokio::fs;
 
 impl Manager {
     pub(super) async fn finish(&self, job: &Job, result: Result<()>) {
+        let _timing = crate::performance::Timer::new(crate::performance::Phase::Settlement);
         // Lock order: settlement -> checkpoint -> record. Checkpoints deliberately
         // read raw records; public snapshots wait until commit/failure resolution
         // and publication-evidence cleanup have finished.
         let _settlement = job.settlement.write().await;
-        let checkpoint = self.0.checkpoint.lock().await;
+        let checkpoint = self.checkpoint_gate().await;
+        // An unavailable staging path or failed barrier must not pin identity
+        // handles in terminal history. This runs under the capture gate, so an
+        // in-flight checkpoint cannot reinstall evidence after it is cleared.
+        if result.is_err() {
+            job.durability.forget();
+        }
         let id = job.record.read().await.id;
         let mut event = {
             let mut record = job.record.write().await;

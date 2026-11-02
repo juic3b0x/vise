@@ -14,6 +14,6 @@
   "slow_divisor": 10,
   "latency_ms": 80,
   "faults_per_file": 2,
-  "scenarios": ["large", "capped", "heterogeneous", "small", "latency", "flaky"],
+  "scenarios": ["large", "capped", "heterogeneous", "small", "small-defaults", "latency", "flaky"],
   "smoke": {"large_bytes": 8388608, "small_count": 12, "small_min_bytes": 65536, "small_max_bytes": 131072}
 }

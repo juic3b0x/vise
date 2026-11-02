@@ -8,6 +8,27 @@ use reqwest::{Response, StatusCode, header};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
+#[derive(Clone, Copy)]
+pub(super) enum InitialRange {
+    Probe,
+    Whole,
+    FreshProbe,
+}
+impl InitialRange {
+    fn header(self) -> &'static str {
+        match self {
+            Self::Probe | Self::FreshProbe => "bytes=0-0",
+            Self::Whole => "bytes=0-",
+        }
+    }
+    fn end(self, total: u64) -> u64 {
+        match self {
+            Self::Probe | Self::FreshProbe => 0,
+            Self::Whole => total - 1,
+        }
+    }
+}
+
 impl Manager {
     pub(super) async fn probe(
         &self,
@@ -15,38 +36,37 @@ impl Manager {
         url: &str,
         cancel: &CancellationToken,
     ) -> Result<Metadata> {
-        self.initial_response(client, url, cancel, true)
+        self.initial_response(client, url, cancel, InitialRange::Probe)
             .await
             .map(|(metadata, _)| metadata)
     }
 
-    /// Retain a fresh C=1 response; resumed/parallel tasks still probe identity.
+    /// Fresh downloads may retain a complete initial body; resumes probe identity.
     pub(super) async fn initial_response(
         &self,
         client: &Transport,
         url: &str,
         cancel: &CancellationToken,
-        probe: bool,
+        range: InitialRange,
     ) -> Result<(Metadata, Option<Response>)> {
         let mut attempt = 0;
         loop {
             let result: Result<(Metadata, Option<Response>)> = async {
                 let response = self
-                    .request(
-                        client,
-                        url,
-                        Some(if probe { "bytes=0-0" } else { "bytes=0-" }),
-                        None,
-                        cancel,
-                    )
+                    .request(client, url, Some(range.header()), None, cancel)
                     .await?;
                 let status = response.status();
-                let metadata = initial_metadata(&response, probe)?;
-                if probe && status == StatusCode::PARTIAL_CONTENT {
+                let metadata = initial_metadata(&response, range)?;
+                if matches!(range, InitialRange::Probe | InitialRange::FreshProbe)
+                    && status == StatusCode::PARTIAL_CONTENT
+                {
                     consume_probe(response, cancel, self.0.config.read_timeout).await?;
                     Ok((metadata, None))
                 } else {
-                    let retained = !probe && status != StatusCode::RANGE_NOT_SATISFIABLE;
+                    let complete = status == StatusCode::OK
+                        || (status == StatusCode::PARTIAL_CONTENT
+                            && content_range(&response)?.1 + 1 == metadata.total.unwrap_or(0));
+                    let retained = !matches!(range, InitialRange::Probe) && complete;
                     Ok((metadata, retained.then_some(response)))
                 }
             }
@@ -90,7 +110,7 @@ impl Manager {
     }
 }
 
-fn initial_metadata(response: &Response, probe: bool) -> Result<Metadata> {
+fn initial_metadata(response: &Response, range: InitialRange) -> Result<Metadata> {
     let status = response.status();
     if status == StatusCode::RANGE_NOT_SATISFIABLE
         && response
@@ -112,7 +132,7 @@ fn initial_metadata(response: &Response, probe: bool) -> Result<Metadata> {
     match status {
         StatusCode::PARTIAL_CONTENT => {
             let (start, end, total) = content_range(response)?;
-            if start != 0 || (probe && end != 0) || (!probe && end + 1 != total) {
+            if start != 0 || end != range.end(total) {
                 return Err(Error::Protocol(
                     "initial range response has unexpected bounds".into(),
                 ));

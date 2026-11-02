@@ -231,7 +231,11 @@ impl Database {
             let transaction = state.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             transaction.execute("INSERT INTO metadata(key,value) VALUES ('limit_rate',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 [rate.bytes_per_second().unwrap_or(0).to_string()])?;
-            transaction.commit()?;
+            {
+                let _timing = crate::performance::Timer::new(crate::performance::Phase::SqlCommit);
+                transaction.commit()?;
+            }
+            crate::performance::Timer::new(crate::performance::Phase::SqlCommitted).finish();
             Ok(())
         }).await
     }
@@ -322,7 +326,11 @@ impl Database {
             split_test_hook("before-sql-commit");
             #[cfg(test)]
             wait_before_commit(&before_commit);
-            transaction.commit()?;
+            {
+                let _timing = crate::performance::Timer::new(crate::performance::Phase::SqlCommit);
+                transaction.commit()?;
+            }
+            crate::performance::Timer::new(crate::performance::Phase::SqlCommitted).finish();
             #[cfg(test)]
             snapshot_commits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             #[cfg(test)]

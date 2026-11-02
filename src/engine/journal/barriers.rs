@@ -8,6 +8,7 @@ pub(in crate::engine) enum Phase {
     RecordCapture,
     StagingInspection,
     File,
+    PublicationFile,
     StagingDirectory,
     BeforeDirectory,
     Directory,
@@ -17,8 +18,19 @@ pub(in crate::engine) enum Phase {
 pub(in crate::engine) struct Trace {
     phases: Mutex<Vec<Phase>>,
     gate: Mutex<Option<(Phase, super::super::CheckpointHook)>>,
+    pub reject_staging_directory: std::sync::atomic::AtomicBool,
+    pub reject_file: std::sync::atomic::AtomicBool,
 }
 impl Trace {
+    pub(in crate::engine) fn check_file(&self) -> crate::error::Result<()> {
+        if self
+            .reject_file
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(std::io::Error::other("injected file sync failure").into());
+        }
+        Ok(())
+    }
     pub(in crate::engine) fn record(&self, phase: Phase) {
         self.phases.lock().unwrap().push(phase);
     }

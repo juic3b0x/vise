@@ -1,5 +1,6 @@
 """Per-process counters; never subtract cumulative RUSAGE_CHILDREN snapshots."""
 from pathlib import Path
+import json
 import os
 import signal
 import subprocess
@@ -99,10 +100,33 @@ def reap(process, timeout):
             "timed_out": timed_out, "rss_source": "Windows PeakWorkingSetSize; sampled lower bound if final unavailable"}
 
 
-def launch(command, env, cwd, input_bytes=None, timeout=300):
+DIAGNOSTIC_PHASES = {"checkpoint_wait", "checkpoint_hold", "sql_commit", "sql_committed",
+                     "file_sync", "directory_sync", "admission", "preparation", "transfer",
+                     "publication", "settlement"}
+
+
+def diagnostic_line(line):
+    """Accept only fixed metric names and nonnegative integer counters."""
+    if not line.startswith(b"VISE_PERF "):
+        return None
+    try:
+        values = json.loads(line[10:])
+        if not isinstance(values, dict) or set(values) != DIAGNOSTIC_PHASES:
+            return None
+        for metric in values.values():
+            if not isinstance(metric, dict) or set(metric) != {"count", "total_ns", "max_ns"}:
+                return None
+            if any(type(n) is not int or not 0 <= n <= 2**64 - 1 for n in metric.values()):
+                return None
+        return values
+    except (ValueError, UnicodeError):
+        return None
+
+
+def launch(command, env, cwd, input_bytes=None, timeout=300, diagnostics=False):
     start = time.perf_counter()
     with subprocess.Popen(command, cwd=cwd, env=env, stdin=subprocess.PIPE,
-                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                          stdout=subprocess.DEVNULL, stderr=subprocess.PIPE if diagnostics else subprocess.DEVNULL,
                           start_new_session=os.name == "posix") as process:
         def feed():
             try:
@@ -111,9 +135,20 @@ def launch(command, env, cwd, input_bytes=None, timeout=300):
                 process.stdin.close()
             except (BrokenPipeError, OSError):
                 pass
+        numeric = {}
+        def drain():
+            while line := process.stderr.readline(16384):
+                parsed = diagnostic_line(line)
+                if parsed is not None:
+                    numeric.update(parsed)
+        reader = threading.Thread(target=drain, daemon=True) if diagnostics else None
+        if reader:
+            reader.start()
         sender = threading.Thread(target=feed, daemon=True)
         sender.start()
         counters = reap(process, timeout)
         wall = time.perf_counter() - start
         sender.join(timeout=2)
-    return {**counters, "wall_s": wall}
+        if reader:
+            reader.join(timeout=2)
+    return {**counters, "wall_s": wall, **({"diagnostics": numeric} if diagnostics else {})}
