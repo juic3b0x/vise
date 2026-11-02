@@ -9,7 +9,7 @@ use vise::engine::TransferOptions;
 use vise::model::Status;
 
 #[tokio::test]
-async fn http_and_socks_proxy_routes_carry_probes_parallel_chunks_and_authentication() {
+async fn http_and_socks_proxy_routes_carry_retained_prefixes_parallel_chunks_and_authentication() {
     use proxy_support::{Kind, TestProxy};
     for (kind, auth, remote_dns) in [
         (Kind::Http, false, true),
@@ -57,15 +57,15 @@ async fn http_and_socks_proxy_routes_carry_probes_parallel_chunks_and_authentica
         assert!(!serialized.contains("alice"));
         assert!(!serialized.contains("ssword"));
         let captured = proxy.requests.lock().unwrap().clone();
-        // A SOCKS tunnel can keep the probe's connection alive for one segment;
-        // HTTP fixture responses close each connection after a request.
+        // A SOCKS tunnel can reuse the prefix connection for a queued segment;
+        // HTTP proxy fixture responses close after each request.
         assert!(captured.len() >= if matches!(kind, Kind::Http) { 5 } else { 4 });
         assert!(captured.iter().all(|request| request.domain == remote_dns));
         if matches!(kind, Kind::Http) {
             assert!(
                 captured
                     .iter()
-                    .any(|request| request.range.as_deref() == Some("bytes=0-0"))
+                    .any(|request| request.range.as_deref() == Some("bytes=0-1048575"))
             );
             assert!(captured.iter().all(|request| request.method == "GET"));
         }

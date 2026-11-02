@@ -264,7 +264,7 @@ async fn paused_telemetry(
     let chunked: vise::model::Download =
         serde_json::from_value(snapshot["downloads"][0].clone()).unwrap();
     assert_eq!(chunked.id, item.id);
-    assert_eq!(chunked.chunks.len(), 2);
+    assert_eq!(chunked.chunks.len(), 3); // Prefix plus the two non-overlapping remainders.
     assert_eq!(
         chunked
             .chunks
@@ -278,7 +278,12 @@ async fn paused_telemetry(
         chunked.chunks[0].end_byte,
         Some(chunked.chunks[1].start_byte)
     );
-    assert_eq!(chunked.chunks[1].end_byte, chunked.total_bytes);
+    assert_eq!(chunked.chunks[0].end_byte, Some(1024 * 1024));
+    assert_eq!(
+        chunked.chunks[1].end_byte,
+        Some(chunked.chunks[2].start_byte)
+    );
+    assert_eq!(chunked.chunks[2].end_byte, chunked.total_bytes);
     assert!(chunked.chunks.iter().all(|c| matches!(
         c.status,
         vise::model::ChunkStatus::Paused | vise::model::ChunkStatus::Completed

@@ -36,6 +36,7 @@ impl Manager {
             _ = cancel.cancelled() => return Err(Error::Cancelled),
             permit = self.0.pool.acquire() => permit.map_err(|error| Error::Worker(error.to_string()))?,
         };
+        job.prompt_recovery.reset();
         self.transition(&job, Status::Probing).await?;
         self.refresh_cookies(&job).await?;
         let url = job.record.read().await.url.clone();
@@ -45,22 +46,38 @@ impl Manager {
             let range = if self.0.config.connections_per_download == 1 {
                 super::http::InitialRange::Whole
             } else {
-                super::http::InitialRange::FreshProbe
+                super::http::InitialRange::FreshPrefix
             };
             self.initial_response(&client, &url, &cancel, range).await?
         } else {
             (self.probe(&client, &url, &cancel).await?, None)
         };
-        let (mut file, path) = self.prepare_partial(&job, metadata).await?;
+        let prefix = if metadata.ranged {
+            response
+                .as_ref()
+                .filter(|r| r.status() == StatusCode::PARTIAL_CONTENT)
+                .map(content_range)
+                .transpose()?
+                .map(|(_, end, _)| end + 1)
+        } else {
+            None
+        };
+        let (mut file, path) = self.prepare_partial(&job, metadata, prefix).await?;
         job.adaptive
             .reset(&*job.record.read().await, self.0.rate_limiter.limit());
         self.transition(&job, Status::Downloading).await?;
         let transfer_timing = crate::performance::Timer::new(crate::performance::Phase::Transfer);
-        if let Some(response) = response {
-            self.transfer_chunk_with_response(job.clone(), 0, &cancel, Some((response, &mut file)))
+        match response {
+            Some(response) if job.record.read().await.chunks.len() == 1 => {
+                self.transfer_chunk_with_response(
+                    job.clone(),
+                    0,
+                    &cancel,
+                    Some((response, &mut file)),
+                )
                 .await?;
-        } else {
-            self.run_chunks(&job, &cancel).await?;
+            }
+            response => self.run_chunks(&job, &cancel, response).await?,
         }
         transfer_timing.finish();
         self.publish_file(&job, file, path, &cancel).await
@@ -88,7 +105,12 @@ impl Manager {
         Ok(())
     }
 
-    async fn prepare_partial(&self, job: &Job, metadata: Metadata) -> Result<(fs::File, PathBuf)> {
+    async fn prepare_partial(
+        &self,
+        job: &Job,
+        metadata: Metadata,
+        prefix: Option<u64>,
+    ) -> Result<(fs::File, PathBuf)> {
         let _timing = crate::performance::Timer::new(crate::performance::Phase::Preparation);
         validate_size(metadata.total)?;
         let path = job.part_path.clone();
@@ -110,6 +132,9 @@ impl Manager {
             metadata,
             self.0.config.connections_per_download,
         );
+        if !reusable && let Some(end) = prefix {
+            super::layout::retain_prefix(&mut job.record.write().await.chunks, end);
+        }
         if !reusable {
             // Invalidate durable offsets before destroying their corresponding data.
             if !(fresh && created) {
@@ -246,6 +271,20 @@ impl Manager {
             .await
     }
 
+    pub(super) async fn transfer_initial_chunk(
+        &self,
+        job: Arc<Job>,
+        response: Response,
+        cancel: &CancellationToken,
+    ) -> Result<()> {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .open(&job.part_path)
+            .await?;
+        self.transfer_chunk_with_response(job, 0, cancel, Some((response, &mut file)))
+            .await
+    }
+
     async fn transfer_chunk_with_response(
         &self,
         job: Arc<Job>,
@@ -259,6 +298,7 @@ impl Manager {
                 return Err(Error::Cancelled);
             }
             job.adaptive.resolved(index, cancel).await?;
+            let written_before = chunk_at(&*job.record.read().await, index)?.written;
             chunk_at_mut(&mut *job.record.write().await, index)?.status = ChunkStatus::Downloading;
             let result = if let Some((response, file)) = initial.take() {
                 // Metadata, checksums and range bounds were validated before
@@ -288,24 +328,8 @@ impl Manager {
                     return Ok(());
                 }
                 Err(error) if error.retryable() && attempt < self.0.config.retries => {
-                    let position = job
-                        .record
-                        .read()
-                        .await
-                        .chunks
-                        .binary_search_by_key(&index, |c| c.start)
-                        .map_err(|_| missing_chunk(index))?;
-                    tracing::warn!(chunk = position, retry = attempt + 1, %error, "retrying transfer");
-                    self.publish_job(
-                        EventKind::Retrying {
-                            chunk: position,
-                            attempt: attempt + 1,
-                            error: error.to_string(),
-                        },
-                        &job,
-                    )
-                    .await;
-                    self.backoff(attempt, &error, cancel).await?;
+                    self.retry_chunk(&job, index, attempt, written_before, &error, cancel)
+                        .await?;
                     attempt += 1;
                 }
                 Err(error) => {
@@ -739,7 +763,7 @@ pub(super) async fn write_pending(
     }
     Ok(())
 }
-fn chunk_at(record: &Record, key: u64) -> Result<&Chunk> {
+pub(super) fn chunk_at(record: &Record, key: u64) -> Result<&Chunk> {
     record
         .chunks
         .binary_search_by_key(&key, |c| c.start)
@@ -754,7 +778,7 @@ fn chunk_at_mut(record: &mut Record, key: u64) -> Result<&mut Chunk> {
         .map_err(|_| missing_chunk(key))?;
     record.chunks.get_mut(i).ok_or_else(|| missing_chunk(key))
 }
-fn missing_chunk(key: u64) -> Error {
+pub(super) fn missing_chunk(key: u64) -> Error {
     Error::Worker(format!("missing chunk at byte {key}"))
 }
 

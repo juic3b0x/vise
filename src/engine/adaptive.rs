@@ -155,6 +155,7 @@ struct State {
 pub(super) struct Adaptive {
     state: Mutex<State>,
     changed: Notify,
+    serving: Notify,
 }
 impl Adaptive {
     fn lock(&self) -> MutexGuard<'_, State> {
@@ -255,6 +256,7 @@ impl Adaptive {
             c.speed = Speed::default();
             c.speed.observe(0, Duration::ZERO);
         }
+        self.serving.notify_one();
     }
     pub(super) fn received(&self, key: u64, end: u64) {
         if let Some(c) = self.lock().chunks.get_mut(&key) {
@@ -367,6 +369,7 @@ impl Manager {
         &self,
         job: &Arc<Job>,
         cancel: &CancellationToken,
+        initial: Option<reqwest::Response>,
     ) -> Result<()> {
         let mut queue: VecDeque<_> = job
             .record
@@ -384,6 +387,24 @@ impl Manager {
         let mut workers = JoinSet::new();
         let worker_cancel = cancel.child_token();
         let mut failure = None;
+        if let Some(response) = initial {
+            // The retained prefix consumes a normal slot; remainder workers
+            // start immediately without waiting for its body to finish.
+            if queue.pop_front() != Some(0) {
+                return Err(Error::Worker("initial response has no prefix owner".into()));
+            }
+            idle.remove(0);
+            let manager = self.clone();
+            let job = job.clone();
+            let cancel = worker_cancel.clone();
+            workers.spawn(async move {
+                let result = manager
+                    .transfer_initial_chunk(job.clone(), response, &cancel)
+                    .await;
+                let speed = job.adaptive.stopped(0);
+                (Estimate::new(speed, manager.0.rate_limiter.limit()), result)
+            });
+        }
         loop {
             self.fill_slots(
                 job,
@@ -394,7 +415,23 @@ impl Manager {
                 &worker_cancel,
             )
             .await;
-            let Some(result) = workers.join_next().await else {
+            // A queued remainder may start after all other short chunks have
+            // finished. Wake idle workers when its headers arrive rather than
+            // waiting for that last body to finish before considering a split.
+            let result = if !idle.is_empty()
+                && !workers.is_empty()
+                && queue.is_empty()
+                && failure.is_none()
+                && self.0.config.min_split_size != 0
+            {
+                tokio::select! {
+                    result = workers.join_next() => result,
+                    _ = job.adaptive.serving.notified() => continue,
+                }
+            } else {
+                workers.join_next().await
+            };
+            let Some(result) = result else {
                 break;
             };
             consume_result(result, &mut idle, &mut failure, &worker_cancel);

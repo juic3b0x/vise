@@ -5,7 +5,31 @@ use crate::{
 use std::path::Path;
 use url::Url;
 
-const MIN_CHUNK_SIZE: u64 = 1024 * 1024;
+pub(super) const MIN_CHUNK_SIZE: u64 = 1024 * 1024;
+
+/// Give the retained response exclusive ownership of [0, end). Preserve
+/// ordinary boundaries beyond it, coalescing a tiny first remainder when possible.
+pub(super) fn retain_prefix(chunks: &mut Vec<Chunk>, end: u64) {
+    chunks.retain(|chunk| chunk.end.is_some_and(|bound| bound > end));
+    if let Some(first) = chunks.first_mut() {
+        first.start = end;
+        if first.end.unwrap_or(end) - end < MIN_CHUNK_SIZE && chunks.len() > 1 {
+            chunks.remove(0);
+            if let Some(next) = chunks.first_mut() {
+                next.start = end;
+            }
+        }
+    }
+    chunks.insert(
+        0,
+        Chunk {
+            start: 0,
+            end: Some(end),
+            written: 0,
+            status: ChunkStatus::Queued,
+        },
+    );
+}
 
 pub(super) fn make_chunks(total: Option<u64>, ranged: bool, connections: usize) -> Vec<Chunk> {
     if !ranged || total == Some(0) {
@@ -181,6 +205,32 @@ mod tests {
                 cursor = chunk.end.unwrap();
             }
             assert_eq!(cursor, total);
+        }
+    }
+    #[test]
+    fn retained_prefix_and_remainder_cover_exactly_once() {
+        for connections in [1, 4, 8] {
+            for total in [
+                1,
+                MIN_CHUNK_SIZE - 1,
+                MIN_CHUNK_SIZE,
+                MIN_CHUNK_SIZE + 1,
+                8 * MIN_CHUNK_SIZE + 137,
+                32 * MIN_CHUNK_SIZE,
+            ] {
+                let mut chunks = make_chunks(Some(total), true, connections);
+                let end = total.min(MIN_CHUNK_SIZE);
+                retain_prefix(&mut chunks, end);
+                assert_eq!(chunks[0].end, Some(end));
+                assert!(chunks.len() <= connections + 1);
+                let mut cursor = 0;
+                for chunk in chunks {
+                    assert_eq!(chunk.start, cursor);
+                    assert!(chunk.end.unwrap() > chunk.start);
+                    cursor = chunk.end.unwrap();
+                }
+                assert_eq!(cursor, total);
+            }
         }
     }
     #[test]

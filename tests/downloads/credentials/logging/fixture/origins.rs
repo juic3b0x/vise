@@ -202,7 +202,7 @@ async fn serve(
         .map(|(start, end)| {
             (
                 start.parse::<usize>().unwrap(),
-                end.parse::<usize>().unwrap_or(total - 1),
+                end.parse::<usize>().unwrap_or(total - 1).min(total - 1),
             )
         })
         .unwrap_or((0, total - 1));
