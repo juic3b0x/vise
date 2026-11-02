@@ -93,6 +93,7 @@ async fn extra_request_refusals_keep_ownership_and_retry_safely() {
         let done = terminal(&manager, item.id).await;
         assert_eq!(done.status, Status::Completed, "{:?}", done.error);
         assert!(done.tail_splits > 0);
+        assert!(!fixture.state.fail_once.load(Ordering::SeqCst));
         coverage(&done);
         assert!(done.checksums.verified_at.is_some());
         manager.shutdown().await.unwrap();
