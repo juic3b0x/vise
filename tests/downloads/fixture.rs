@@ -445,60 +445,8 @@ async fn next_frame(
     if offset > end {
         return None;
     }
-    if matches!(guard.0.mode, Mode::Stalled) {
-        tokio::time::sleep(Duration::from_secs(5)).await;
-    }
-    let refusal_donor = slow
-        && matches!(
-            guard.0.mode,
-            Mode::Split429 | Mode::Split503 | Mode::SplitRefused
-        );
-    if refusal_donor && pieces > 0 {
-        // Send one frame to establish the serving donor, then wait for a real
-        // split instead of racing platform-dependent frame delays. After a
-        // refusal, the split cooldown can leave the donor to finish its half;
-        // it must no longer pay the artificial 200 ms delay on every frame.
-        guard.0.split_requested.cancelled().await;
-    }
-    let delay = if slow && !refusal_donor {
-        200
-    } else if matches!(
-        guard.0.mode,
-        Mode::Heterogeneous
-            | Mode::SplitValidator
-            | Mode::Split429
-            | Mode::Split503
-            | Mode::SplitRefused
-            | Mode::SplitDonorRetry
-            | Mode::SlowRanges
-    ) {
-        20
-    } else {
-        6
-    };
-    tokio::time::sleep(Duration::from_millis(delay)).await;
-    let retry_donor = slow && pieces == 16 && matches!(guard.0.mode, Mode::SplitDonorRetry);
-    if retry_donor {
-        // Keep the original response alive until the split child actually
-        // requests its tail. Frame delays cannot guarantee worker ordering.
-        guard.0.split_requested.cancelled().await;
-    }
-    let fault_piece = if matches!(guard.0.mode, Mode::EmptyBodyFaults) {
-        0
-    } else {
-        1
-    };
-    let fault_piece = if matches!(
-        guard.0.mode,
-        Mode::BodyFaults | Mode::EmptyBodyFaults | Mode::CleanBodyFaults
-    ) {
-        fault_piece
-    } else {
-        6
-    };
-    if (truncated && pieces == fault_piece)
-        || (retry_donor && guard.0.fail_once.swap(false, Ordering::SeqCst))
-    {
+    let retry_donor = wait_for_frame(&guard.0, pieces, slow).await;
+    if frame_interrupted(&guard.0, pieces, truncated, retry_donor) {
         if matches!(guard.0.mode, Mode::CleanBodyFaults) {
             return None;
         }
@@ -518,6 +466,62 @@ async fn next_frame(
     Some((Ok(Bytes::from(bytes)), (next, pieces + 1, slow, guard)))
 }
 
+async fn wait_for_frame(state: &ServerState, pieces: usize, slow: bool) -> bool {
+    if matches!(state.mode, Mode::Stalled) {
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
+    let refusal_donor = slow
+        && matches!(
+            state.mode,
+            Mode::Split429 | Mode::Split503 | Mode::SplitRefused
+        );
+    if refusal_donor && pieces >= 16 {
+        // Establish mature donor observations before waiting for a real split.
+        // After a refusal, the cooldown leaves the donor to finish its half;
+        // it must no longer pay the artificial 200 ms delay on every frame.
+        state.split_requested.cancelled().await;
+    }
+    let delay = if slow && (!refusal_donor || pieces < 16) {
+        200
+    } else if matches!(
+        state.mode,
+        Mode::Heterogeneous
+            | Mode::SplitValidator
+            | Mode::Split429
+            | Mode::Split503
+            | Mode::SplitRefused
+            | Mode::SplitDonorRetry
+            | Mode::SlowRanges
+    ) {
+        20
+    } else {
+        6
+    };
+    tokio::time::sleep(Duration::from_millis(delay)).await;
+    let retry_donor = slow && pieces == 16 && matches!(state.mode, Mode::SplitDonorRetry);
+    if retry_donor {
+        // Keep the original response alive until the split child actually
+        // requests its tail. Frame delays cannot guarantee worker ordering.
+        state.split_requested.cancelled().await;
+    }
+    retry_donor
+}
+
+fn frame_interrupted(
+    state: &ServerState,
+    pieces: usize,
+    truncated: bool,
+    retry_donor: bool,
+) -> bool {
+    let fault_piece = match state.mode {
+        Mode::EmptyBodyFaults => 0,
+        Mode::BodyFaults | Mode::CleanBodyFaults => 1,
+        _ => 6,
+    };
+    (truncated && pieces == fault_piece)
+        || (retry_donor && state.fail_once.swap(false, Ordering::SeqCst))
+}
+
 #[tokio::test(start_paused = true)]
 async fn refusal_donors_wait_for_split_requests_then_resume() {
     for (mode, status) in [
@@ -528,10 +532,31 @@ async fn refusal_donors_wait_for_split_requests_then_resume() {
         let fixture = Fixture::start(mode).await;
         let state = &fixture.state;
         let donor_start = state.data.len() * 3 / 4;
+        // Initial donor frames must remain available for speed observations.
+        // Stall only after that prefix, while the helper asks for a real split.
+        for pieces in 0..16 {
+            state.active.fetch_add(1, Ordering::SeqCst);
+            let started = tokio::time::Instant::now();
+            let (bytes, _) = next_frame(
+                (
+                    donor_start + pieces * 64 * 1024,
+                    pieces,
+                    true,
+                    Active(state.clone()),
+                ),
+                state.data.len() - 1,
+                false,
+                0,
+            )
+            .await
+            .unwrap();
+            assert_eq!(started.elapsed(), Duration::from_millis(200));
+            assert_eq!(bytes.unwrap().len(), 64 * 1024);
+        }
         state.active.fetch_add(1, Ordering::SeqCst);
-        let offset = donor_start + 64 * 1024;
+        let offset = donor_start + 16 * 64 * 1024;
         let mut frame = Box::pin(next_frame(
-            (offset, 1, true, Active(state.clone())),
+            (offset, 16, true, Active(state.clone())),
             state.data.len() - 1,
             false,
             0,

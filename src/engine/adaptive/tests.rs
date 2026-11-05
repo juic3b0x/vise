@@ -12,6 +12,26 @@ fn candidate(end: u64, written: u64) -> Candidate {
     }
 }
 
+fn trust_donor(adaptive: &Adaptive, key: u64) {
+    let now = Instant::now();
+    adaptive.lock().chunks.get_mut(&key).unwrap().speed = Speed {
+        samples: [
+            (now - Duration::from_secs(2), 0),
+            (now - Duration::from_millis(1500), 128 << 10),
+            (now - Duration::from_secs(1), 256 << 10),
+            (now, 512 << 10),
+        ]
+        .into(),
+        bytes: 512 << 10,
+        waits: Duration::ZERO,
+        smoothed: (256 << 10) as f64,
+    };
+}
+
+fn trusted_idle() -> [Estimate; 1] {
+    [Estimate::new(Some(262_144.0), RateLimit::UNLIMITED)]
+}
+
 fn check(c: Candidate, minimum: u64, decision: Option<Decision>) {
     if let Some(d) = decision {
         assert_eq!(d.start, c.start);
@@ -95,6 +115,77 @@ fn weighted_split_accounts_for_all_idle_workers() {
     assert_eq!(choose_split(&[c], &[], 1 << 20, 4), None);
     assert_eq!(choose_split(&[c], &[None], 0, 4), None);
     assert_eq!(choose_split(&[c], &[None], 1, MAX_CHUNKS), None);
+}
+
+#[test]
+fn split_savings_must_cover_setup_commit_and_observation_margin() {
+    let c = Candidate {
+        speed: Some((1 << 20) as f64),
+        ..candidate(8 << 20, 0)
+    };
+    let d = choose_split(&[c], &[c.speed], 1 << 20, 1).unwrap();
+    // Eight seconds without a split, four with it. Two seconds are reserved
+    // as policy margin; measured setup and commit must fit the remaining two.
+    assert!(worthwhile(&c, d, c.speed.unwrap(), Duration::ZERO));
+    assert!(worthwhile(
+        &c,
+        d,
+        c.speed.unwrap(),
+        Duration::from_millis(1999)
+    ));
+    assert!(!worthwhile(&c, d, c.speed.unwrap(), Duration::from_secs(2)));
+    assert!(!worthwhile(&c, d, c.speed.unwrap(), Duration::from_secs(5)));
+    for helper in [f64::NAN, f64::INFINITY, 0.0, -1.0, 1.0] {
+        assert!(!worthwhile(&c, d, helper, Duration::ZERO));
+    }
+    assert!(!worthwhile(
+        &Candidate { speed: None, ..c },
+        d,
+        1.0,
+        Duration::ZERO
+    ));
+    let short = Candidate { end: 4 << 20, ..c };
+    let d = choose_split(&[short], &[c.speed], 1 << 20, 1).unwrap();
+    assert!(!worthwhile(&short, d, c.speed.unwrap(), Duration::ZERO));
+}
+
+#[tokio::test(start_paused = true)]
+async fn immature_stale_or_expensive_splits_never_change_ownership() {
+    let (_root, manager, job) = staged().await;
+    let record = job.record.read().await.clone();
+    let helper = &[Some(262_144.0)];
+    let no_split = || {
+        assert!(job.adaptive.propose(&record, helper, 1 << 20).is_none());
+        let state = job.adaptive.lock();
+        assert!(state.pending.is_none());
+        assert_eq!(state.chunks[&0].end, record.chunks[0].end);
+    };
+    job.adaptive.begin_body(0, 0);
+    for _ in 0..7 {
+        tokio::time::advance(Duration::from_millis(250)).await;
+        job.adaptive.observe(0, 64 << 10, Duration::ZERO);
+        no_split();
+    }
+    trust_donor(&job.adaptive, 0);
+    for idle in [None, Some(f64::NAN), Some(0.0)] {
+        assert!(job.adaptive.propose(&record, &[idle], 1 << 20).is_none());
+    }
+    job.adaptive.record_setup(Duration::from_secs(20));
+    job.adaptive.record_setup(Duration::ZERO);
+    no_split();
+    job.adaptive.lock().setup = Duration::ZERO;
+    job.adaptive.lock().split_cost = Duration::from_secs(20);
+    no_split();
+    job.adaptive.lock().split_cost = Duration::ZERO;
+    tokio::time::advance(Duration::from_secs(2)).await;
+    no_split();
+    trust_donor(&job.adaptive, 0);
+    job.adaptive.observe(0, 1, Duration::from_secs(1));
+    no_split();
+    trust_donor(&job.adaptive, 0);
+    let decision = job.adaptive.propose(&record, helper, 1 << 20).unwrap();
+    assert!(decision.boundary > decision.start);
+    manager.shutdown().await.unwrap();
 }
 
 #[test]
@@ -202,6 +293,7 @@ async fn staged() -> (tempfile::TempDir, Manager, Arc<Job>) {
         .unwrap();
     job.record.write().await.chunks[0].status = ChunkStatus::Downloading;
     job.adaptive.begin_body(0, 0);
+    trust_donor(&job.adaptive, 0);
     manager.0.jobs.write().await.insert(id, job.clone());
     manager.checkpoint().await.unwrap();
     (root, manager, job)
@@ -219,7 +311,7 @@ async fn writer_never_crosses_revised_boundary() {
         .unwrap();
     file.seek(std::io::SeekFrom::Start(0)).await.unwrap();
     let mut pending = bytes::BytesMut::from(vec![9; 2 * ALIGNMENT as usize].as_slice());
-    super::super::transfer::write_pending(&mut file, &job, 0, &mut pending)
+    super::super::transfer::write_pending(&mut file, &job, 0, &mut pending, false)
         .await
         .unwrap();
     assert_eq!(job.record.read().await.chunks[0].written, ALIGNMENT);
@@ -236,8 +328,10 @@ async fn checkpoint_and_split_commit_atomically() {
     external.execute_batch("BEGIN IMMEDIATE").unwrap();
     let m = manager.clone();
     let j = job.clone();
-    let split =
-        tokio::spawn(async move { m.split_tail(&j, &[None], &CancellationToken::new()).await });
+    let split = tokio::spawn(async move {
+        m.split_tail(&j, &trusted_idle(), &CancellationToken::new())
+            .await
+    });
     tokio::time::timeout(Duration::from_secs(3), async {
         while job.adaptive.lock().pending.is_none() {
             tokio::task::yield_now().await;
@@ -269,7 +363,7 @@ async fn split_transaction_failure_preserves_old_layout() {
     external.execute_batch("CREATE TRIGGER refuse_child BEFORE INSERT ON chunks WHEN NEW.chunk_index=2 BEGIN SELECT RAISE(ABORT, 'test split failure'); END;").unwrap();
     assert!(
         manager
-            .split_tail(&job, &[None], &CancellationToken::new())
+            .split_tail(&job, &trusted_idle(), &CancellationToken::new())
             .await
             .is_err()
     );
@@ -403,11 +497,37 @@ async fn split_crash_child() {
     })
     .await
     .unwrap();
-    manager
+    let item = manager
         .add_with_checksums(&url, None, expected)
         .await
         .unwrap();
-    std::future::pending::<()>().await;
+    let job = manager.job(item.id).await.unwrap();
+    // This process-death test exercises ownership/commit boundaries, not the
+    // observation policy. Supply trusted test estimates while the real local
+    // workers run; separate virtual-clock tests cover estimate eligibility.
+    loop {
+        let record = job.record.read().await;
+        assert!(
+            record.status.active(),
+            "crash child settled: {:?} {:?}",
+            record.status,
+            record.error
+        );
+        for chunk in &record.chunks {
+            let serving = job
+                .adaptive
+                .lock()
+                .chunks
+                .get(&chunk.start)
+                .is_some_and(|c| c.serving);
+            if serving {
+                trust_donor(&job.adaptive, chunk.start);
+                job.adaptive.serving.notify_one();
+            }
+        }
+        drop(record);
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
 }
 fn crash_data() -> Vec<u8> {
     (0..4 * 1024 * 1024).map(|i| (i % 251) as u8).collect()
@@ -622,11 +742,11 @@ async fn simultaneous_idle_workers_reserve_slots_once() {
     let record = job.record.read().await;
     let decision = job
         .adaptive
-        .propose(&record, &[None, None], 1 << 20)
+        .propose(&record, &[Some(262_144.0); 2], 1 << 20)
         .unwrap();
     assert!(
         job.adaptive
-            .propose(&record, &[None, None], 1 << 20)
+            .propose(&record, &[Some(262_144.0); 2], 1 << 20)
             .is_none()
     );
     assert!(decision.boundary > decision.start);
@@ -645,10 +765,11 @@ async fn every_sql_split_preserves_exact_coverage() {
                 chunk.status = ChunkStatus::Downloading;
                 job.adaptive
                     .begin_body(chunk.start, chunk.start + chunk.written);
+                trust_donor(&job.adaptive, chunk.start);
             }
         }
         let Some(_) = manager
-            .split_tail(&job, &[None], &CancellationToken::new())
+            .split_tail(&job, &trusted_idle(), &CancellationToken::new())
             .await
             .unwrap()
         else {
@@ -695,7 +816,8 @@ async fn impossible_split_does_not_wait_for_checkpoint_lock() {
     job.adaptive.stopped(0);
     let checkpoint = manager.0.checkpoint.lock().await;
     let cancel = CancellationToken::new();
-    let attempt = manager.split_tail(&job, &[None], &cancel);
+    let idle = trusted_idle();
+    let attempt = manager.split_tail(&job, &idle, &cancel);
     tokio::pin!(attempt);
     assert!(matches!(
         futures_util::poll!(&mut attempt),
@@ -710,7 +832,8 @@ async fn split_precheck_preserves_authoritative_recheck_after_waiting() {
     let (_root, manager, job) = staged().await;
     let checkpoint = manager.0.checkpoint.lock().await;
     let cancel = CancellationToken::new();
-    let attempt = manager.split_tail(&job, &[None], &cancel);
+    let idle = trusted_idle();
+    let attempt = manager.split_tail(&job, &idle, &cancel);
     tokio::pin!(attempt);
     assert!(matches!(
         futures_util::poll!(&mut attempt),
@@ -719,6 +842,24 @@ async fn split_precheck_preserves_authoritative_recheck_after_waiting() {
     job.record.write().await.validator = None;
     drop(checkpoint);
     assert_eq!(attempt.await.unwrap(), None);
+    manager.shutdown().await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn idle_rates_are_rechecked_after_checkpoint_contention() {
+    let (_root, manager, job) = staged().await;
+    let checkpoint = manager.0.checkpoint.lock().await;
+    let cancel = CancellationToken::new();
+    let idle = trusted_idle();
+    let attempt = manager.split_tail(&job, &idle, &cancel);
+    tokio::pin!(attempt);
+    assert!(futures_util::poll!(&mut attempt).is_pending());
+    tokio::time::advance(Duration::from_secs(2)).await;
+    trust_donor(&job.adaptive, 0);
+    drop(checkpoint);
+    assert_eq!(attempt.await.unwrap(), None);
+    assert!(job.adaptive.lock().pending.is_none());
+    assert_eq!(job.record.read().await.chunks.len(), 2);
     manager.shutdown().await.unwrap();
 }
 
@@ -740,8 +881,9 @@ async fn split_precheck_never_rejects_an_authoritative_candidate() {
                 }];
                 job.adaptive.reset(&record, RateLimit::UNLIMITED);
                 job.adaptive.begin_body(0, written);
+                trust_donor(&job.adaptive, 0);
                 let eligible = job.adaptive.has_tail(minimum);
-                let decision = job.adaptive.propose(&record, &[None], minimum);
+                let decision = job.adaptive.propose(&record, &[Some(262_144.0)], minimum);
                 assert!(decision.is_none() || eligible);
             }
         }
@@ -755,7 +897,7 @@ async fn split_reconciles_a_committed_layout_after_lost_acknowledgement() {
     manager.0.database.reject_next_commit_ack();
     assert!(
         manager
-            .split_tail(&job, &[None], &CancellationToken::new())
+            .split_tail(&job, &trusted_idle(), &CancellationToken::new())
             .await
             .is_err()
     );
