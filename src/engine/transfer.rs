@@ -42,6 +42,7 @@ impl Manager {
         let url = job.record.read().await.url.clone();
         let client = job.client.read().await.clone();
         let fresh = job.record.read().await.chunks.is_empty();
+        let request_started = Instant::now();
         let (metadata, response) = if fresh {
             let range = if self.0.config.connections_per_download == 1 {
                 super::http::InitialRange::Whole
@@ -52,6 +53,7 @@ impl Manager {
         } else {
             (self.probe(&client, &url, &cancel).await?, None)
         };
+        let setup = request_started.elapsed();
         let prefix = if metadata.ranged {
             response
                 .as_ref()
@@ -65,6 +67,7 @@ impl Manager {
         let (mut file, path) = self.prepare_partial(&job, metadata, prefix).await?;
         job.adaptive
             .reset(&*job.record.read().await, self.0.rate_limiter.limit());
+        job.adaptive.record_setup(setup);
         self.transition(&job, Status::Downloading).await?;
         let transfer_timing = crate::performance::Timer::new(crate::performance::Phase::Transfer);
         match response {
@@ -375,6 +378,7 @@ impl Manager {
         };
         let range = requested_range(ranged, offset, chunk.end)?;
         let client = job.client.read().await.clone();
+        let request_started = Instant::now();
         let response = self
             .request(
                 &client,
@@ -384,6 +388,7 @@ impl Manager {
                 cancel,
             )
             .await?;
+        job.adaptive.record_setup(request_started.elapsed());
         check_response(&response)?;
         if ranged {
             let expected = job.record.read().await.total_bytes;
@@ -657,6 +662,7 @@ impl<'a> ChunkBody<'a> {
                 &mut self.pending,
                 useful_bytes,
                 &mut self.last_flush,
+                self.fixed,
             )
             .await?;
             self.position += useful as u64;
@@ -694,7 +700,7 @@ impl<'a> ChunkBody<'a> {
     }
 
     async fn flush(&mut self) -> Result<()> {
-        write_pending(self.file, self.job, self.key, &mut self.pending).await
+        write_pending(self.file, self.job, self.key, &mut self.pending, self.fixed).await
     }
 
     fn account_discarded(&self) {
@@ -716,6 +722,7 @@ async fn buffer_body(
     pending: &mut BytesMut,
     mut bytes: &[u8],
     last_flush: &mut Instant,
+    fixed: bool,
 ) -> Result<()> {
     while !bytes.is_empty() {
         let size = bytes.len().min(BUFFER_SIZE - pending.len());
@@ -725,12 +732,12 @@ async fn buffer_body(
         pending.extend_from_slice(piece);
         bytes = rest;
         if pending.len() == BUFFER_SIZE {
-            write_pending(file, job, key, pending).await?;
+            write_pending(file, job, key, pending, fixed).await?;
             *last_flush = Instant::now();
         }
     }
     if last_flush.elapsed() >= Duration::from_millis(250) {
-        write_pending(file, job, key, pending).await?;
+        write_pending(file, job, key, pending, fixed).await?;
         *last_flush = Instant::now();
     }
     Ok(())
@@ -741,11 +748,28 @@ pub(super) async fn write_pending(
     job: &Job,
     key: u64,
     buffer: &mut BytesMut,
+    fixed: bool,
 ) -> Result<()> {
     if !buffer.is_empty() {
         // Validate the stable key BEFORE writing, including the error path.
-        chunk_at(&*job.record.read().await, key)?;
-        let size = job.adaptive.reserve(key, buffer.len())?;
+        {
+            let record = job.record.read().await;
+            let chunk = chunk_at(&record, key)?;
+            if fixed
+                && chunk.end.is_some_and(|end| {
+                    buffer.len() as u64 > end.saturating_sub(chunk.start + chunk.written)
+                })
+            {
+                return Err(Error::Protocol("write exceeds fixed chunk length".into()));
+            }
+        }
+        // Fixed layouts cannot acquire a split child. They need the ordinary
+        // flush/progress durability ordering, but no adaptive reservation.
+        let size = if fixed {
+            buffer.len()
+        } else {
+            job.adaptive.reserve(key, buffer.len())?
+        };
         let bytes = buffer
             .get(..size)
             .ok_or_else(|| Error::Worker("write reservation exceeds buffer length".into()))?;
@@ -754,7 +778,9 @@ pub(super) async fn write_pending(
         file.flush().await?;
         // Keep the reservation visible through the awaited progress update.
         chunk_at_mut(&mut *job.record.write().await, key)?.written += size as u64;
-        job.adaptive.written(key, size);
+        if !fixed {
+            job.adaptive.written(key, size);
+        }
         #[cfg(test)]
         if job.adaptive.is_child(key) {
             super::adaptive::tests::hook("after-child-write");

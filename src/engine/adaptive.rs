@@ -2,6 +2,9 @@
 pub(super) const MARGIN: u64 = 256 * 1024;
 const ALIGNMENT: u64 = 64 * 1024;
 pub(super) const MAX_CHUNKS: usize = 1024;
+// Policy margin, not a latency estimate: a split must save at least one full
+// speed-observation window in addition to observed request and commit costs.
+const SPLIT_MARGIN: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Copy)]
 struct Candidate {
@@ -61,6 +64,21 @@ fn choose_split(
         old_end: c.end,
         boundary: boundary.clamp(low, high),
     })
+}
+
+fn worthwhile(c: &Candidate, d: Decision, helper: f64, overhead: Duration) -> bool {
+    let Some(donor) = c.speed.filter(|v| v.is_finite() && *v > 0.0) else {
+        return false;
+    };
+    if !helper.is_finite() || helper <= 0.0 {
+        return false;
+    }
+    let offset = c.start + c.written;
+    let before = (c.end - offset) as f64 / donor;
+    let after = ((d.boundary - offset) as f64 / donor).max((c.end - d.boundary) as f64 / helper);
+    before.is_finite()
+        && after.is_finite()
+        && before - after > SPLIT_MARGIN.as_secs_f64() + overhead.as_secs_f64()
 }
 
 #[cfg(test)]
@@ -150,6 +168,8 @@ struct State {
     rate: RateLimit,
     splits: u64,
     discarded: u64,
+    setup: Duration,
+    split_cost: Duration,
 }
 #[derive(Default)]
 pub(super) struct Adaptive {
@@ -173,6 +193,7 @@ impl Adaptive {
             .is_some_and(|size| {
                 self.lock().chunks.values().any(|c| {
                     c.serving
+                        && c.speed.rate().is_some()
                         && c.end
                             .is_some_and(|end| end.saturating_sub(c.written_to) >= size)
                 })
@@ -187,21 +208,34 @@ impl Adaptive {
         if s.pending.is_some() || s.cooldown.is_some_and(|until| until > Instant::now()) {
             return None;
         }
+        // Unknown/stale/limiter-dominated rates cannot justify additional
+        // requests and durable ownership changes. In particular, short runs
+        // must not repeatedly halve tails before any estimate can mature.
+        let rates = idle.iter().copied().collect::<Option<Vec<_>>>()?;
+        if rates.is_empty() || rates.iter().any(|v| !v.is_finite() || *v <= 0.0) {
+            return None;
+        }
+        let helper = *rates.first()?;
         let candidates: Vec<_> = record
             .chunks
             .iter()
             .filter_map(|chunk| {
                 let c = s.chunks.get(&chunk.start)?;
+                let speed = c.speed.rate()?;
                 (c.serving && chunk.status == ChunkStatus::Downloading).then_some(Candidate {
                     start: chunk.start,
                     end: chunk.end?,
                     written: chunk.written,
                     frontier: c.frontier.max(c.reserved),
-                    speed: c.speed.rate(),
+                    speed: Some(speed),
                 })
             })
             .collect();
         let d = choose_split(&candidates, idle, minimum, record.chunks.len())?;
+        let donor = candidates.iter().find(|c| c.start == d.start)?;
+        if !worthwhile(donor, d, helper, s.setup.saturating_add(s.split_cost)) {
+            return None;
+        }
         #[cfg(test)]
         tests::hook("before-boundary");
         s.chunks.get_mut(&d.start)?.end = Some(d.boundary);
@@ -233,6 +267,10 @@ impl Adaptive {
             rate,
             ..State::default()
         };
+    }
+    pub(super) fn record_setup(&self, elapsed: Duration) {
+        let mut s = self.lock();
+        s.setup = s.setup.max(elapsed);
     }
     pub(super) fn decorate(&self, mut snapshot: Download) -> Download {
         let state = self.lock();
@@ -479,17 +517,7 @@ impl Manager {
             let key = if let Some(key) = queue.pop_front() {
                 Some(key)
             } else {
-                match self
-                    .split_tail(
-                        job,
-                        &idle
-                            .iter()
-                            .map(|e| e.trusted(self.0.rate_limiter.limit()))
-                            .collect::<Vec<_>>(),
-                        worker_cancel,
-                    )
-                    .await
-                {
+                match self.split_tail(job, idle, worker_cancel).await {
                     Ok(key) => key,
                     Err(error) => {
                         *failure = Some(error);
@@ -514,30 +542,58 @@ impl Manager {
     async fn split_tail(
         &self,
         job: &Job,
-        idle: &[Option<f64>],
+        idle: &[Estimate],
         cancel: &CancellationToken,
     ) -> Result<Option<u64>> {
         if cancel.is_cancelled() || self.0.stopping.load(Ordering::Acquire) {
             return Ok(None);
         }
-        // This conservative check only avoids the gate when no serving tail can
-        // fit both minimum portions and the donor margin. Recheck authoritatively
-        // after acquiring the gate: progress/cancellation may change while waiting.
+        if idle.is_empty()
+            || idle.iter().any(|e| {
+                e.trusted(self.0.rate_limiter.limit())
+                    .is_none_or(|v| !v.is_finite() || v <= 0.0)
+            })
+        {
+            return Ok(None);
+        }
+        // Avoid the gate when no trusted serving tail fits both minimum
+        // portions and the donor margin. Recheck authoritatively after acquiring
+        // the gate: progress/cancellation/rate freshness may change while waiting.
         if !job.adaptive.has_tail(self.0.config.min_split_size) {
             return Ok(None);
         }
+        let started = Instant::now();
         let _checkpoint = self.checkpoint_gate().await;
         if cancel.is_cancelled() {
             return Ok(None);
         }
         let record = job.record.read().await;
+        let rates: Vec<_> = idle
+            .iter()
+            .map(|e| e.trusted(self.0.rate_limiter.limit()))
+            .collect();
         let Some(decision) = job
             .adaptive
-            .propose(&record, idle, self.0.config.min_split_size)
+            .propose(&record, &rates, self.0.config.min_split_size)
         else {
             return Ok(None);
         };
         drop(record);
+        let result = self.commit_split(job, decision, cancel).await;
+        let mut state = job.adaptive.lock();
+        // Include gate contention and all filesystem/SQL/directory barriers.
+        // Retain the maximum for this execution; a fast later commit must not
+        // erase evidence that splitting has been expensive on this storage.
+        state.split_cost = state.split_cost.max(started.elapsed());
+        result
+    }
+
+    async fn commit_split(
+        &self,
+        job: &Job,
+        decision: Decision,
+        cancel: &CancellationToken,
+    ) -> Result<Option<u64>> {
         #[cfg(test)]
         tests::hook("after-boundary");
         let mut candidate = job.record.read().await.clone();

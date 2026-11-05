@@ -6,7 +6,6 @@ use crate::{
     events::EventKind,
     model::Status,
 };
-use tokio::fs;
 
 impl Manager {
     pub(super) async fn finish(&self, job: &Job, result: Result<()>) {
@@ -98,8 +97,13 @@ impl Manager {
 }
 
 async fn remove_publication_evidence(job: &Job) -> Result<()> {
-    fs::remove_file(super::journal::publication_path(&job.part_path)).await?;
-    super::journal::sync_directory(super::storage::parent(&job.part_path)?.to_path_buf()).await
+    let path = super::journal::publication_path(&job.part_path);
+    tokio::task::spawn_blocking(move || {
+        std::fs::remove_file(&path)?;
+        super::journal::sync_directory_blocking(super::storage::parent(&path)?)
+    })
+    .await
+    .map_err(|error| Error::Worker(error.to_string()))?
 }
 
 #[cfg(test)]
@@ -110,6 +114,7 @@ mod tests {
         model::{Download, Record, timestamp_millis},
     };
     use std::{sync::Arc, task::Poll, time::Duration};
+    use tokio::fs;
     use uuid::Uuid;
 
     async fn published_job(manager: &Manager) -> Arc<Job> {
@@ -154,6 +159,37 @@ mod tests {
         for reject in [false, true] {
             check_blocked_commit(reject).await;
         }
+    }
+
+    #[tokio::test]
+    async fn cleanup_failure_keeps_committed_completion_and_reports_warning() {
+        let root = tempfile::tempdir().unwrap();
+        let manager = Manager::open(Config {
+            home_dir: Some(root.path().join("home")),
+            output_dir: root.path().join("output"),
+            ..Config::default()
+        })
+        .await
+        .unwrap();
+        let job = published_job(&manager).await;
+        let id = job.record.read().await.id;
+        let evidence = super::super::journal::publication_path(&job.part_path);
+        fs::remove_file(&evidence).await.unwrap();
+        fs::create_dir(&evidence).await.unwrap(); // removal must fail
+        let mut events = manager.subscribe_events();
+        manager.finish(&job, Ok(())).await;
+        assert_eq!(manager.get(id).await.unwrap().status, Status::Completed);
+        assert_eq!(
+            manager.0.database.load().await.unwrap()[0].status,
+            Status::Completed
+        );
+        assert!(evidence.is_dir());
+        assert!(matches!(
+            events.try_recv().unwrap().kind,
+            EventKind::Warning { .. }
+        ));
+        assert_eq!(events.try_recv().unwrap().kind, EventKind::Completed);
+        manager.shutdown().await.unwrap();
     }
 
     async fn check_blocked_commit(reject: bool) {

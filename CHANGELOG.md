@@ -6,6 +6,9 @@ All notable changes to Vise are documented here. The format follows [Keep a Chan
 
 ### Changed
 
+- Require mature donor and idle-worker rates before adaptive tail splitting. Projected savings must exceed a two-second policy margin plus observed request setup and prior split-commit costs; avoid speculative halving of short tails. Keep initial prefix ownership, connection budgets and durable split ordering.
+- Skip adaptive write reservations for provably fixed layouts while retaining bounded writes, flush-before-progress and checkpoints. Consolidate publication recovery-link removal and directory synchronization into one filesystem task after terminal commit. Performance impact remains unmeasured.
+
 - Retain bounded initial payloads with explicit prefix/remainder ownership: fresh range-capable files up to 1 MiB use one request, and larger validated files keep the prefix within the existing worker budget. Preserve restart/checkpoint, checksums, rate limiting and private transports. Validator-free large partial responses safely restart after consuming at most 1 MiB; hardware performance acceptance remains pending.
 - Allow one prompt retry per execution for validator-backed body interruptions with confirmed written progress, shared across workers and charged to the configured retry budget. Keep escalating waits afterward and preserve delayed no-progress/timeout/connect/probe/HTTP errors, Retry-After, cancellation and redacted classification.
 - Wake idle adaptive workers when a queued remainder begins serving, including after retained-prefix workers finish.

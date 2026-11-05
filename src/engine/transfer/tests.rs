@@ -281,11 +281,64 @@ async fn missing_chunks_fail_workers_and_do_not_commit_progress() {
         .unwrap();
     let mut pending = BytesMut::from(b"abc".as_slice());
     assert!(matches!(
-        write_pending(&mut file, &job, 1, &mut pending).await,
+        write_pending(&mut file, &job, 1, &mut pending, false).await,
         Err(Error::Worker(_))
     ));
     assert_eq!(pending.as_ref(), b"abc");
     assert_eq!(chunk_at(&*job.record.read().await, 0).unwrap().written, 0);
+    manager.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn fixed_writes_need_no_adaptive_control_and_flush_before_progress() {
+    for unknown in [false, true] {
+        let (_root, manager, job) = staged_job().await;
+        if unknown {
+            let mut record = job.record.write().await;
+            record.ranged = false;
+            record.total_bytes = None;
+            record.chunks[0].end = None;
+        }
+        let mut empty = job.record.read().await.clone();
+        empty.chunks.clear();
+        job.adaptive
+            .reset(&empty, crate::rate_limiter::RateLimit::UNLIMITED);
+        let mut file = fs::File::create(&job.part_path).await.unwrap();
+        let mut pending = BytesMut::from(b"abc".as_slice());
+        // Dynamic writes require a reservation. Its failure must preserve data
+        // and offsets; the fixed path has no split state to reserve against.
+        assert!(
+            write_pending(&mut file, &job, 0, &mut pending, false)
+                .await
+                .is_err()
+        );
+        assert_eq!(job.record.read().await.chunks[0].written, 0);
+        write_pending(&mut file, &job, 0, &mut pending, true)
+            .await
+            .unwrap();
+        assert!(pending.is_empty());
+        assert_eq!(job.record.read().await.chunks[0].written, 3);
+        assert_eq!(std::fs::read(&job.part_path).unwrap(), b"abc");
+        manager.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn fixed_write_failures_preserve_offsets_and_buffer() {
+    let (_root, manager, job) = staged_job().await;
+    fs::write(&job.part_path, b"old").await.unwrap();
+    let mut file = fs::File::open(&job.part_path).await.unwrap(); // read-only
+    for (key, bytes) in [(1, b"abc".as_slice()), (0, b"abcd"), (0, b"abc")] {
+        let mut pending = BytesMut::from(bytes);
+        assert!(
+            write_pending(&mut file, &job, key, &mut pending, true)
+                .await
+                .is_err()
+        );
+        assert_eq!(pending.as_ref(), bytes);
+        assert_eq!(job.record.read().await.chunks[0].written, 0);
+        assert_eq!(std::fs::read(&job.part_path).unwrap(), b"old");
+    }
     manager.shutdown().await.unwrap();
 }
 
